@@ -33,4 +33,7 @@ pub struct Run {
     pub integrations: Vec<crate::integration::IntegrationAttempt>,
     #[serde(default)]
     pub validation_reports: Vec<crate::validation::ValidationReport>,
+    /// Remote branch and pull request identity of the verified delivery.
+    #[serde(default)]
+    pub publication: Option<crate::publication::Publication>,
 }

@@ -84,6 +84,17 @@ enum Commands {
         #[arg(long)]
         verifier: Option<PathBuf>,
     },
+    /// Push the verified integration branch and open or reconcile its pull request.
+    /// Merging and deployment stay disabled unless the project configures them.
+    Publish {
+        id: String,
+        /// Simulated GitHub state file (no network access).
+        #[arg(long, conflicts_with = "gh")]
+        fixture: Option<PathBuf>,
+        /// gh program used for real GitHub access (default: gh on PATH).
+        #[arg(long)]
+        gh: Option<PathBuf>,
+    },
     /// Show verified, failed and unable-to-verify criteria of the latest validation.
     Report { id: String },
     /// Read a recorded run, or list all run identities.
@@ -269,6 +280,17 @@ fn run() -> Result<()> {
                 );
             }
             return Ok(());
+        }
+        Commands::Publish { id, fixture, gh } => {
+            let host: Box<dyn kiln::publication::PullRequestHost> = match fixture {
+                Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
+                    &engine.repository.join(path),
+                )),
+                None => Box::new(kiln::publication::GitHubPullRequests {
+                    program: gh.unwrap_or_else(|| "gh".into()),
+                }),
+            };
+            serde_json::to_value(engine.publish(&id, host.as_ref())?)?
         }
         Commands::Report { id } => {
             let run = engine.inspect(&id)?;
