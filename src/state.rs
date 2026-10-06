@@ -36,4 +36,7 @@ pub struct Run {
     /// Remote branch and pull request identity of the verified delivery.
     #[serde(default)]
     pub publication: Option<crate::publication::Publication>,
+    /// Progress comments reflected back to imported GitHub issues.
+    #[serde(default)]
+    pub synchronization: Option<crate::synchronization::Synchronization>,
 }

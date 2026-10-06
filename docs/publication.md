@@ -35,3 +35,28 @@ instead of creating a duplicate, and return immediately once the same commit is
 GitHub access uses `gh api` (`--gh PATH` selects the program). `--fixture github.json`
 simulates GitHub with `{"pull_requests":[...], "interrupt":"before_create"|"after_create"}`
 for offline tests; `interrupt` fails the next publication once at that point.
+
+## Synchronizing progress to imported issues
+
+`kiln sync RUN` reflects recorded progress in one Kiln-owned progress comment
+(marked `<!-- kiln:progress run=RUN ticket=ID -->`) on every imported issue. Issue
+titles, bodies and other comments are never modified.
+
+States are derived only from recorded results: `not-started`, `blocked` (unintegrated
+prerequisites, blocked integration or exhausted correction), `failed`, `in-progress`
+(an agent exit or a pushed branch is never completion), `awaiting-validation`,
+`validation-failed`, `unable-to-verify`, `verified` (not yet published),
+`verified-on-pull-request` (links the PR, its validation evidence and the commit; not
+merged) and `merged` (the verified commit is reachable from the remote target branch,
+the only state reported as completed).
+
+`Run.synchronization` records per issue the state, comment id, confirmed body hash and
+a pending hash written before every remote write. Retries adopt an existing marked
+comment instead of posting a duplicate, and unchanged progress writes nothing. An
+issue edited since import is surfaced as divergence (the approved repository spec
+stays authoritative); a Kiln comment edited on GitHub is surfaced as a `conflict`, is
+not overwritten, and makes the command exit non-zero.
+
+GitHub access uses `gh api` (`--gh PATH`); `--fixture github.json` simulates issues with
+`{"issues":[{repository, number, title, body, comments:[{id, body}]}],
+"interrupt":"before_comment"|"after_comment"}`.

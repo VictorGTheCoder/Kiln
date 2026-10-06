@@ -97,6 +97,7 @@ impl Engine {
             integrations: Vec::new(),
             validation_reports: Vec::new(),
             publication: None,
+            synchronization: None,
         };
         self.save(&run)?;
         Ok(run)

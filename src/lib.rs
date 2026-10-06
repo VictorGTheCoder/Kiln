@@ -24,3 +24,5 @@ pub mod integration;
 pub mod validation;
 
 pub mod publication;
+
+pub mod synchronization;
