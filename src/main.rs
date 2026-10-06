@@ -51,6 +51,15 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Review an exact implementation commit in independent contexts.
+    Review {
+        id: String,
+        ticket: String,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Read a recorded run, or list all run identities.
     Inspect { id: Option<String> },
     /// Show recorded state on a loopback-only local web server.
@@ -134,6 +143,28 @@ fn run() -> Result<()> {
                 .is_none_or(|s| s.status != "implemented")
             {
                 anyhow::bail!("implementation failed; inspect recorded session evidence");
+            }
+            return Ok(());
+        }
+        Commands::Review {
+            id,
+            ticket,
+            fixture,
+            codex,
+        } => {
+            let agent: Box<dyn kiln::review::ReviewAgent> = if let Some(path) = fixture {
+                Box::new(kiln::review::FixtureReviewAgent::load(
+                    &engine.repository.join(path),
+                )?)
+            } else {
+                Box::new(kiln::codex::CodexAdapter::new(
+                    kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
+                ))
+            };
+            let run = engine.review_ticket(&id, &ticket, agent.as_ref())?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            if !run.reviews.last().is_some_and(|r| r.passed) {
+                anyhow::bail!("review rejected; inspect axis findings and executable evidence");
             }
             return Ok(());
         }

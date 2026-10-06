@@ -24,5 +24,7 @@ pub struct Run {
     #[serde(default)]
     pub integration_branch: Option<String>,
     #[serde(default)]
+    pub reviews: Vec<crate::review::ReviewSession>,
+    #[serde(default)]
     pub sessions: Vec<crate::execution::ImplementationSession>,
 }

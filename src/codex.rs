@@ -86,6 +86,18 @@ impl CodexAdapter {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
     }
+    /// Structured response at the caller's exact, isolated repository snapshot.
+    pub fn structured_at<T: serde::de::DeserializeOwned>(
+        &self,
+        worktree: &Path,
+        policy: &IsolationPolicy,
+        prompt: &str,
+    ) -> Result<(T, Observation)> {
+        let observation = self.invoke(worktree, policy, prompt)?;
+        let value = serde_json::from_str(&observation.message)
+            .context("Codex final response must be the requested JSON value")?;
+        Ok((value, observation))
+    }
     pub fn invoke(
         &self,
         worktree: &Path,
@@ -370,9 +382,9 @@ impl CodexPlanningAgent {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let result = self.adapter.invoke(&repo, &self.isolation, prompt)?;
-        serde_json::from_str(&result.message)
-            .context("Codex final response must be the requested JSON value")
+        self.adapter
+            .structured_at(&repo, &self.isolation, prompt)
+            .map(|(value, _)| value)
     }
 }
 impl crate::planning::PlanningAgent for CodexPlanningAgent {
@@ -402,5 +414,21 @@ impl CodexConfig {
             value.installation = path;
         }
         Ok(value)
+    }
+}
+
+impl crate::review::ReviewAgent for CodexAdapter {
+    fn redact_output(&self, text: &str) -> String {
+        ImplementationAgent::redact_output(self, text)
+    }
+    fn review(
+        &self,
+        request: &crate::review::ReviewRequest,
+    ) -> Result<crate::review::ReviewResult> {
+        let prompt=format!("{}\nReturn only a JSON object: outcome (approved, rejected, unable-to-verify), findings (objects code, message, evidence, required), evidence (observed concrete behavior), log, acceptance_checks (optional authorized argv arrays; do not invent passing evidence). Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?);
+        let (mut review, result): (crate::review::ReviewResult, Observation) =
+            self.structured_at(&request.worktree, &request.isolation, &prompt)?;
+        review.log = serde_json::to_string(&result)?;
+        Ok(review)
     }
 }
