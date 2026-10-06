@@ -66,6 +66,42 @@ fn scenario(failure: Option<&str>) {
             .unwrap()
             .contains(secret));
     }
+    if failure == Some("secret-outcome") {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let mut server = Command::new(env!("CARGO_BIN_EXE_kiln"))
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .current_dir(repo)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        struct Stop(std::process::Child);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let stdout = server.stdout.take().unwrap();
+        let _stop = Stop(server);
+        let mut address = String::new();
+        BufReader::new(stdout).read_line(&mut address).unwrap();
+        let mut stream = std::net::TcpStream::connect(
+            address
+                .trim()
+                .strip_prefix("Kiln web view: http://")
+                .unwrap(),
+        )
+        .unwrap();
+        write!(
+            stream,
+            "GET /api/runs/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.contains("REDACTED"));
+        assert!(!response.contains(secret));
+    }
     let inspected = cli(&["inspect", id]);
     assert!(!String::from_utf8_lossy(&inspected.stdout).contains(secret));
     let state: Value = serde_json::from_slice(&out.stdout).unwrap();
