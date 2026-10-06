@@ -113,6 +113,9 @@ impl CodexAdapter {
         policy: &IsolationPolicy,
         prompt: &str,
     ) -> Result<Observation> {
+        if self.stopped.load(Ordering::SeqCst) {
+            bail!("Codex session stopped");
+        }
         if policy.network != "allow-all" {
             bail!("Codex requires explicit isolation.network=allow-all model endpoint access");
         }
@@ -168,7 +171,7 @@ impl CodexAdapter {
             });
         }
         let mut command =
-            Sandbox::command(policy, worktree, "agent", &self.config.argv(), &mounts)?;
+            Sandbox::supervised_command(policy, worktree, "agent", &self.config.argv(), &mounts)?;
         use std::os::unix::process::CommandExt;
         command
             .process_group(0)

@@ -91,6 +91,7 @@ fn timeout_stops_descendants_and_returns_promptly() {
 }
 #[test]
 fn explicit_stop_cancels_running_session() {
+    let start = std::time::Instant::now();
     let (dir, adapter, policy) = fake("sleep 60 &\nwait", 60);
     let stop = adapter.stop_handle();
     std::thread::spawn(move || {
@@ -102,6 +103,22 @@ fn explicit_stop_cancels_running_session() {
         .unwrap_err()
         .to_string()
         .contains("stopped"));
+    assert!(start.elapsed() < std::time::Duration::from_secs(4));
+}
+
+#[test]
+fn stop_before_invocation_does_not_start_provider() {
+    let (dir, adapter, policy) = fake("touch started; sleep 60", 60);
+    adapter.stop();
+    fs::remove_file(&adapter.config.installation).unwrap();
+    let start = std::time::Instant::now();
+    assert!(adapter
+        .invoke(dir.path(), &policy, "test")
+        .unwrap_err()
+        .to_string()
+        .contains("stopped"));
+    assert!(start.elapsed() < std::time::Duration::from_secs(4));
+    assert!(!dir.path().join("started").exists());
 }
 
 #[test]
@@ -176,4 +193,55 @@ fn cli_rejects_successful_provider_without_a_git_change() {
         run["sessions"][0]["failure"],
         "agent produced no usable Git change"
     );
+}
+
+#[test]
+fn stop_tears_down_descendants_that_escape_the_process_group() {
+    let (dir, adapter, policy) = fake(
+        "setsid sh -c 'touch ready; sleep 2; touch escaped' & wait",
+        60,
+    );
+    let root = dir.path().to_owned();
+    let stop = adapter.stop_handle();
+    let trigger = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !root.join("ready").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "provider never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let start = std::time::Instant::now();
+    assert!(adapter
+        .invoke(dir.path(), &policy, "test")
+        .unwrap_err()
+        .to_string()
+        .contains("stopped"));
+    trigger.join().unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(!dir.path().join("escaped").exists());
+}
+
+#[test]
+fn stop_during_sandbox_startup_returns_promptly() {
+    for _ in 0..20 {
+        let (dir, adapter, policy) = fake("sleep 5 & wait", 60);
+        let stop = adapter.stop_handle();
+        let trigger = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        assert!(adapter
+            .invoke(dir.path(), &policy, "test")
+            .unwrap_err()
+            .to_string()
+            .contains("stopped"));
+        trigger.join().unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
 }
