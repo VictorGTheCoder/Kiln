@@ -52,7 +52,7 @@ fn scenario(failure: Option<&str>) {
         .status
         .success());
     fs::write(repo.join("original.txt"), "developer dirty").unwrap();
-    fs::write(repo.join("agent.json"),json!({"files":if failure == Some("empty") {json!({})} else {json!({"feature.txt":"implemented\n"})},"outcome":if failure == Some("agent") {"failed"} else {"completed"},"log":secret}).to_string()).unwrap();
+    fs::write(repo.join("agent.json"),json!({"files":if failure == Some("empty") {json!({})} else {json!({"feature.txt":"implemented\n"})},"outcome":if failure == Some("secret-outcome") {secret} else if failure == Some("agent") {"failed"} else {"completed"},"log":secret}).to_string()).unwrap();
     let out = cli(&["implement", id, "a", "--fixture", "agent.json"]);
     assert_eq!(
         out.status.success(),
@@ -66,6 +66,8 @@ fn scenario(failure: Option<&str>) {
             .unwrap()
             .contains(secret));
     }
+    let inspected = cli(&["inspect", id]);
+    assert!(!String::from_utf8_lossy(&inspected.stdout).contains(secret));
     let state: Value = serde_json::from_slice(&out.stdout).unwrap();
     let session = &state["sessions"][0];
     if failure == Some("policy") {
@@ -117,4 +119,9 @@ fn failed_checks_agent_failures_and_empty_results_never_release_dependents() {
 #[test]
 fn authorized_interpreter_observes_network_denial_private_home_and_role_secrets() {
     scenario(Some("policy"));
+}
+
+#[test]
+fn provider_outcome_secret_is_absent_from_durable_and_inspected_evidence() {
+    scenario(Some("secret-outcome"));
 }

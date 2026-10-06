@@ -244,7 +244,7 @@ impl Engine {
                 &["diff", "--cached", "--binary", &session.base_commit],
             )?;
             let result = agent_result?;
-            session.agent_outcome = Some(result.outcome.clone());
+            session.agent_outcome = Some(run.config.isolation.redact(&result.outcome));
             session.agent_log = result.log;
             if result.outcome != "completed" {
                 bail!("agent outcome: {}", result.outcome);
