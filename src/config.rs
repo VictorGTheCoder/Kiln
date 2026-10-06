@@ -18,6 +18,11 @@ impl ProjectConfig {
     pub fn load(path: &Path, repository: &Path) -> Result<Self> {
         let config: Self = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("read project configuration {}", path.display()))?)
             .context("configuration must be JSON with build, test, startup argv arrays and acceptance_criteria")?;
+        if let Some(limit) = config.extensions.get("correction_cycles") {
+            if limit.as_u64().is_none_or(|n| n == 0) {
+                bail!("correction_cycles must be a positive integer");
+            }
+        }
         if config.acceptance_criteria.is_empty()
             || config
                 .acceptance_criteria

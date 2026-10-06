@@ -449,3 +449,20 @@ impl crate::review::ReviewAgent for CodexAdapter {
         Ok(review)
     }
 }
+
+impl crate::correction::CorrectionAgent for CodexAdapter {
+    fn prepare_redaction(&self) -> Result<()> {
+        CodexAdapter::prepare_redaction(self)
+    }
+    fn redact_output(&self, s: &str) -> String {
+        ImplementationAgent::redact_output(self, s)
+    }
+    fn correct(&self, r: &crate::correction::CorrectionRequest) -> Result<AgentResult> {
+        let prompt=format!("Correct only this ticket's unresolved findings and failing checks using the frozen specs. Use TDD vertical slices. Do not stage, commit, integrate or modify Git metadata. Rust owns checks and fresh review.\n{}",serde_json::to_string_pretty(r)?);
+        let o = self.invoke(&r.worktree, &r.isolation, &prompt)?;
+        Ok(AgentResult {
+            outcome: "completed".into(),
+            log: serde_json::to_string(&o)?,
+        })
+    }
+}

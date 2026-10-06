@@ -60,6 +60,14 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    Correct {
+        id: String,
+        ticket: String,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Read a recorded run, or list all run identities.
     Inspect { id: Option<String> },
     /// Show recorded state on a loopback-only local web server.
@@ -165,6 +173,35 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&run)?);
             if !run.reviews.last().is_some_and(|r| r.passed) {
                 anyhow::bail!("review rejected; inspect axis findings and executable evidence");
+            }
+            return Ok(());
+        }
+        Commands::Correct {
+            id,
+            ticket,
+            fixture,
+            codex,
+        } => {
+            let run = if let Some(path) = fixture {
+                let a =
+                    kiln::correction::FixtureCorrectionAgent::load(&engine.repository.join(path))?;
+                engine.correct_ticket(&id, &ticket, &a, &a)?
+            } else {
+                let a = kiln::codex::CodexAdapter::new(kiln::codex::CodexConfig::from_project(
+                    &engine.inspect(&id)?.config,
+                    codex,
+                )?);
+                engine.correct_ticket(&id, &ticket, &a, &a)?
+            };
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            let session = run
+                .sessions
+                .iter()
+                .rev()
+                .find(|s| s.ticket_id == ticket)
+                .ok_or_else(|| anyhow::anyhow!("missing session"))?;
+            if !engine.review_gate(&run, session)? {
+                anyhow::bail!("correction blocked; inspect cycle history");
             }
             return Ok(());
         }

@@ -92,6 +92,7 @@ impl Engine {
             imported_issues: Vec::new(),
             integration_branch: None,
             sessions: Vec::new(),
+            corrections: Vec::new(),
             reviews: Vec::new(),
         };
         self.save(&run)?;
