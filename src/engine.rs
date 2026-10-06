@@ -101,6 +101,7 @@ impl Engine {
             decisions: Vec::new(),
             spec_revisions: Vec::new(),
             replans: Vec::new(),
+            spec_replans: Vec::new(),
             recoveries: Vec::new(),
             synchronization: None,
         };
@@ -161,7 +162,12 @@ impl Engine {
         self.transact(&run.id, |latest| {
             for session in run.sessions.iter().filter(|s| s.ticket_id == ticket) {
                 if let Some(existing) = latest.sessions.iter_mut().find(|s| s.id == session.id) {
+                    // A spec replan superseded this session meanwhile: never revive it.
+                    let superseded = existing.status == "superseded";
                     *existing = session.clone();
+                    if superseded {
+                        existing.status = "superseded".into();
+                    }
                 } else { latest.sessions.push(session.clone()); }
             }
             for review in run.reviews.iter().filter(|r| r.ticket_id == ticket) {

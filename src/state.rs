@@ -47,6 +47,9 @@ pub struct Run {
     /// Bounded replanning attempts after exhausted correction cycles.
     #[serde(default)]
     pub replans: Vec<crate::replanning::Replanning>,
+    /// Explicit replanning operations that applied revised approved specs.
+    #[serde(default)]
+    pub spec_replans: Vec<crate::spec_replanning::SpecReplan>,
     /// Decisions made each time the run was resumed after an interruption.
     #[serde(default)]
     pub recoveries: Vec<crate::recovery::Recovery>,
@@ -64,7 +67,12 @@ pub struct SpecRevision {
     pub base_sha256: String,
     pub content: String,
     pub content_sha256: String,
+    /// Decision that produced the revision (empty for explicit spec replanning).
+    #[serde(default)]
     pub decision_id: String,
+    /// Explicit spec replanning that captured the revision, if any.
+    #[serde(default)]
+    pub replan_id: Option<String>,
     /// verified (effective) | rejected (failed independent reverification)
     pub status: String,
 }
@@ -90,5 +98,13 @@ impl Run {
             })
             .collect()
     }
-
+    /// Current input version: the latest verified spec revision (0 = frozen specs).
+    pub fn input_version(&self) -> u32 {
+        self.spec_revisions
+            .iter()
+            .filter(|r| r.status == "verified")
+            .map(|r| r.version)
+            .max()
+            .unwrap_or(0)
+    }
 }

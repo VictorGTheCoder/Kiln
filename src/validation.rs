@@ -110,6 +110,9 @@ pub struct ValidationReport {
     pub checks: Vec<CheckResult>,
     pub criteria: Vec<CriterionResult>,
     pub failure: Option<String>,
+    /// Input version (spec revision) the report validated; 0 = frozen specs.
+    #[serde(default)]
+    pub input_version: u32,
 }
 impl ValidationReport {
     /// Criteria grouped by outcome, with their supporting evidence.
@@ -329,7 +332,9 @@ impl Engine {
     pub fn validate(&self, id: &str, verifier: &VerifierChecks) -> Result<crate::Run> {
         let mut run = self.inspect(id)?;
         let settings = ValidationSettings::from_config(&run.config)?;
-        let requirements = requirements(&run.specs);
+        // Validate against the current input version (frozen specs plus verified revisions).
+        let specs = run.effective_specs();
+        let requirements = requirements(&specs);
         for check in settings.workflows.iter().chain(&verifier.acceptance_checks) {
             if !requirements.iter().any(|r| r.id == check.criterion) {
                 bail!(
@@ -366,6 +371,7 @@ impl Engine {
             checks: vec![],
             criteria: vec![],
             failure: None,
+            input_version: run.input_version(),
         };
         let mut evidence: Vec<(String, Evidence)> = Vec::new();
         let mut global = Vec::new();
@@ -434,7 +440,7 @@ impl Engine {
             }
         }
         for requirement in requirements {
-            let spec = run.specs.iter().find(|s| s.path == requirement.spec_path);
+            let spec = specs.iter().find(|s| s.path == requirement.spec_path);
             let items: Vec<Evidence> = evidence
                 .iter()
                 .filter(|(id, _)| *id == requirement.id)

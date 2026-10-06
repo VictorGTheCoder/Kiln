@@ -80,6 +80,19 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Apply revised approved specs explicitly: capture them as a new input version,
+    /// independently reverify the revised plan, invalidate affected work and evidence,
+    /// and keep unaffected work. Spec edits never reach a run without this operation.
+    Replan {
+        id: String,
+        /// Approved spec (a frozen input of the run) whose current content to apply.
+        #[arg(long, required = true)]
+        spec: Vec<PathBuf>,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Integrate an exact reviewed change and verify the combined result.
     Integrate {
         id: String,
@@ -302,6 +315,34 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run.decisions.last().is_none_or(|d| d.outcome != "resolved") {
                 anyhow::bail!("decision not adopted; inspect the recorded findings");
+            }
+            return Ok(());
+        }
+        Commands::Replan {
+            id,
+            spec,
+            fixture,
+            codex,
+        } => {
+            let run = if let Some(path) = fixture {
+                let agent = kiln::spec_replanning::FixtureSpecReplanning::load(
+                    &engine.repository.join(path),
+                )?;
+                engine.replan_specs(&id, &spec, &agent)?
+            } else {
+                let config = engine.inspect(&id)?.config;
+                let agent = kiln::codex::CodexPlanningAgent {
+                    adapter: kiln::codex::CodexAdapter::new(
+                        kiln::codex::CodexConfig::from_project(&config, codex)?,
+                    ),
+                    repository: engine.repository.clone(),
+                    isolation: config.isolation,
+                };
+                engine.replan_specs(&id, &spec, &agent)?
+            };
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            if run.spec_replans.last().is_none_or(|r| r.outcome != "replanned") {
+                anyhow::bail!("replan not adopted; inspect the recorded findings");
             }
             return Ok(());
         }

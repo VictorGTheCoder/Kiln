@@ -243,6 +243,7 @@ impl Engine {
                     content: proposed.content.clone(),
                     content_sha256: sha.clone(),
                     decision_id: decision_id.clone(),
+                    replan_id: None,
                     status: String::new(),
                 });
                 spec.content = proposed.content.clone();

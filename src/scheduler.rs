@@ -416,6 +416,18 @@ impl Engine {
         events: &mpsc::Sender<Event>,
     ) -> Result<()> {
         let providers = gate.providers;
+        // Retained dependent work after a spec replan: revalidate, never re-implement.
+        if crate::spec_replanning::pending_revalidation(&self.inspect(id)?, ticket).is_some() {
+            self.checkpoint(id, gate)?;
+            let revalidation = self.revalidate_ticket(id, ticket)?;
+            if revalidation.outcome != "revalidated" {
+                bail!(
+                    "revalidation of retained work failed: {}",
+                    revalidation.failure.unwrap_or_default()
+                );
+            }
+            return Ok(());
+        }
         // A replanning attempt recorded before a resume still counts.
         let mut replanned = self
             .inspect(id)?
@@ -542,6 +554,7 @@ fn integrated(run: &Run, ticket: &str) -> bool {
             .integrations
             .iter()
             .any(|i| i.ticket_id == ticket && i.status == "integrated")
+        && crate::spec_replanning::pending_revalidation(run, ticket).is_none()
 }
 fn find<'a>(state: &'a mut SchedulerState, ticket: &str) -> &'a mut TicketSchedule {
     state

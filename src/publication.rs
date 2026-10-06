@@ -370,7 +370,7 @@ fn describe(run: &Run, report: &ValidationReport, settings: &PublicationSettings
         }
     }
     body.push_str("\n## Specifications\n\n");
-    for spec in &run.specs {
+    for spec in &run.effective_specs() {
         body.push_str(&format!(
             "- `{}` (sha256 `{}`{})\n",
             spec.path,
@@ -474,6 +474,13 @@ impl Engine {
             bail!(
                 "latest validation is {}; only a verified delivery can be published",
                 report.outcome
+            );
+        }
+        if report.input_version != run.input_version() {
+            bail!(
+                "latest validation covers input version {} but approved specs are at input version {}; run and validate the replanned work before publishing",
+                report.input_version,
+                run.input_version()
             );
         }
         let tip = git(
