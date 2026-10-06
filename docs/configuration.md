@@ -250,3 +250,48 @@ Only the executable, optional companion and a private ephemeral copy of auth.jso
 The adapter observes JSONL thread identity, completed messages, actionable provider/capability errors and token usage. Unknown event kinds are tolerated; malformed JSONL and missing completed turns fail. Subscription monetary cost is null, not zero. Implementation logs contain a serialized observation with `usage` and `cost`. Zero exit status never proves ticket completion: the engine requires a usable Git diff and independently passing configured checks. Adapted implement-spec/TDD instructions assign exactly one ticket; Rust owns staging, commits and progression.
 
 Planning generation and verification use separate fresh Codex invocations in disposable clones. `CodexPlanningAgent::structured<T>` also supports independently validated structured review responses. `CodexAdapter::invoke` is the shared launch/observation/error boundary and `stop_handle`/`stop` cancel an invocation. Timeout or cancellation terminates the sandbox process group; the PID namespace also contains descendants. There is no host execution fallback.
+
+## Independent review gate
+
+```sh
+kiln --repo /path/to/project review RUN-ID TICKET-ID --fixture review-agent.json
+kiln --repo /path/to/project review RUN-ID TICKET-ID --codex /absolute/path/to/codex
+```
+
+Standards and Spec each receive a fresh context, relevant frozen specs, ticket,
+repository standards committed at the implementation base (root/nested AGENTS.md,
+CLAUDE.md, CONTRIBUTING.md, CODE_STYLE.md and standards.md), concrete binary diff, implementation check evidence and
+exact commit identity. Each provider invocation runs in a separate disposable
+clone checked out at that commit, rather than the original checkout's HEAD.
+`CodexAdapter::structured_at` launches structured responses at the supplied
+snapshot; the Codex review adapter uses it independently for both axes.
+
+A deterministic fixture supplies both simulated axis results:
+
+```json
+{
+  "standards": {"outcome":"approved", "findings":[], "evidence":"Observed changed files follow AGENTS.md", "log":""},
+  "spec": {"outcome":"approved", "findings":[], "evidence":"Observed acceptance behavior in the concrete diff", "log":"", "acceptance_checks":[]}
+}
+```
+
+Outcomes are `approved`, `rejected`, or `unable-to-verify`. Findings have `code`,
+`message`, `evidence`, and `required` (defaults to true). Required findings block
+approval; corrections require a fresh review of the new commit. Agent approval
+never overrides missing observed evidence, unavailable verification, failed
+implementation checks, or a failed required build/test check. Engine build and
+test checks execute independently in each reviewed snapshot and retain actual
+commands, exit codes, stdout and stderr. Optional verifier `acceptance_checks`
+are argv arrays executed as the test role only when explicitly authorized by the
+project isolation policy. Their actual results are retained and failures block
+the gate. Reviewers may propose further tests as findings; edits to reviewed
+content are rejected and must pass through implementation and fresh review.
+
+`Run.reviews` retains both outcomes, findings, provider logs, context identities,
+reviewed commit/diff and executable evidence. `.kiln/contexts` retains the exact
+review inputs. The CLI exits unsuccessfully on a rejected gate, preserving state
+for `inspect` and the web API. `Engine::review_gate(run, session)` is the public
+integration/correction seam: it requires the latest review of that session to
+approve its exact commit, and checks that its worktree is clean and HEAD still
+matches. Uncommitted edits and later commits invalidate approval. Review does not
+change the implementation session status or merge commits.
