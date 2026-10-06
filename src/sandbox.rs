@@ -27,7 +27,13 @@ impl IsolationPolicy {
             bail!("isolation.runtime must explicitly authorize system interpreters and tools");
         }
         for (name, roles) in &self.secrets {
-            if name.is_empty()
+            if matches!(
+                name.as_str(),
+                "PATH" | "HOME" | "ENV" | "BASH_ENV" | "SHELLOPTS" | "TMPDIR"
+            ) || name.starts_with("LD_")
+                || name.starts_with("GIT_")
+                || name.starts_with("BWRAP_")
+                || name.is_empty()
                 || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
                 || roles
                     .iter()
