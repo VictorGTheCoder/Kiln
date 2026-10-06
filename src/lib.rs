@@ -21,6 +21,7 @@ pub mod correction;
 
 pub mod integration;
 
+pub mod scheduler;
 pub mod validation;
 
 pub mod publication;

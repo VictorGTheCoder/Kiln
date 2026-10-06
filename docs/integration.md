@@ -23,3 +23,18 @@ An interrupted process may leave the integration lock and a `running` attempt. I
 its candidate and durable state before removing a stale lock; never infer integration
 success from the presence of a Git commit alone. Recovery scheduling belongs to the
 run controller. Candidate worktrees are retained for evidence and run-level cleanup.
+
+## Scheduling a run
+
+`kiln run RUN --fixture scenario.json` (or `--codex /path/to/codex`) drives every
+accepted ticket: implement in a fresh context and separate worktree, review, bounded
+correction, then serialized integration against the current integration branch. A
+ticket starts only after every `blocked_by` prerequisite (across specs) is integrated
+and verified. At most `implementation_concurrency` tickets (project configuration,
+default 3) are in their implementation phase at once; integration is serialized
+separately. A blocked ticket keeps its descendants waiting while independent tickets
+continue; the run ends `blocked` (non-zero exit) or `awaiting_validation`.
+
+`Run.scheduler` records `active` tickets, `peak_active`, and per-ticket `state`,
+`waiting_on` prerequisites and `blocker`. It is updated at every transition and is
+visible through `kiln inspect RUN` and the local web view while the run progresses.

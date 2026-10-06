@@ -29,6 +29,12 @@ impl Drop for Lock {
         let _ = fs::remove_file(&self.0);
     }
 }
+/// Replace an attempt by identity; other tickets' records may follow it.
+fn record(run: &mut Run, attempt: &IntegrationAttempt) {
+    if let Some(existing) = run.integrations.iter_mut().find(|i| i.id == attempt.id) {
+        *existing = attempt.clone();
+    }
+}
 struct ConflictCorrection<'a>(&'a dyn CorrectionAgent);
 impl CorrectionAgent for ConflictCorrection<'_> {
     fn prepare_redaction(&self) -> Result<()> {
@@ -106,7 +112,7 @@ impl Engine {
             failure: None,
         };
         run.integrations.push(attempt.clone());
-        self.save(&run)?;
+        run = self.save_ticket(&run, ticket_id)?;
         let result = (|| -> Result<()> {
             git(
                 &self.repository,
@@ -141,8 +147,8 @@ impl Engine {
                 }
                 // Preserve conflict evidence before handing control to bounded correction.
                 attempt.status = "conflicted".into();
-                *run.integrations.last_mut().unwrap() = attempt.clone();
-                self.save(&run)?;
+                record(&mut run, &attempt);
+                run = self.save_ticket(&run, ticket_id)?;
                 let (agent, reviewer) = provider.context(
                     "integration conflict requires correction provider; branch remains unchanged",
                 )?;
@@ -157,10 +163,16 @@ impl Engine {
                 correction.verification_passed = false;
                 correction.failure=Some(format!("Resolve integration conflicts against {base}: {}. Preserve both tickets and rerun verification.",attempt.conflicts.join(", ")));
                 correction.checks.clear();
+                let correction_id = correction.id.clone();
                 run.sessions.push(correction);
-                self.save(&run)?;
+                run = self.save_ticket(&run, ticket_id)?;
                 run = self.correct_ticket(id, ticket_id, &ConflictCorrection(agent), reviewer)?;
-                let corrected = run.sessions.last().context("missing corrected session")?;
+                // Concurrent sessions may have been appended; target the exact identity.
+                let corrected = run
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == correction_id)
+                    .context("missing corrected session")?;
                 if !self.review_gate(&run, corrected)? {
                     bail!("conflict correction did not pass fresh review");
                 }
@@ -216,8 +228,8 @@ impl Engine {
             // Persist the verified candidate before publishing its Git reference.
             // Resume can reconcile this exact intent against the integration ref.
             attempt.status = "verified".into();
-            *run.integrations.last_mut().unwrap() = attempt.clone();
-            self.save(&run)?;
+            record(&mut run, &attempt);
+            run = self.save_ticket(&run, ticket_id)?;
             git(
                 &self.repository,
                 &[
@@ -231,7 +243,11 @@ impl Engine {
             attempt.status = "integrated".into();
             run.sessions[index].status = "integrated".into();
             if attempt.session_id != original.id {
-                run.sessions.last_mut().unwrap().status = "integrated".into();
+                if let Some(corrected) =
+                    run.sessions.iter_mut().find(|s| s.id == attempt.session_id)
+                {
+                    corrected.status = "integrated".into();
+                }
             }
             Ok(())
         })();
@@ -243,8 +259,8 @@ impl Engine {
             }
             attempt.failure = Some(failure);
         }
-        *run.integrations.last_mut().unwrap() = attempt;
-        self.save(&run)?;
+        record(&mut run, &attempt);
+        run = self.save_ticket(&run, ticket_id)?;
         Ok(run)
     }
 }

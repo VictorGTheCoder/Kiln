@@ -81,6 +81,7 @@ impl Engine {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let id = format!("run-{}-{}", now.as_nanos(), std::process::id());
         let run = Run {
+            scheduler: None,
             schema_version: 1,
             id,
             repository: self.repository.to_string_lossy().into_owned(),
@@ -110,20 +111,55 @@ impl Engine {
         fs::create_dir_all(self.runs_dir())
             .context("cannot create durable state; check repository write access")?;
         let target = self.runs_dir().join(format!("{}.json", run.id));
-        let staging = self
-            .runs_dir()
-            .join(format!("{}.{}.tmp", run.id, std::process::id()));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)
-            .context("create atomic state staging file")?;
+        let mut staging = tempfile::NamedTempFile::new_in(self.runs_dir())?;
+        let file = staging.as_file_mut();
         let serialized = serde_json::to_string_pretty(run)?;
         file.write_all(run.config.isolation.redact(&serialized).as_bytes())?;
         file.sync_all()?;
-        fs::rename(&staging, target)?;
+        staging.persist(target).map_err(|e| e.error)?;
         fs::File::open(self.runs_dir())?.sync_all()?;
         Ok(())
+    }
+    /// Short process-safe reload/mutate/save transaction. Never run providers here.
+    pub fn transact<T>(&self, id: &str, mutate: impl FnOnce(&mut Run) -> Result<T>) -> Result<T> {
+        let _lock = self.lock_run(id, "state")?;
+        let mut run = self.inspect(id)?;
+        let result = mutate(&mut run)?;
+        self.save(&run)?;
+        Ok(result)
+    }
+    pub fn lock_run(&self, id: &str, purpose: &str) -> Result<RunLock> {
+        validate_id(id)?;
+        fs::create_dir_all(self.runs_dir())?;
+        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+            .open(self.runs_dir().join(format!("{id}.{purpose}.lock")))?;
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(RunLock(file))
+    }
+    /// Apply only one ticket's changed records to current durable state.
+    pub(crate) fn save_ticket(&self, run: &Run, ticket: &str) -> Result<Run> {
+        self.transact(&run.id, |latest| {
+            for session in run.sessions.iter().filter(|s| s.ticket_id == ticket) {
+                if let Some(existing) = latest.sessions.iter_mut().find(|s| s.id == session.id) {
+                    *existing = session.clone();
+                } else { latest.sessions.push(session.clone()); }
+            }
+            for review in run.reviews.iter().filter(|r| r.ticket_id == ticket) {
+                if !latest.reviews.iter().any(|r| r.id == review.id) { latest.reviews.push(review.clone()); }
+            }
+            for correction in run.corrections.iter().filter(|r| r.ticket_id == ticket) {
+                if !latest.corrections.iter().any(|r| r.id == correction.id) { latest.corrections.push(correction.clone()); }
+            }
+            for integration in run.integrations.iter().filter(|r| r.ticket_id == ticket) {
+                if let Some(existing) = latest.integrations.iter_mut().find(|r| r.id == integration.id) {
+                    *existing = integration.clone();
+                } else { latest.integrations.push(integration.clone()); }
+            }
+            Ok(latest.clone())
+        })
     }
     pub fn inspect(&self, id: &str) -> Result<Run> {
         validate_id(id)?;
@@ -163,4 +199,12 @@ fn validate_id(id: &str) -> Result<()> {
         bail!("invalid run identity; use an identity returned by prepare or inspect");
     }
     Ok(())
+}
+
+pub struct RunLock(fs::File);
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN); }
+    }
 }

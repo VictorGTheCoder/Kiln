@@ -190,7 +190,8 @@ impl Engine {
                 })
                 .cloned()
                 .collect();
-            let cycle_id = format!("{}-correction-{}", run.id, run.corrections.len() + 1);
+            // Session-scoped identity: concurrent tickets correct from independent snapshots.
+            let cycle_id = format!("{}-correction-{}", before.id, number + 1);
             let request = CorrectionRequest {
                 context_id: cycle_id.clone(),
                 ticket,
@@ -306,7 +307,7 @@ impl Engine {
             after = serde_json::from_str(&redact(&serde_json::to_string(&after)?))?;
             let no_progress = after.diff == before.diff;
             run.sessions[index] = after.clone();
-            self.save(&run)?;
+            run = self.save_ticket(&run, ticket_id)?;
             let review = if after.verification_passed {
                 run = self.review_ticket(id, ticket_id, reviewer)?;
                 run.reviews.last().cloned()
@@ -337,7 +338,7 @@ impl Engine {
                 &agent.redact_output(&run.config.isolation.redact(&serde_json::to_string(&cycle)?)),
             );
             run.corrections.push(serde_json::from_str(&safe)?);
-            self.save(&run)?;
+            run = self.save_ticket(&run, ticket_id)?;
             if approved || no_progress {
                 return Ok(run);
             }
