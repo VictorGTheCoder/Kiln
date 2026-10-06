@@ -17,4 +17,6 @@ pub struct Run {
     pub status: String,
     pub config: ProjectConfig,
     pub specs: Vec<FrozenSpec>,
+    #[serde(default)]
+    pub plan: Option<crate::planning::Plan>,
 }
