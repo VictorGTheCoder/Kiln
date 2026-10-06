@@ -62,6 +62,9 @@ impl Engine {
             }
             let content =
                 fs::read_to_string(&source).context("spec must be readable UTF-8 Markdown")?;
+            if config.isolation.redact(&content) != content {
+                bail!("approved spec contains a registered secret value; remove it before freezing inputs");
+            }
             if content.trim().is_empty() {
                 bail!("spec {} is empty", path.display());
             }
@@ -109,7 +112,8 @@ impl Engine {
             .create_new(true)
             .open(&staging)
             .context("create atomic state staging file")?;
-        file.write_all(&serde_json::to_vec_pretty(run)?)?;
+        let serialized = serde_json::to_string_pretty(run)?;
+        file.write_all(run.config.isolation.redact(&serialized).as_bytes())?;
         file.sync_all()?;
         fs::rename(&staging, target)?;
         fs::File::open(self.runs_dir())?.sync_all()?;

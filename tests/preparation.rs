@@ -210,3 +210,31 @@ fn preparation_rejects_command_outside_authorized_argv() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("denied unauthorized"));
 }
+
+#[test]
+fn preparation_rejects_registered_secret_literals_without_exposing_the_value() {
+    let repo = fixture();
+    let secret = "private-preparation-value-849203";
+    let base: Value =
+        serde_json::from_slice(&fs::read(repo.path().join("kiln.json")).unwrap()).unwrap();
+    for config_literal in [true, false] {
+        let mut config = base.clone();
+        config["isolation"]["secrets"] = json!({"KILN_PREPARATION_SECRET":["agent"]});
+        if config_literal {
+            config["public_note"] = json!(secret);
+        } else {
+            fs::write(repo.path().join("one.md"), secret).unwrap();
+        }
+        fs::write(repo.path().join("kiln.json"), config.to_string()).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_kiln"))
+            .current_dir(repo.path())
+            .env("KILN_PREPARATION_SECRET", secret)
+            .args(["prepare", "--config", "kiln.json", "--spec", "one.md"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("registered secret value"));
+        assert!(!error.contains(secret));
+    }
+}

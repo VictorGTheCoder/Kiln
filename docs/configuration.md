@@ -217,3 +217,9 @@ and recorded diff redact exact and JSON-escaped values before persistence or CLI
 observation. This does not prevent an authorized arbitrary program from encoding or
 exfiltrating its secret; do not authorize a secret to a program you do not trust.
 Secrets must not be supplied literally in argv, public configuration or frozen specs.
+
+Preparation rejects registered secret literals in public configuration or specs,
+retaining exact approved frozen inputs rather than silently changing their content.
+Durable state serialization also redacts registered values as defense for new provider
+fields. Provider adapters must sanitize any newly returned observable fields before
+returning a Run; persistence redaction alone cannot sanitize an in-memory CLI response.
