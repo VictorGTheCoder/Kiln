@@ -68,6 +68,18 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Resolve an ambiguity autonomously by the decision hierarchy (product
+    /// objectives > architectural decisions > specs) and record the decision.
+    Decide {
+        id: String,
+        /// Ambiguity description: {id, question, positions:[{source, reference, statement}]}.
+        #[arg(long)]
+        ambiguity: PathBuf,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Integrate an exact reviewed change and verify the combined result.
     Integrate {
         id: String,
@@ -264,6 +276,35 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
+        Commands::Decide {
+            id,
+            ambiguity,
+            fixture,
+            codex,
+        } => {
+            let ambiguity =
+                kiln::decision::Ambiguity::load(&engine.repository.join(ambiguity))?;
+            let run = if let Some(path) = fixture {
+                let agent =
+                    kiln::decision::FixtureDecisionAgent::load(&engine.repository.join(path))?;
+                engine.decide(&id, &ambiguity, &agent, &agent)?
+            } else {
+                let config = engine.inspect(&id)?.config;
+                let agent = kiln::codex::CodexPlanningAgent {
+                    adapter: kiln::codex::CodexAdapter::new(
+                        kiln::codex::CodexConfig::from_project(&config, codex)?,
+                    ),
+                    repository: engine.repository.clone(),
+                    isolation: config.isolation,
+                };
+                engine.decide(&id, &ambiguity, &agent, &agent)?
+            };
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            if run.decisions.last().is_none_or(|d| d.outcome != "resolved") {
+                anyhow::bail!("decision not adopted; inspect the recorded findings");
+            }
+            return Ok(());
+        }
         Commands::Integrate {
             id,
             ticket,
@@ -304,9 +345,15 @@ fn run() -> Result<()> {
                     &engine.repository.join(path),
                     &engine.repository,
                 )?),
-                None => Box::new(kiln::scheduler::CodexProviders::new(
-                    kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
-                )),
+                None => {
+                    let config = engine.inspect(&id)?.config;
+                    Box::new(
+                        kiln::scheduler::CodexProviders::new(
+                            kiln::codex::CodexConfig::from_project(&config, codex)?,
+                        )
+                        .with_replanning(engine.repository.clone(), config.isolation),
+                    )
+                }
             };
             let run = if resume {
                 engine.resume(&id, providers.as_ref())?

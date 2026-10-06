@@ -11,6 +11,7 @@ use crate::{
         AgentResult, FixtureImplementationAgent, ImplementationAgent, ImplementationRequest,
     },
     limits::{LimitExhaustion, LimitState, RunLimits},
+    replanning::Replanner,
     review::{FixtureReviewAgent, ReviewAgent},
     Engine, Run,
 };
@@ -63,18 +64,23 @@ pub struct TicketSchedule {
 enum Halt {
     /// The ticket's own correction allowance is spent.
     CorrectionsExhausted(String),
+    /// The ticket still fails after its bounded replanning attempt(s).
+    ReplanningExhausted(String),
     /// A run-wide limit stopped further work; the ticket stays resumable.
     Limit(String),
 }
 impl std::fmt::Display for Halt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Halt::CorrectionsExhausted(reason) | Halt::Limit(reason) => write!(f, "{reason}"),
+            Halt::CorrectionsExhausted(reason)
+            | Halt::ReplanningExhausted(reason)
+            | Halt::Limit(reason) => write!(f, "{reason}"),
         }
     }
 }
 impl std::error::Error for Halt {}
 const CORRECTION_CYCLES: &str = "correction_cycles";
+const REPLANNING: &str = "replanning";
 const RUN_LIMIT: &str = "run_limit";
 
 /// Run-wide limit evaluation shared by the controller and its workers.
@@ -114,6 +120,10 @@ pub trait TicketProviders: Sync {
     fn reviewer(&self, ticket: &str) -> Result<Box<dyn ReviewAgent + '_>>;
     /// Optional bounded correction for rejected work and integration conflicts.
     fn corrector(&self, ticket: &str) -> Result<Option<Box<dyn Corrector + '_>>>;
+    /// Optional bounded replanning after exhausted correction cycles.
+    fn replanner(&self, _ticket: &str) -> Result<Option<Box<dyn Replanner + '_>>> {
+        Ok(None)
+    }
     /// Cancel every in-flight provider session (the `stop` limit policy).
     fn stop_active(&self) {}
 }
@@ -236,9 +246,20 @@ impl Engine {
                     let gate = &gate;
                     scope.spawn(move || {
                         let result = self.ticket_pipeline(id, &ticket, gate, integration, &sender);
+                        // Settle the outcome of revised work; a run-limit stop stays open.
+                        let settled = match &result {
+                            Ok(()) => Some("integrated"),
+                            Err(e) if matches!(e.downcast_ref::<Halt>(), Some(Halt::Limit(_))) => None,
+                            Err(_) => Some("blocked"),
+                        };
+                        let result = match settled.map(|r| self.settle_replanning(id, &ticket, r)) {
+                            Some(Err(e)) if result.is_ok() => Err(e),
+                            _ => result,
+                        };
                         let result = result.map_err(|e| {
                             let kind = match e.downcast_ref::<Halt>() {
                                 Some(Halt::CorrectionsExhausted(_)) => Some(CORRECTION_CYCLES),
+                                Some(Halt::ReplanningExhausted(_)) => Some(REPLANNING),
                                 Some(Halt::Limit(_)) => Some(RUN_LIMIT),
                                 None => None,
                             };
@@ -361,7 +382,31 @@ impl Engine {
         }
     }
 
-    /// One ticket: implement → review → bounded correction → serialized integration.
+    /// After correction exhaustion: one bounded replanning attempt while the
+    /// ticket's allowance and run-wide limits allow. True when revised work may start.
+    fn replan(&self, id: &str, ticket: &str, gate: &Gate, run: &Run) -> Result<bool> {
+        if self.replanning_attempts(run, ticket) >= gate.limits.replanning_attempts {
+            return Ok(false);
+        }
+        let Some(replanner) = gate.providers.replanner(ticket)? else {
+            return Ok(false);
+        };
+        self.checkpoint(id, gate)?;
+        let attempt = self.replan_ticket(id, ticket, replanner.as_ref())?;
+        if attempt.outcome != "replanned" {
+            return Err(Halt::ReplanningExhausted(format!(
+                "replanning attempt {} for ticket {ticket} {}: {}",
+                attempt.attempt,
+                attempt.outcome,
+                attempt.findings.iter().map(|f| f.message.as_str()).collect::<Vec<_>>().join("; ")
+            ))
+            .into());
+        }
+        Ok(true)
+    }
+
+    /// One ticket: implement → review → bounded correction → bounded replanning →
+    /// serialized integration.
     fn ticket_pipeline(
         &self,
         id: &str,
@@ -371,43 +416,58 @@ impl Engine {
         events: &mpsc::Sender<Event>,
     ) -> Result<()> {
         let providers = gate.providers;
-        self.checkpoint(id, gate)?;
-        // Resume continues recorded work: only a ticket without a live attempt is implemented.
-        let current = self.inspect(id)?;
-        let mut run = match latest_session(&current, ticket) {
-            Ok(s) if matches!(s.status.as_str(), "implemented" | "failed") => current,
-            _ => {
-                let implementer = providers.implementer(ticket)?;
-                self.implement_ticket(id, ticket, implementer.as_ref())?
-            }
-        };
-        let mut session = latest_session(&run, ticket)?;
-        if session.status == "implemented"
-            && !run.reviews.iter().any(|r| r.session_id == session.id)
-        {
+        // A replanning attempt recorded before a resume still counts.
+        let mut replanned = self
+            .inspect(id)?
+            .replans
+            .iter()
+            .any(|r| r.ticket_id == ticket && r.outcome == "replanned");
+        let (corrector, session) = loop {
             self.checkpoint(id, gate)?;
-            let reviewer = providers.reviewer(ticket)?;
-            run = self.review_ticket(id, ticket, reviewer.as_ref())?;
-            session = latest_session(&run, ticket)?;
-        }
-        let corrector = providers.corrector(ticket)?;
-        if session.status != "implemented" || !self.review_gate(&run, &session)? {
-            if let Some(corrector) = &corrector {
+            // Resume continues recorded work: only a ticket without a live attempt is implemented.
+            let current = self.inspect(id)?;
+            let mut run = match latest_session(&current, ticket) {
+                Ok(s) if matches!(s.status.as_str(), "implemented" | "failed") => current,
+                _ => {
+                    let implementer = providers.implementer(ticket)?;
+                    self.implement_ticket(id, ticket, implementer.as_ref())?
+                }
+            };
+            let mut session = latest_session(&run, ticket)?;
+            if session.status == "implemented"
+                && !run.reviews.iter().any(|r| r.session_id == session.id)
+            {
                 self.checkpoint(id, gate)?;
-                run = self.correct_ticket_within(
-                    id,
-                    ticket,
-                    corrector.as_ref(),
-                    corrector.as_ref(),
-                    &|| matches!(self.check_limits(id, gate), Ok(None)),
-                )?;
+                let reviewer = providers.reviewer(ticket)?;
+                run = self.review_ticket(id, ticket, reviewer.as_ref())?;
                 session = latest_session(&run, ticket)?;
             }
-        }
-        if session.status != "implemented" || !self.review_gate(&run, &session)? {
+            let corrector = providers.corrector(ticket)?;
+            if session.status != "implemented" || !self.review_gate(&run, &session)? {
+                if let Some(corrector) = &corrector {
+                    self.checkpoint(id, gate)?;
+                    run = self.correct_ticket_within(
+                        id,
+                        ticket,
+                        corrector.as_ref(),
+                        corrector.as_ref(),
+                        &|| matches!(self.check_limits(id, gate), Ok(None)),
+                    )?;
+                    session = latest_session(&run, ticket)?;
+                }
+            }
+            if session.status == "implemented" && self.review_gate(&run, &session)? {
+                break (corrector, session);
+            }
             // A session cancelled or cut short by an exhausted limit is resumable.
             if let Some(e) = gate.exhausted() {
                 return Err(Halt::Limit(e.reason).into());
+            }
+            if replanned {
+                return Err(Halt::ReplanningExhausted(format!(
+                    "ticket {ticket} still fails after its replanning attempt"
+                ))
+                .into());
             }
             let exhausted = run
                 .corrections
@@ -416,6 +476,10 @@ impl Engine {
                 .find(|c| c.ticket_id == ticket)
                 .is_some_and(|c| c.outcome == "exhausted");
             if exhausted {
+                if self.replan(id, ticket, gate, &run)? {
+                    replanned = true;
+                    continue;
+                }
                 return Err(Halt::CorrectionsExhausted(format!(
                     "correction cycles exhausted for ticket {ticket}"
                 ))
@@ -427,7 +491,7 @@ impl Engine {
                     "implementation did not pass fresh independent review".into()
                 })
             );
-        }
+        };
         let _ = events.send(Event::Implemented(ticket.into(), Some(session.id.clone())));
         let _serialized = integration
             .lock()
@@ -557,6 +621,9 @@ pub struct FixtureScenario {
     /// Set by `stop_active`: waiting sessions end as stopped.
     #[serde(skip)]
     stopped: AtomicBool,
+    /// Tickets whose replanning ran: later sessions use the replanned responses.
+    #[serde(skip)]
+    replanned: Mutex<HashSet<String>>,
 }
 #[derive(Default)]
 struct Observed {
@@ -575,6 +642,17 @@ struct ScenarioTicket {
     await_file: Option<String>,
     #[serde(default)]
     require_files: Vec<String>,
+    /// Bounded replanning: `ticket` (revised), `verification` (independent),
+    /// and the `implementation` and `review` of the replanned work.
+    #[serde(default)]
+    replanning: Option<serde_json::Value>,
+}
+#[derive(Deserialize)]
+struct ScenarioReplanning {
+    ticket: crate::planning::Ticket,
+    verification: crate::planning::Verification,
+    implementation: serde_json::Value,
+    review: serde_json::Value,
 }
 const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(30);
 impl FixtureScenario {
@@ -590,15 +668,25 @@ impl FixtureScenario {
         }
         Ok(())
     }
+    /// The ticket's responses; after its replanning, those of the replanned work.
     fn ticket(&self, ticket: &str) -> Result<ScenarioTicket> {
-        Ok(serde_json::from_value(
+        let mut spec: ScenarioTicket = serde_json::from_value(
             self.tickets
                 .get(ticket)
                 .with_context(|| {
                     format!("scenario has no deterministic response for ticket {ticket}")
                 })?
                 .clone(),
-        )?)
+        )?;
+        let replanned = self.replanned.lock().is_ok_and(|r| r.contains(ticket));
+        if let (true, Some(value)) = (replanned, &spec.replanning) {
+            let r: ScenarioReplanning = serde_json::from_value(value.clone())
+                .context("invalid replanning fixture")?;
+            spec.implementation = r.implementation;
+            spec.review = r.review;
+            spec.corrections = None;
+        }
+        Ok(spec)
     }
 }
 struct ScenarioImplementer<'a> {
@@ -678,6 +766,29 @@ impl ImplementationAgent for ScenarioImplementer<'_> {
         self.inner.implement(request)
     }
 }
+struct ScenarioReplanner<'a> {
+    scenario: &'a FixtureScenario,
+    ticket: String,
+    spec: ScenarioReplanning,
+}
+impl crate::replanning::ReplanningAgent for ScenarioReplanner<'_> {
+    fn replan(&self, _: &crate::replanning::ReplanRequest) -> Result<crate::planning::Ticket> {
+        self.scenario
+            .replanned
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scenario observation poisoned"))?
+            .insert(self.ticket.clone());
+        Ok(self.spec.ticket.clone())
+    }
+}
+impl crate::planning::PlanningAgent for ScenarioReplanner<'_> {
+    fn generate(&self, _: &crate::planning::PlanningRequest) -> Result<Vec<crate::planning::Ticket>> {
+        bail!("replanning fixtures do not generate plans")
+    }
+    fn verify(&self, _: &crate::planning::VerificationRequest) -> Result<crate::planning::Verification> {
+        Ok(self.spec.verification.clone())
+    }
+}
 impl TicketProviders for FixtureScenario {
     fn implementer(&self, ticket: &str) -> Result<Box<dyn ImplementationAgent + '_>> {
         let spec = self.ticket(ticket)?;
@@ -705,6 +816,16 @@ impl TicketProviders for FixtureScenario {
             None => None,
         })
     }
+    fn replanner(&self, ticket: &str) -> Result<Option<Box<dyn Replanner + '_>>> {
+        Ok(match self.ticket(ticket)?.replanning {
+            Some(value) => Some(Box::new(ScenarioReplanner {
+                scenario: self,
+                ticket: ticket.into(),
+                spec: serde_json::from_value(value).context("invalid replanning fixture")?,
+            })),
+            None => None,
+        })
+    }
     fn stop_active(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.signal.notify_all();
@@ -718,6 +839,8 @@ pub struct CodexProviders {
     config: crate::codex::CodexConfig,
     stops: Mutex<Vec<std::sync::Arc<AtomicBool>>>,
     stopped: AtomicBool,
+    /// Repository and policy for fresh replanning contexts, when enabled.
+    replanning: Option<(PathBuf, crate::sandbox::IsolationPolicy)>,
 }
 impl CodexProviders {
     pub fn new(config: crate::codex::CodexConfig) -> Self {
@@ -725,7 +848,17 @@ impl CodexProviders {
             config,
             stops: Mutex::new(Vec::new()),
             stopped: AtomicBool::new(false),
+            replanning: None,
         }
+    }
+    /// Enable bounded replanning in fresh clones of `repository`.
+    pub fn with_replanning(
+        mut self,
+        repository: PathBuf,
+        isolation: crate::sandbox::IsolationPolicy,
+    ) -> Self {
+        self.replanning = Some((repository, isolation));
+        self
     }
     fn adapter(&self) -> crate::codex::CodexAdapter {
         let adapter = crate::codex::CodexAdapter::new(self.config.clone());
@@ -747,6 +880,15 @@ impl TicketProviders for CodexProviders {
     }
     fn corrector(&self, _: &str) -> Result<Option<Box<dyn Corrector + '_>>> {
         Ok(Some(Box::new(self.adapter())))
+    }
+    fn replanner(&self, _: &str) -> Result<Option<Box<dyn Replanner + '_>>> {
+        Ok(self.replanning.as_ref().map(|(repository, isolation)| {
+            Box::new(crate::codex::CodexPlanningAgent {
+                adapter: self.adapter(),
+                repository: repository.clone(),
+                isolation: isolation.clone(),
+            }) as Box<dyn Replanner>
+        }))
     }
     fn stop_active(&self) {
         self.stopped.store(true, Ordering::SeqCst);

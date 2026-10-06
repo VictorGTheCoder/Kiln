@@ -205,14 +205,13 @@ impl Engine {
             &["diff", "--binary", &session.base_commit, &commit],
         )?;
         let specs = run
-            .specs
-            .iter()
+            .effective_specs()
+            .into_iter()
             .filter(|s| {
                 plan.requirements
                     .iter()
                     .any(|r| r.spec_path == s.path && ticket.covers.contains(&r.id))
             })
-            .cloned()
             .collect::<Vec<_>>();
         // Session-scoped identity: concurrent tickets review from independent snapshots.
         let review_id = format!(
