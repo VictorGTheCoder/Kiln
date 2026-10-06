@@ -1,0 +1,19 @@
+{
+  "number": 15,
+  "html_url": "https://github.com/VictorGTheCoder/kiln/issues/15",
+  "title": "15: Import GitHub issues with dependencies and provenance",
+  "body": "## Specification\n\n[Approved Kiln product specification](https://github.com/VictorGTheCoder/kiln/blob/main/docs/spec.md)\n\n## What to build\n\nImport an existing GitHub backlog into Kiln's ticket planning workflow while preserving issue references and dependencies and keeping approved repository specs authoritative.\n\n## Acceptance criteria\n\n- [ ] A developer can import selected issues with their content, identifiers, URLs, labels, and available blocking relationships.\n- [ ] Missing prerequisites and invalid imported dependency graphs are reported before imported work becomes executable.\n- [ ] Imported content is reconciled with approved repository specs; divergence is visible and cannot silently overwrite approved requirements.\n- [ ] Imported tickets retain their GitHub identity and spec associations through planning and validation.\n- [ ] Import is repeatable without creating duplicate local ticket identities and does not start implementation or mutate GitHub issues by itself.\n- [ ] Targeted contract verification and deterministic fixtures cover a related issue set, a missing blocker, and divergence from a repository spec.\n\n## Blocked by\n\n- #2: 2: Generate and independently verify tickets from specs\n\n## Spec coverage\n\nUser stories: 3, 4, 8.\n\n## Verification approach\n\nPrefer the approved CLI-driven workflow boundary in a temporary Git repository with deterministic agent responses. Add targeted real-provider contract checks or browser checks where the acceptance criteria require them. Verify externally observable behavior rather than internal implementation details.\n",
+  "labels": [
+    {
+      "id": 12573223853,
+      "node_id": "LA_kwDOU-skHs8AAAAC7WwrrQ",
+      "url": "https://api.github.com/repos/VictorGTheCoder/kiln/labels/ready-for-agent",
+      "name": "ready-for-agent",
+      "color": "0e8a16",
+      "default": false,
+      "description": "Approved, specified work; start once blocking dependencies are complete.",
+      "archived_at": null,
+      "archived_by": null
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+Read-only GitHub REST contract captured 2026-10-06 from VictorGTheCoder/kiln issue #15 and /issues/15/dependencies/blocked_by. Only importer contract fields retained; labels and native #2 dependency verified against live responses. No mutation requests performed. Tests replay these provider-boundary responses through gh.
