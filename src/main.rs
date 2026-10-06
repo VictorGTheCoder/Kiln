@@ -68,6 +68,15 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Integrate an exact reviewed change and verify the combined result.
+    Integrate {
+        id: String,
+        ticket: String,
+        #[arg(long, conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Read a recorded run, or list all run identities.
     Inspect { id: Option<String> },
     /// Show recorded state on a loopback-only local web server.
@@ -202,6 +211,35 @@ fn run() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("missing session"))?;
             if !engine.review_gate(&run, session)? {
                 anyhow::bail!("correction blocked; inspect cycle history");
+            }
+            return Ok(());
+        }
+        Commands::Integrate {
+            id,
+            ticket,
+            fixture,
+            codex,
+        } => {
+            let run = if let Some(path) = fixture {
+                let a =
+                    kiln::correction::FixtureCorrectionAgent::load(&engine.repository.join(path))?;
+                engine.integrate_ticket(&id, &ticket, Some((&a, &a)))?
+            } else if let Some(path) = codex {
+                let a = kiln::codex::CodexAdapter::new(kiln::codex::CodexConfig::from_project(
+                    &engine.inspect(&id)?.config,
+                    Some(path),
+                )?);
+                engine.integrate_ticket(&id, &ticket, Some((&a, &a)))?
+            } else {
+                engine.integrate_ticket(&id, &ticket, None)?
+            };
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            if run
+                .integrations
+                .last()
+                .is_none_or(|i| i.status != "integrated")
+            {
+                anyhow::bail!("integration blocked; inspect combined checks and conflict evidence");
             }
             return Ok(());
         }

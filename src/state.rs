@@ -29,4 +29,6 @@ pub struct Run {
     pub sessions: Vec<crate::execution::ImplementationSession>,
     #[serde(default)]
     pub corrections: Vec<crate::correction::CorrectionCycle>,
+    #[serde(default)]
+    pub integrations: Vec<crate::integration::IntegrationAttempt>,
 }
