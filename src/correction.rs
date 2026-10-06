@@ -104,15 +104,22 @@ impl Engine {
         agent: &dyn CorrectionAgent,
         reviewer: &dyn ReviewAgent,
     ) -> Result<Run> {
+        self.correct_ticket_within(id, ticket_id, agent, reviewer, &|| true)
+    }
+    /// As `correct_ticket`, but starts another cycle only while `resources_remain`
+    /// (run-wide limits). A cycle not started is not counted against the ticket.
+    pub fn correct_ticket_within(
+        &self,
+        id: &str,
+        ticket_id: &str,
+        agent: &dyn CorrectionAgent,
+        reviewer: &dyn ReviewAgent,
+        resources_remain: &dyn Fn() -> bool,
+    ) -> Result<Run> {
         agent.prepare_redaction()?;
         reviewer.prepare_redaction()?;
         let mut run = self.inspect(id)?;
-        let limit = run
-            .config
-            .extensions
-            .get("correction_cycles")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3);
+        let limit = crate::limits::RunLimits::from_config(&run.config)?.correction_cycles;
         let used = run
             .corrections
             .iter()
@@ -146,6 +153,9 @@ impl Engine {
             return Ok(run);
         }
         for number in used..limit {
+            if !resources_remain() {
+                break;
+            }
             let before = run.sessions[index].clone();
             let worktree = PathBuf::from(&before.worktree);
             let mut findings = vec![];

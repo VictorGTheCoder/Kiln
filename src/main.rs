@@ -280,7 +280,7 @@ fn run() -> Result<()> {
                 )?;
                 engine.run_tickets(&id, &scenario)?
             } else {
-                let providers = kiln::scheduler::CodexProviders(
+                let providers = kiln::scheduler::CodexProviders::new(
                     kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
                 );
                 engine.run_tickets(&id, &providers)?
@@ -288,6 +288,18 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run.status == "blocked" {
                 anyhow::bail!("run blocked; inspect scheduler blockers and ticket evidence");
+            }
+            if let Some(exhausted) = run
+                .scheduler
+                .as_ref()
+                .and_then(|s| s.limits.as_ref())
+                .and_then(|l| l.exhausted.as_ref())
+            {
+                anyhow::bail!(
+                    "run stopped by {} limit: {}; completed work and resumable state are preserved",
+                    exhausted.limit,
+                    exhausted.reason
+                );
             }
             return Ok(());
         }

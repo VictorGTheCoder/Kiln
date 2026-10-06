@@ -61,6 +61,7 @@ impl ProjectConfig {
                 bail!("isolation denied unauthorized configured command");
             }
         }
+        crate::limits::RunLimits::from_config(&config)?;
         crate::validation::ValidationSettings::from_config(&config)?;
         crate::publication::PublicationSettings::from_config(&config)?;
         let serialized = serde_json::to_string(&config)?;

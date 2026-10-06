@@ -10,6 +10,7 @@ use crate::{
     execution::{
         AgentResult, FixtureImplementationAgent, ImplementationAgent, ImplementationRequest,
     },
+    limits::{LimitExhaustion, LimitState, RunLimits},
     review::{FixtureReviewAgent, ReviewAgent},
     Engine, Run,
 };
@@ -18,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
-    sync::{mpsc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Condvar, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -35,6 +39,9 @@ pub struct SchedulerState {
     pub active: Vec<String>,
     pub peak_active: usize,
     pub tickets: Vec<TicketSchedule>,
+    /// Configured limits, observed usage and any run-wide exhaustion.
+    #[serde(default)]
+    pub limits: Option<crate::limits::LimitState>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TicketSchedule {
@@ -46,6 +53,54 @@ pub struct TicketSchedule {
     pub waiting_on: Vec<String>,
     pub blocker: Option<String>,
     pub session_id: Option<String>,
+    /// Ticket-scoped exhaustion (`correction_cycles`), distinct from run-wide limits.
+    #[serde(default)]
+    pub exhaustion: Option<String>,
+}
+
+/// Why a ticket pipeline ended without integration.
+#[derive(Debug)]
+enum Halt {
+    /// The ticket's own correction allowance is spent.
+    CorrectionsExhausted(String),
+    /// A run-wide limit stopped further work; the ticket stays resumable.
+    Limit(String),
+}
+impl std::fmt::Display for Halt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Halt::CorrectionsExhausted(reason) | Halt::Limit(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+impl std::error::Error for Halt {}
+const CORRECTION_CYCLES: &str = "correction_cycles";
+const RUN_LIMIT: &str = "run_limit";
+
+/// Run-wide limit evaluation shared by the controller and its workers.
+struct Gate<'a> {
+    limits: RunLimits,
+    started: Instant,
+    exhausted: Mutex<Option<LimitExhaustion>>,
+    providers: &'a dyn TicketProviders,
+}
+impl Gate<'_> {
+    fn exhausted(&self) -> Option<LimitExhaustion> {
+        self.exhausted.lock().ok().and_then(|e| e.clone())
+    }
+    /// Record the first exhaustion; returns the recorded reason.
+    fn exhaust(&self, exhaustion: LimitExhaustion) -> String {
+        let Ok(mut current) = self.exhausted.lock() else {
+            return exhaustion.reason;
+        };
+        if current.is_none() {
+            *current = Some(exhaustion);
+            if self.limits.limit_policy == crate::limits::STOP {
+                self.providers.stop_active();
+            }
+        }
+        current.as_ref().map(|e| e.reason.clone()).unwrap_or_default()
+    }
 }
 
 /// Something that can both correct a ticket and review the correction.
@@ -59,6 +114,8 @@ pub trait TicketProviders: Sync {
     fn reviewer(&self, ticket: &str) -> Result<Box<dyn ReviewAgent + '_>>;
     /// Optional bounded correction for rejected work and integration conflicts.
     fn corrector(&self, ticket: &str) -> Result<Option<Box<dyn Corrector + '_>>>;
+    /// Cancel every in-flight provider session (the `stop` limit policy).
+    fn stop_active(&self) {}
 }
 
 pub fn implementation_concurrency(run: &Run) -> usize {
@@ -74,7 +131,7 @@ enum Event {
     /// The ticket left its implementation phase and released its slot.
     Implemented(String, Option<String>),
     Integrating(String),
-    Finished(String, std::result::Result<(), String>),
+    Finished(String, std::result::Result<(), (String, Option<&'static str>)>),
 }
 
 impl Engine {
@@ -99,6 +156,7 @@ impl Engine {
                     state: if integrated { "integrated" } else { "waiting" }.into(),
                     waiting_on: Vec::new(),
                     blocker: None,
+                    exhaustion: None,
                     session_id: run
                         .sessions
                         .iter()
@@ -113,20 +171,30 @@ impl Engine {
                 active: Vec::new(),
                 peak_active: 0,
                 tickets,
+                limits: Some(LimitState::new(RunLimits::from_config(&run.config)?)),
             };
             refresh(&mut state);
             run.status = "running".into();
             run.scheduler = Some(state.clone());
             Ok(state)
         })?;
+        let gate = Gate {
+            limits: state.limits.as_ref().expect("limits").configured.clone(),
+            started: Instant::now(),
+            exhausted: Mutex::new(None),
+            providers,
+        };
+        let deadline = gate.limits.duration().map(|d| gate.started + d);
         let integration = Mutex::new(());
         let (sender, receiver) = mpsc::channel::<Event>();
         std::thread::scope(|scope| -> Result<()> {
             let mut workers = 0usize;
             loop {
-                // Dispatch the ready frontier in plan order up to the cap.
+                // Dispatch the ready frontier in plan order up to the cap, unless a
+                // run-wide limit is exhausted: then nothing further starts.
                 let mut dispatched = false;
-                while state.active.len() < state.implementation_concurrency {
+                let exhausted = self.check_limits(id, &gate)?.is_some();
+                while !exhausted && state.active.len() < state.implementation_concurrency {
                     let Some(next) = state.tickets.iter_mut().find(|t| {
                         t.state == "waiting" && t.waiting_on.is_empty() && t.blocker.is_none()
                     }) else {
@@ -140,22 +208,41 @@ impl Engine {
                     dispatched = true;
                     let sender = sender.clone();
                     let integration = &integration;
+                    let gate = &gate;
                     scope.spawn(move || {
-                        let result =
-                            self.ticket_pipeline(id, &ticket, providers, integration, &sender);
-                        let _ = sender.send(Event::Finished(
-                            ticket,
-                            result.map_err(|e| format!("{e:#}")),
-                        ));
+                        let result = self.ticket_pipeline(id, &ticket, gate, integration, &sender);
+                        let result = result.map_err(|e| {
+                            let kind = match e.downcast_ref::<Halt>() {
+                                Some(Halt::CorrectionsExhausted(_)) => Some(CORRECTION_CYCLES),
+                                Some(Halt::Limit(_)) => Some(RUN_LIMIT),
+                                None => None,
+                            };
+                            (format!("{e:#}"), kind)
+                        });
+                        let _ = sender.send(Event::Finished(ticket, result));
                     });
                 }
-                if dispatched {
-                    self.record_schedule(id, &state)?;
+                if dispatched || exhausted {
+                    self.record_schedule(id, &mut state, &gate)?;
                 }
                 if workers == 0 {
                     break;
                 }
-                let event = receiver.recv().context("scheduler worker channel closed")?;
+                let wait = deadline
+                    .filter(|_| gate.exhausted().is_none())
+                    .map(|d| d.saturating_duration_since(Instant::now()));
+                let event = match wait {
+                    None => receiver.recv().context("scheduler worker channel closed")?,
+                    Some(left) => match receiver.recv_timeout(left) {
+                        Ok(event) => event,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            // Duration elapsed mid-session: re-evaluated on next loop.
+                            self.check_limits(id, &gate)?;
+                            continue;
+                        }
+                        Err(e) => return Err(e).context("scheduler worker channel closed"),
+                    },
+                };
                 match event {
                     Event::Implemented(ticket, session) => {
                         state.active.retain(|t| *t != ticket);
@@ -172,27 +259,35 @@ impl Engine {
                         let t = find(&mut state, &ticket);
                         match result {
                             Ok(()) => t.state = "integrated".into(),
-                            Err(reason) => {
+                            // Stopped by a run-wide limit: resumable, not blocked.
+                            Err((_, Some(RUN_LIMIT))) => t.state = "stopped".into(),
+                            Err((reason, exhaustion)) => {
                                 t.state = "blocked".into();
                                 t.blocker = Some(reason);
+                                t.exhaustion = exhaustion.map(Into::into);
                             }
                         }
                         refresh(&mut state);
                     }
                 }
-                self.record_schedule(id, &state)?;
+                self.record_schedule(id, &mut state, &gate)?;
             }
             Ok(())
         })?;
+        let exhausted = gate.exhausted();
         for t in &mut state.tickets {
-            if t.state == "waiting" && t.blocker.is_none() {
+            // After run-wide exhaustion, unstarted tickets stay resumable.
+            if t.state == "waiting" && t.blocker.is_none() && exhausted.is_none() {
                 t.blocker = Some(format!(
                     "prerequisites {:?} were never integrated",
                     t.waiting_on
                 ));
             }
         }
-        state.status = if state.tickets.iter().all(|t| t.state == "integrated") {
+        state.status = if exhausted.is_some() {
+            // Never success: completed work and resumable state are preserved.
+            "limit_exhausted"
+        } else if state.tickets.iter().all(|t| t.state == "integrated") {
             // Ticket integration does not claim global workflow success.
             "awaiting_validation"
         } else {
@@ -200,17 +295,45 @@ impl Engine {
         }
         .into();
         self.transact(id, |run| {
+            if let Some(limits) = &mut state.limits {
+                limits.exhausted = exhausted;
+                limits.observe(run);
+            }
             run.status = state.status.clone();
             run.scheduler = Some(state.clone());
             Ok(run.clone())
         })
     }
 
-    fn record_schedule(&self, id: &str, state: &SchedulerState) -> Result<()> {
+    fn record_schedule(&self, id: &str, state: &mut SchedulerState, gate: &Gate) -> Result<()> {
         self.transact(id, |run| {
+            if let Some(limits) = &mut state.limits {
+                limits.exhausted = gate.exhausted();
+                limits.observe(run);
+            }
             run.scheduler = Some(state.clone());
             Ok(())
         })
+    }
+
+    /// Evaluate run-wide limits against durable state; the first exhaustion wins
+    /// and, under the `stop` policy, cancels active provider sessions.
+    fn check_limits(&self, id: &str, gate: &Gate) -> Result<Option<String>> {
+        if let Some(e) = gate.exhausted() {
+            return Ok(Some(e.reason));
+        }
+        let usage = crate::limits::account(&self.inspect(id)?);
+        Ok(gate
+            .limits
+            .evaluate(&usage, gate.started.elapsed())
+            .map(|e| gate.exhaust(e)))
+    }
+    /// Pipeline checkpoint: fail with a resumable stop once limits are exhausted.
+    fn checkpoint(&self, id: &str, gate: &Gate) -> Result<()> {
+        match self.check_limits(id, gate)? {
+            Some(reason) => Err(Halt::Limit(reason).into()),
+            None => Ok(()),
+        }
     }
 
     /// One ticket: implement → review → bounded correction → serialized integration.
@@ -218,15 +341,18 @@ impl Engine {
         &self,
         id: &str,
         ticket: &str,
-        providers: &dyn TicketProviders,
+        gate: &Gate,
         integration: &Mutex<()>,
         events: &mpsc::Sender<Event>,
     ) -> Result<()> {
+        let providers = gate.providers;
+        self.checkpoint(id, gate)?;
         let implementer = providers.implementer(ticket)?;
         let mut run = self.implement_ticket(id, ticket, implementer.as_ref())?;
         drop(implementer);
         let mut session = latest_session(&run, ticket)?;
         if session.status == "implemented" {
+            self.checkpoint(id, gate)?;
             let reviewer = providers.reviewer(ticket)?;
             run = self.review_ticket(id, ticket, reviewer.as_ref())?;
             session = latest_session(&run, ticket)?;
@@ -234,11 +360,34 @@ impl Engine {
         let corrector = providers.corrector(ticket)?;
         if session.status != "implemented" || !self.review_gate(&run, &session)? {
             if let Some(corrector) = &corrector {
-                run = self.correct_ticket(id, ticket, corrector.as_ref(), corrector.as_ref())?;
+                self.checkpoint(id, gate)?;
+                run = self.correct_ticket_within(
+                    id,
+                    ticket,
+                    corrector.as_ref(),
+                    corrector.as_ref(),
+                    &|| matches!(self.check_limits(id, gate), Ok(None)),
+                )?;
                 session = latest_session(&run, ticket)?;
             }
         }
         if session.status != "implemented" || !self.review_gate(&run, &session)? {
+            // A session cancelled or cut short by an exhausted limit is resumable.
+            if let Some(e) = gate.exhausted() {
+                return Err(Halt::Limit(e.reason).into());
+            }
+            let exhausted = run
+                .corrections
+                .iter()
+                .rev()
+                .find(|c| c.ticket_id == ticket)
+                .is_some_and(|c| c.outcome == "exhausted");
+            if exhausted {
+                return Err(Halt::CorrectionsExhausted(format!(
+                    "correction cycles exhausted for ticket {ticket}"
+                ))
+                .into());
+            }
             bail!(
                 "{}",
                 session.failure.clone().unwrap_or_else(|| {
@@ -250,6 +399,7 @@ impl Engine {
         let _serialized = integration
             .lock()
             .map_err(|_| anyhow::anyhow!("integration lock poisoned"))?;
+        self.checkpoint(id, gate)?;
         let _ = events.send(Event::Integrating(ticket.into()));
         let provider = corrector.as_ref().map(|c| {
             (
@@ -265,6 +415,9 @@ impl Engine {
             .find(|i| i.ticket_id == ticket)
             .context("missing integration attempt")?;
         if attempt.status != "integrated" {
+            if let Some(e) = gate.exhausted() {
+                return Err(Halt::Limit(e.reason).into());
+            }
             bail!(
                 "integration {}: {}",
                 attempt.status,
@@ -367,6 +520,9 @@ pub struct FixtureScenario {
     observed: Mutex<Observed>,
     #[serde(skip)]
     signal: Condvar,
+    /// Set by `stop_active`: waiting sessions end as stopped.
+    #[serde(skip)]
+    stopped: AtomicBool,
 }
 #[derive(Default)]
 struct Observed {
@@ -393,6 +549,12 @@ impl FixtureScenario {
             .context("invalid scheduler scenario fixture")?;
         scenario.repository = repository.to_path_buf();
         Ok(scenario)
+    }
+    fn ensure_running(&self) -> Result<()> {
+        if self.stopped.load(Ordering::SeqCst) {
+            bail!("session stopped by run limit");
+        }
+        Ok(())
     }
     fn ticket(&self, ticket: &str) -> Result<ScenarioTicket> {
         Ok(serde_json::from_value(
@@ -448,6 +610,7 @@ impl ImplementationAgent for ScenarioImplementer<'_> {
             .iter()
             .all(|t| observed.started.contains(t))
         {
+            scenario.ensure_running()?;
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 bail!(
@@ -466,6 +629,7 @@ impl ImplementationAgent for ScenarioImplementer<'_> {
         if let Some(marker) = &self.spec.await_file {
             let marker = scenario.repository.join(marker);
             while !marker.exists() {
+                scenario.ensure_running()?;
                 if Instant::now() > deadline {
                     bail!("release marker {} never appeared", marker.display());
                 }
@@ -507,21 +671,55 @@ impl TicketProviders for FixtureScenario {
             None => None,
         })
     }
+    fn stop_active(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.signal.notify_all();
+    }
 }
 
 /// Real providers: a fresh Codex adapter (and therefore context and stop handle)
-/// for every role of every session.
-pub struct CodexProviders(pub crate::codex::CodexConfig);
+/// for every role of every session. `stop_active` cancels every adapter handed
+/// out, and adapters created afterwards start stopped.
+pub struct CodexProviders {
+    config: crate::codex::CodexConfig,
+    stops: Mutex<Vec<std::sync::Arc<AtomicBool>>>,
+    stopped: AtomicBool,
+}
+impl CodexProviders {
+    pub fn new(config: crate::codex::CodexConfig) -> Self {
+        Self {
+            config,
+            stops: Mutex::new(Vec::new()),
+            stopped: AtomicBool::new(false),
+        }
+    }
+    fn adapter(&self) -> crate::codex::CodexAdapter {
+        let adapter = crate::codex::CodexAdapter::new(self.config.clone());
+        if self.stopped.load(Ordering::SeqCst) {
+            adapter.stop();
+        }
+        if let Ok(mut stops) = self.stops.lock() {
+            stops.push(adapter.stop_handle());
+        }
+        adapter
+    }
+}
 impl TicketProviders for CodexProviders {
     fn implementer(&self, _: &str) -> Result<Box<dyn ImplementationAgent + '_>> {
-        Ok(Box::new(crate::codex::CodexAdapter::new(self.0.clone())))
+        Ok(Box::new(self.adapter()))
     }
     fn reviewer(&self, _: &str) -> Result<Box<dyn ReviewAgent + '_>> {
-        Ok(Box::new(crate::codex::CodexAdapter::new(self.0.clone())))
+        Ok(Box::new(self.adapter()))
     }
     fn corrector(&self, _: &str) -> Result<Option<Box<dyn Corrector + '_>>> {
-        Ok(Some(Box::new(crate::codex::CodexAdapter::new(
-            self.0.clone(),
-        ))))
+        Ok(Some(Box::new(self.adapter())))
+    }
+    fn stop_active(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Ok(stops) = self.stops.lock() {
+            for stop in stops.iter() {
+                stop.store(true, Ordering::SeqCst);
+            }
+        }
     }
 }
