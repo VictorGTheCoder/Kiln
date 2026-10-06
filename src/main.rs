@@ -98,6 +98,16 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Reopen an interrupted run: reconcile recorded state with observed Git and process
+    /// state, record each recovery decision, then continue scheduling without
+    /// repeating completed effects.
+    Resume {
+        id: String,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Validate the integrated revision against acceptance workflows per criterion.
     Validate {
         id: String,
@@ -108,6 +118,17 @@ enum Commands {
     /// Push the verified integration branch and open or reconcile its pull request.
     /// Merging and deployment stay disabled unless the project configures them.
     Publish {
+        id: String,
+        /// Simulated GitHub state file (no network access).
+        #[arg(long, conflicts_with = "gh")]
+        fixture: Option<PathBuf>,
+        /// gh program used for real GitHub access (default: gh on PATH).
+        #[arg(long)]
+        gh: Option<PathBuf>,
+    },
+    /// Reflect recorded, verified progress in a Kiln progress comment on each imported
+    /// issue. Issue titles, bodies and other comments are never modified.
+    Sync {
         id: String,
         /// Simulated GitHub state file (no network access).
         #[arg(long, conflicts_with = "gh")]
@@ -313,20 +334,31 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
-        Commands::Run { id, fixture, codex } => {
-            let run = if let Some(path) = fixture {
-                let scenario = kiln::scheduler::FixtureScenario::load(
+        command @ (Commands::Run { .. } | Commands::Resume { .. }) => {
+            let (resume, id, fixture, codex) = match command {
+                Commands::Run { id, fixture, codex } => (false, id, fixture, codex),
+                Commands::Resume { id, fixture, codex } => (true, id, fixture, codex),
+                _ => unreachable!(),
+            };
+            let providers: Box<dyn kiln::scheduler::TicketProviders> = match fixture {
+                Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
                     &engine.repository.join(path),
                     &engine.repository,
-                )?;
-                engine.run_tickets(&id, &scenario)?
+                )?),
+                None => {
+                    let config = engine.inspect(&id)?.config;
+                    Box::new(
+                        kiln::scheduler::CodexProviders::new(
+                            kiln::codex::CodexConfig::from_project(&config, codex)?,
+                        )
+                        .with_replanning(engine.repository.clone(), config.isolation),
+                    )
+                }
+            };
+            let run = if resume {
+                engine.resume(&id, providers.as_ref())?
             } else {
-                let config = engine.inspect(&id)?.config;
-                let providers = kiln::scheduler::CodexProviders::new(
-                    kiln::codex::CodexConfig::from_project(&config, codex)?,
-                )
-                .with_replanning(engine.repository.clone(), config.isolation);
-                engine.run_tickets(&id, &providers)?
+                engine.run_tickets(&id, providers.as_ref())?
             };
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run.status == "blocked" {
@@ -374,6 +406,32 @@ fn run() -> Result<()> {
                 }),
             };
             serde_json::to_value(engine.publish(&id, host.as_ref())?)?
+        }
+        Commands::Sync { id, fixture, gh } => {
+            let tracker: Box<dyn kiln::synchronization::IssueTracker> = match fixture {
+                Some(path) => Box::new(kiln::synchronization::FixtureIssueTracker::new(
+                    &engine.repository.join(path),
+                )),
+                None => Box::new(kiln::synchronization::GitHubIssueTracker {
+                    program: gh.unwrap_or_else(|| "gh".into()),
+                }),
+            };
+            let run = engine.synchronize(&id, tracker.as_ref())?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            let issues = run
+                .synchronization
+                .as_ref()
+                .map(|s| s.issues.as_slice())
+                .unwrap_or_default();
+            for note in issues.iter().flat_map(|i| &i.divergence) {
+                eprintln!("Kiln: divergence: {note}");
+            }
+            if issues.iter().any(|i| i.status == "conflict") {
+                anyhow::bail!(
+                    "synchronization conflict; remote edits were surfaced, not overwritten"
+                );
+            }
+            return Ok(());
         }
         Commands::Report { id } => {
             let run = engine.inspect(&id)?;

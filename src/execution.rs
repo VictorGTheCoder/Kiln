@@ -256,6 +256,7 @@ impl Engine {
                 ),
             )?;
             let agent_result = agent.implement(&request);
+            crate::recovery::fault("implementation.after_agent", ticket_id);
             // Collect actual changes even when the provider reports failure.
             git(&worktree, &["add", "-A", "--", "."])?;
             session.diff = git(
@@ -326,6 +327,7 @@ impl Engine {
                     &format!("Implement ticket {ticket_id}"),
                 ],
             )?;
+            crate::recovery::fault("implementation.after_commit", ticket_id);
             session.commit = Some(git(&worktree, &["rev-parse", "HEAD"])?);
             session.verification_passed = true;
             session.status = "implemented".into();

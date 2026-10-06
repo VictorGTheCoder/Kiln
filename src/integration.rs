@@ -64,7 +64,7 @@ impl Engine {
         provider: Option<(&dyn CorrectionAgent, &dyn ReviewAgent)>,
     ) -> Result<Run> {
         let lock_path = self.repository.join(".kiln/integration.lock");
-        fs::OpenOptions::new()
+        let mut owner = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock_path)
@@ -72,6 +72,8 @@ impl Engine {
                 "another integration is active; inspect lock before recovering interrupted work",
             )?;
         let _lock = Lock(lock_path);
+        // Owning run identity lets resume release a lock its interrupted process left.
+        std::io::Write::write_all(&mut owner, id.as_bytes())?;
         if let Some((a, r)) = provider {
             a.prepare_redaction()?;
             r.prepare_redaction()?;
@@ -178,6 +180,7 @@ impl Engine {
                 }
                 attempt.session_id = corrected.id.clone();
             }
+            crate::recovery::fault("integration.after_merge", ticket_id);
             let candidate = git(&path, &["rev-parse", "HEAD"])?;
             attempt.candidate_commit = Some(candidate.clone());
             for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
@@ -230,6 +233,7 @@ impl Engine {
             attempt.status = "verified".into();
             record(&mut run, &attempt);
             run = self.save_ticket(&run, ticket_id)?;
+            crate::recovery::fault("integration.before_update_ref", ticket_id);
             git(
                 &self.repository,
                 &[
@@ -239,6 +243,7 @@ impl Engine {
                     &base,
                 ],
             )?;
+            crate::recovery::fault("integration.after_update_ref", ticket_id);
             attempt.integrated_commit = Some(candidate);
             attempt.status = "integrated".into();
             run.sessions[index].status = "integrated".into();
