@@ -268,6 +268,31 @@ impl Engine {
                 }
                 decisions.push(decision(Some(&integration.ticket_id), &integration.id, "unable-to-verify", reason));
             }
+            // A run-wide limit cancelled these tickets mid-session: the cut-short attempt
+            // is not a failure to correct, so it restarts in a fresh session.
+            let stopped: Vec<&str> = snapshot
+                .scheduler
+                .iter()
+                .flat_map(|s| &s.tickets)
+                .filter(|t| t.state == "stopped")
+                .map(|t| t.id.as_str())
+                .collect();
+            for ticket in stopped {
+                let latest = run
+                    .sessions
+                    .iter_mut()
+                    .rev()
+                    .find(|s| s.ticket_id == ticket && s.status != "interrupted");
+                if let Some(session) = latest.filter(|s| s.status == "failed") {
+                    let reason = format!(
+                        "session was stopped by an exhausted run-wide limit before completing ({}); restarting in a fresh session without charging a correction cycle",
+                        session.failure.as_deref().unwrap_or("no recorded failure")
+                    );
+                    session.status = "interrupted".into();
+                    session.failure = Some(reason.clone());
+                    decisions.push(decision(Some(ticket), &session.id, "restarted", reason));
+                }
+            }
             for session in snapshot.sessions.iter().filter(|s| {
                 s.status == "implemented" && !blocked.iter().any(|(t, _)| *t == s.ticket_id)
             }) {

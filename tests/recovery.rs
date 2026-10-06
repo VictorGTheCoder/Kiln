@@ -550,3 +550,42 @@ fn resume_refuses_a_run_whose_scheduler_process_is_still_alive() {
     fs::write(repo.path.join(".kiln/release"), "go").unwrap();
     assert!(child.wait().unwrap().success());
 }
+
+#[test]
+fn limit_stopped_ticket_resumes_in_a_fresh_session_and_completes() {
+    let repo = Repo::new(None);
+    // Duration budget applies per invocation; a's first session is cancelled by it.
+    let mut config: Value =
+        serde_json::from_str(&fs::read_to_string(repo.path.join("kiln.json")).unwrap()).unwrap();
+    config["duration_limit_seconds"] = json!(3);
+    config["limit_policy"] = json!("stop");
+    fs::write(repo.path.join("kiln.json"), config.to_string()).unwrap();
+    repo.git(&["commit", "-qam", "limits"]);
+    let id = repo.planned(&[("a", "one.md", &[]), ("b", "two.md", &["a"])]);
+    let mut a = works("a.txt", "first");
+    a["await_file"] = json!(".kiln/release");
+    repo.scenario(json!({"tickets":{"a":a,"b":works("b.txt","works")}}));
+    let out = repo.cli(&["run", &id, "--fixture", "scenario.json"]);
+    assert!(!out.status.success());
+    let stopped = repo.inspect(&id);
+    assert_eq!(stopped["status"], "limit_exhausted");
+    assert_eq!(ticket(&stopped, "a")["state"], "stopped");
+    let cancelled = sessions_for(&stopped, "a")[0]["id"].clone();
+
+    fs::write(repo.path.join(".kiln/release"), "go").unwrap();
+    let (out, run) = repo.resume(&id);
+    assert_success(&out);
+    assert_eq!(run["status"], "awaiting_validation");
+    let sessions = sessions_for(&run, "a");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["status"], "interrupted");
+    assert_eq!(sessions[1]["status"], "integrated");
+    assert_eq!(run["corrections"].as_array().unwrap().len(), 0, "a stop is not a failure to correct");
+    assert!(
+        decisions(&run, "a").iter().any(|d| d["action"] == "restarted"
+            && d["subject"] == cancelled
+            && d["reason"].as_str().unwrap().contains("limit")),
+        "{:?}",
+        decisions(&run, "a")
+    );
+}

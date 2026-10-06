@@ -344,3 +344,29 @@ cannot reset cumulative usage.
 Ticket correction exhaustion is ticket-scoped: the ticket is `blocked` with
 `exhaustion: "correction_cycles"` while `scheduler.limits.exhausted` stays null,
 so later bounded replanning can apply only when run-wide resources remain.
+
+## Resume
+
+`kiln resume RUN --fixture scenario.json` (or `--codex`) reopens an interrupted or
+limit-stopped run. It refuses while another process still owns the run. Before
+scheduling it reconciles recorded state with observed Git state and appends a
+`recoveries` entry whose `decisions` name each ticket, subject (session, integration
+attempt or lock), action and reason:
+
+- `adopted`: a Git effect completed before its record (implementation commit
+  extending the recorded base; integration ref already containing the verified
+  candidate). It is not repeated; an adopted commit's lost checks are rerun.
+- `completed`: a verified integration candidate whose base is unchanged gets its
+  compare-and-swap ref update.
+- `restarted`: interrupted implementation or integration, and sessions cancelled by a
+  run-wide limit, restart in a fresh session or attempt; old evidence is kept.
+- `rerun`: missing or interrupted review (or failed re-verification) is rerun.
+- `unable-to-verify`: recorded integration the branch no longer contains; the ticket
+  is blocked, never counted as success.
+- `preserved`: integrated work, recorded blockers, frozen specs and review history.
+- `released`: an integration lock left by this run's interrupted process.
+
+Tests inject interruptions with `KILN_FAULT_INJECT=<point>@<ticket>` (points:
+`implementation.after_agent`, `implementation.after_commit`, `review.after_axis`,
+`integration.after_merge`, `integration.before_update_ref`,
+`integration.after_update_ref`); the process exits with status 86.
