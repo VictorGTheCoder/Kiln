@@ -86,6 +86,26 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Validate the integrated revision against acceptance workflows per criterion.
+    Validate {
+        id: String,
+        /// Independent verifier acceptance tests: {"acceptance_checks":[{criterion, command}]}.
+        #[arg(long)]
+        verifier: Option<PathBuf>,
+    },
+    /// Push the verified integration branch and open or reconcile its pull request.
+    /// Merging and deployment stay disabled unless the project configures them.
+    Publish {
+        id: String,
+        /// Simulated GitHub state file (no network access).
+        #[arg(long, conflicts_with = "gh")]
+        fixture: Option<PathBuf>,
+        /// gh program used for real GitHub access (default: gh on PATH).
+        #[arg(long)]
+        gh: Option<PathBuf>,
+    },
+    /// Show verified, failed and unable-to-verify criteria of the latest validation.
+    Report { id: String },
     /// Read a recorded run, or list all run identities.
     Inspect { id: Option<String> },
     /// Show recorded state on a loopback-only local web server.
@@ -270,6 +290,42 @@ fn run() -> Result<()> {
                 anyhow::bail!("run blocked; inspect scheduler blockers and ticket evidence");
             }
             return Ok(());
+        }
+        Commands::Validate { id, verifier } => {
+            let checks = match verifier {
+                Some(path) => {
+                    kiln::validation::VerifierChecks::load(&engine.repository.join(path))?
+                }
+                None => Default::default(),
+            };
+            let run = engine.validate(&id, &checks)?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            let outcome = run.validation_reports.last().map(|r| r.outcome.as_str());
+            if outcome != Some(kiln::validation::VERIFIED) {
+                anyhow::bail!(
+                    "validation {}; inspect the report for failed and unable-to-verify criteria",
+                    outcome.unwrap_or("missing")
+                );
+            }
+            return Ok(());
+        }
+        Commands::Publish { id, fixture, gh } => {
+            let host: Box<dyn kiln::publication::PullRequestHost> = match fixture {
+                Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
+                    &engine.repository.join(path),
+                )),
+                None => Box::new(kiln::publication::GitHubPullRequests {
+                    program: gh.unwrap_or_else(|| "gh".into()),
+                }),
+            };
+            serde_json::to_value(engine.publish(&id, host.as_ref())?)?
+        }
+        Commands::Report { id } => {
+            let run = engine.inspect(&id)?;
+            let report = run.validation_reports.last().ok_or_else(|| {
+                anyhow::anyhow!("run {id} has no validation report; run `kiln validate {id}` first")
+            })?;
+            report.summary(&run.id)
         }
         Commands::Inspect { id: Some(id) } => serde_json::to_value(engine.inspect(&id)?)?,
         Commands::Inspect { id: None } => serde_json::to_value(engine.list()?)?,

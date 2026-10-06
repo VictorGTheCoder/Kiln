@@ -150,7 +150,7 @@ impl Engine {
                     });
                 }
                 if dispatched {
-                    self.publish(id, &state)?;
+                    self.record_schedule(id, &state)?;
                 }
                 if workers == 0 {
                     break;
@@ -180,7 +180,7 @@ impl Engine {
                         refresh(&mut state);
                     }
                 }
-                self.publish(id, &state)?;
+                self.record_schedule(id, &state)?;
             }
             Ok(())
         })?;
@@ -206,7 +206,7 @@ impl Engine {
         })
     }
 
-    fn publish(&self, id: &str, state: &SchedulerState) -> Result<()> {
+    fn record_schedule(&self, id: &str, state: &SchedulerState) -> Result<()> {
         self.transact(id, |run| {
             run.scheduler = Some(state.clone());
             Ok(())
