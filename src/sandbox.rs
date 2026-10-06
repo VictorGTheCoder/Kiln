@@ -80,10 +80,21 @@ pub struct Mount {
 pub struct Sandbox;
 impl Sandbox {
     fn base(policy: &IsolationPolicy, worktree: &Path, mounts: &[Mount]) -> Result<Command> {
+        Self::base_with_session(policy, worktree, mounts, true)
+    }
+    fn base_with_session(
+        policy: &IsolationPolicy,
+        worktree: &Path,
+        mounts: &[Mount],
+        new_session: bool,
+    ) -> Result<Command> {
         let mut command = Command::new("/usr/bin/bwrap");
         command
             .env_clear()
-            .args(["--unshare-all", "--die-with-parent", "--new-session"]);
+            .args(["--unshare-all", "--die-with-parent"]);
+        if new_session {
+            command.arg("--new-session");
+        }
         if policy.network == "allow-all" {
             command.arg("--share-net");
         }
@@ -166,10 +177,32 @@ impl Sandbox {
         argv: &[String],
         mounts: &[Mount],
     ) -> Result<Command> {
+        Self::command_with_session(policy, worktree, role, argv, mounts, true)
+    }
+    /// The caller must assign a dedicated process group before spawning. Keeping
+    /// the PID namespace init in that group makes cancellation tear down every
+    /// sandbox descendant, even descendants that create their own sessions.
+    pub(crate) fn supervised_command(
+        policy: &IsolationPolicy,
+        worktree: &Path,
+        role: &str,
+        argv: &[String],
+        mounts: &[Mount],
+    ) -> Result<Command> {
+        Self::command_with_session(policy, worktree, role, argv, mounts, false)
+    }
+    fn command_with_session(
+        policy: &IsolationPolicy,
+        worktree: &Path,
+        role: &str,
+        argv: &[String],
+        mounts: &[Mount],
+        new_session: bool,
+    ) -> Result<Command> {
         if argv.is_empty() || !policy.commands.contains(&argv.to_vec()) {
             bail!("isolation denied unauthorized {role} command argv");
         }
-        let mut command = Self::base(policy, worktree, mounts)?;
+        let mut command = Self::base_with_session(policy, worktree, mounts, new_session)?;
         for (name, roles) in &policy.secrets {
             if roles.iter().any(|r| r == role) {
                 command.env(
