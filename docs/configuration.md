@@ -106,3 +106,45 @@ verification outcome, findings, context identities, and executable status.
 Accepted plans set `status` to `planned`; rejected plans set `plan_rejected`,
 persist evidence, and exit unsuccessfully. Rejected plans may be regenerated.
 Existing CLI inspection and web run/API pages show the same persisted plan.
+
+# Importing GitHub issues
+
+Import selected existing issues into a prepared run with approved frozen specs:
+
+```sh
+kiln --repo /path/to/project import RUN-ID --github-repo owner/project --issue 7 --issue 8 --verification-fixture verifier.json
+```
+
+The real issue source uses authenticated `gh api` GET requests for issue details
+and paginated native `/dependencies/blocked_by` relationships. It never creates,
+closes, labels, or otherwise mutates issues. Failed reads are reported rather than
+silently dropping native dependencies. A `## Blocked by` body section also accepts
+`- #7: description` and issue URLs; native and body relationships are deduplicated.
+Missing selected prerequisites and cycles block execution, even if the blocker is
+closed externally; include prerequisites explicitly or reconcile the backlog.
+
+Issue bodies must carry `## Acceptance criteria` bullets and `## Spec coverage`
+bullets with exact frozen criterion IDs, such as `- docs/first.md#ac-1`.
+Imported acceptance criteria must retain associated approved criterion text.
+Additional semantic differences are checked by a distinct verifier context.
+Unknown associations, missing coverage, divergence and failed verification remain
+inspectable findings; imported text never rewrites frozen repository specs.
+Repository specs are always the source of requirements.
+
+`--fixture issues.json` substitutes deterministic issue snapshots with an
+`issues` array. Each item contains `number`, `url`, `title`, `body`, `labels`
+(string array), and `blocked_by` (canonical `github:owner/project#number` strings).
+The verifier fixture follows the planning fixture protocol; its generation
+`tickets` field is ignored, and only the separate verification response is used.
+A fixture verdict is simulated evidence, not real external review or approval.
+The reusable `Engine::import_issues` accepts an `IssueSource` and independent
+`PlanningAgent` verifier for real providers.
+
+The imported snapshot remains in `Run.imported_issues`; plan ticket identities
+are canonical GitHub identities and retain criterion associations and dependency
+edges. Repeating import replaces the selected snapshot and plan without duplicates;
+select the entire intended backlog each time. Imports are allowed before execution
+and never launch implementation, Git worktrees or project commands.
+Rejected imports exit unsuccessfully after recording their evidence.
+Live read-only GitHub contract responses are documented in
+`tests/fixtures/github/README.md` and replayed through the CLI provider boundary.

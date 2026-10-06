@@ -19,4 +19,6 @@ pub struct Run {
     pub specs: Vec<FrozenSpec>,
     #[serde(default)]
     pub plan: Option<crate::planning::Plan>,
+    #[serde(default)]
+    pub imported_issues: Vec<crate::import::ImportedIssue>,
 }
