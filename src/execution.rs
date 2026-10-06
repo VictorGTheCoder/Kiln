@@ -132,7 +132,7 @@ impl Engine {
         agent: &dyn ImplementationAgent,
     ) -> Result<Run> {
         agent.prepare_redaction()?;
-        let mut run = self.inspect(id)?;
+        let (run, mut session, ticket, prerequisites) = self.transact(id, |run| {
         run.config.isolation.validate(&self.repository)?;
         let plan = run
             .plan
@@ -174,7 +174,6 @@ impl Engine {
                 let branch = format!("kiln/{}/integration", run.id);
                 git(&self.repository, &["branch", &branch, "HEAD"])?;
                 run.integration_branch = Some(branch.clone());
-                self.save(&run)?;
                 branch
             }
         };
@@ -194,20 +193,7 @@ impl Engine {
         let session_id = format!("{}-session-{}", run.id, run.sessions.len() + 1);
         let branch = format!("kiln/{}/session-{}", run.id, run.sessions.len() + 1);
         let worktree = self.repository.join(".kiln/worktrees").join(&session_id);
-        fs::create_dir_all(worktree.parent().unwrap())?;
-        git(
-            &self.repository,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-                worktree.to_str().context("non UTF-8 worktree")?,
-                &base_commit,
-            ],
-        )?;
-        let worktree = fs::canonicalize(worktree)?;
-        let mut session = ImplementationSession {
+        let session = ImplementationSession {
             id: session_id.clone(),
             ticket_id: ticket_id.into(),
             context_id: session_id.clone(),
@@ -224,8 +210,28 @@ impl Engine {
             failure: None,
         };
         run.sessions.push(session.clone());
-        self.save(&run)?;
+        Ok((run.clone(), session, ticket, prerequisites))
+        })?;
+        let session_id = session.id.clone();
+        let worktree = PathBuf::from(&session.worktree);
+        let plan = run.plan.as_ref().context("missing accepted plan")?;
         let execution = (|| -> Result<()> {
+            fs::create_dir_all(worktree.parent().unwrap())?;
+            {
+                // Shared Git administrative state: serialize worktree creation.
+                let _git = self.lock_run(id, "git")?;
+                git(
+                    &self.repository,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        &session.branch,
+                        worktree.to_str().context("non UTF-8 worktree")?,
+                        &session.base_commit,
+                    ],
+                )?;
+            }
             let specs = run
                 .specs
                 .iter()
@@ -339,8 +345,11 @@ impl Engine {
             check.stdout = agent.redact_output(&run.config.isolation.redact(&check.stdout));
             check.stderr = agent.redact_output(&run.config.isolation.redact(&check.stderr));
         }
-        *run.sessions.last_mut().unwrap() = session;
-        self.save(&run)?;
-        Ok(run)
+        self.transact(id, |latest| {
+            let target = latest.sessions.iter_mut().find(|s| s.id == session.id)
+                .context("reserved session is missing")?;
+            *target = session;
+            Ok(latest.clone())
+        })
     }
 }

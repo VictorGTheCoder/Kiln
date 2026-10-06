@@ -77,6 +77,15 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Schedule every accepted ticket: concurrent independent sessions, prerequisite
+    /// ordering across specs, serialized verified integration.
+    Run {
+        id: String,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Read a recorded run, or list all run identities.
     Inspect { id: Option<String> },
     /// Show recorded state on a loopback-only local web server.
@@ -240,6 +249,25 @@ fn run() -> Result<()> {
                 .is_none_or(|i| i.status != "integrated")
             {
                 anyhow::bail!("integration blocked; inspect combined checks and conflict evidence");
+            }
+            return Ok(());
+        }
+        Commands::Run { id, fixture, codex } => {
+            let run = if let Some(path) = fixture {
+                let scenario = kiln::scheduler::FixtureScenario::load(
+                    &engine.repository.join(path),
+                    &engine.repository,
+                )?;
+                engine.run_tickets(&id, &scenario)?
+            } else {
+                let providers = kiln::scheduler::CodexProviders(
+                    kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
+                );
+                engine.run_tickets(&id, &providers)?
+            };
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            if run.status == "blocked" {
+                anyhow::bail!("run blocked; inspect scheduler blockers and ticket evidence");
             }
             return Ok(());
         }

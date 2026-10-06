@@ -10,6 +10,8 @@ pub struct FrozenSpec {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
+    #[serde(default)]
+    pub scheduler: Option<crate::scheduler::SchedulerState>,
     pub schema_version: u32,
     pub id: String,
     pub repository: String,

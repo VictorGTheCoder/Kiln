@@ -214,7 +214,12 @@ impl Engine {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let review_id = format!("{}-review-{}", run.id, run.reviews.len() + 1);
+        // Session-scoped identity: concurrent tickets review from independent snapshots.
+        let review_id = format!(
+            "{}-review-{}",
+            session.id,
+            run.reviews.iter().filter(|r| r.session_id == session.id).count() + 1
+        );
         let mut axes = Vec::new();
         for axis in ["standards", "spec"] {
             let context_id = format!("{review_id}-{axis}");
@@ -352,7 +357,7 @@ impl Engine {
                 .redact(&serde_json::to_string(&review)?),
         );
         run.reviews.push(serde_json::from_str(&safe_review)?);
-        self.save(&run)?;
+        run = self.save_ticket(&run, ticket_id)?;
         Ok(run)
     }
 }
