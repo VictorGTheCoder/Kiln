@@ -309,3 +309,38 @@ is running, including provider failures, rather than only after completion.
 `kiln correct RUN TICKET --codex /path/to/codex` recovers an attempted implementation or rejected review. It supplies frozen applicable specs, exact ticket, unresolved axis findings, checks, and current Git diff to a fresh correction context. Every correction runs build/test and new independent Standards and Spec reviews. It never integrates.
 
 `correction_cycles` is an optional positive integer (default 3). Each attempt is retained in `Run.corrections` with before/after identity, findings, checks, review, and `approved`, `retry`, `no-progress`, or `exhausted` outcome. Repeated invocation cannot reset the allowance. A fixture contains `corrections` (implementation fixture sequence) and `reviews` (independent axis fixture sequence). No unchanged correction is retried indefinitely.
+
+## Run limits
+
+`kiln run` enforces limits configured as optional top-level project keys and
+presents them, with observed usage and any exhaustion, in `scheduler.limits`
+(`kiln inspect RUN`, web view):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `correction_cycles` | 3 | Correction cycles per ticket. |
+| `implementation_concurrency` | 3 | Tickets simultaneously in their implementation phase. |
+| `duration_limit_seconds` | none | Wall-clock budget of one `kiln run` invocation. |
+| `usage_token_limit` | none | Cumulative provider tokens observed across the run. |
+| `cost_limit_usd` | none | Monetary ceiling; there is no default ceiling. |
+| `limit_policy` | `settle` | `settle` lets in-flight provider invocations finish; `stop` cancels them through their stop handles. |
+
+Usage is accounted from recorded provider observations (`usage`, `cost`,
+`cost_estimate` in session and review logs), once per provider context.
+`scheduler.limits.usage.cost_data` is `measured`, `partial`, `estimated` or
+`unavailable`; unavailable cost is null, never zero. The ceiling is enforced only
+against measured cost (`cost_ceiling`: `enforced`, `enforced_on_measured_subset`,
+`not_enforced_estimate_only`, `not_enforced_cost_unavailable`, `not_configured`).
+
+Limits are checked before each ticket starts and before each review, correction
+cycle and integration. On run-wide exhaustion nothing further starts, active
+sessions settle or stop per policy, `scheduler.limits.exhausted` records the
+limit and reason, interrupted tickets become `stopped` (unstarted ones stay
+`waiting`, unblocked), and the run status is `limit_exhausted`; the CLI exits
+unsuccessfully. Completed integrations, sessions and evidence are preserved for
+resume, and correction cycles not started are not charged. Repeating `kiln run`
+cannot reset cumulative usage.
+
+Ticket correction exhaustion is ticket-scoped: the ticket is `blocked` with
+`exhaustion: "correction_cycles"` while `scheduler.limits.exhausted` stays null,
+so later bounded replanning can apply only when run-wide resources remain.

@@ -41,4 +41,7 @@ pub struct Run {
     /// Decisions made each time the run was resumed after an interruption.
     #[serde(default)]
     pub recoveries: Vec<crate::recovery::Recovery>,
+    /// Progress comments reflected back to imported GitHub issues.
+    #[serde(default)]
+    pub synchronization: Option<crate::synchronization::Synchronization>,
 }

@@ -130,6 +130,9 @@ struct FixtureState {
     pull_requests: Vec<FixturePullRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     interrupt: Option<String>,
+    /// Other simulated GitHub state (such as issues) sharing the fixture file.
+    #[serde(flatten)]
+    other: serde_json::Map<String, serde_json::Value>,
 }
 #[derive(Serialize, Deserialize)]
 struct FixturePullRequest {
