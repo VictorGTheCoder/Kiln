@@ -190,7 +190,7 @@ impl Engine {
                 })
                 .cloned()
                 .collect();
-            let cycle_id = format!("{}-correction-{}-{}", run.id, ticket_id, number + 1);
+            let cycle_id = format!("{}-correction-{}", run.id, run.corrections.len() + 1);
             let request = CorrectionRequest {
                 context_id: cycle_id.clone(),
                 ticket,

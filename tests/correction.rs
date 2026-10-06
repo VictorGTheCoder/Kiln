@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::{fs, process::Command};
-fn scenario(stalled: bool, exhausted: bool) {
+fn scenario_with_ticket(stalled: bool, exhausted: bool, ticket: &str) {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path();
     let git = |args: &[&str]| {
@@ -34,7 +34,7 @@ fn scenario(stalled: bool, exhausted: bool) {
     let out = cli(&["prepare", "--config", "kiln.json", "--spec", "one.md"]);
     let run: Value = serde_json::from_slice(&out.stdout).unwrap();
     let id = run["id"].as_str().unwrap();
-    fs::write(repo.join("plan.json"),json!({"tickets":[{"id":"a","title":"Feature","description":"Deliver feature","acceptance_criteria":["works"],"covers":["one.md#ac-1"],"blocked_by":[]}],"verification":{"outcome":"verified","findings":[]}}).to_string()).unwrap();
+    fs::write(repo.join("plan.json"),json!({"tickets":[{"id":ticket,"title":"Feature","description":"Deliver feature","acceptance_criteria":["works"],"covers":["one.md#ac-1"],"blocked_by":[]}],"verification":{"outcome":"verified","findings":[]}}).to_string()).unwrap();
     assert!(cli(&["plan", id, "--fixture", "plan.json"])
         .status
         .success());
@@ -43,7 +43,7 @@ fn scenario(stalled: bool, exhausted: bool) {
         json!({"files":{"feature.txt":"bad trailing space \n"},"outcome":"completed"}).to_string(),
     )
     .unwrap();
-    assert!(!cli(&["implement", id, "a", "--fixture", "bad.json"])
+    assert!(!cli(&["implement", id, ticket, "--fixture", "bad.json"])
         .status
         .success());
     let approved = json!({"outcome":"approved","findings":[],"evidence":"Read corrected feature"});
@@ -54,7 +54,7 @@ fn scenario(stalled: bool, exhausted: bool) {
         json!({"corrections":[{"files":{"feature.txt":if stalled {"bad trailing space \n"} else {"correct\n"}},"outcome":"completed"}],"reviews":[{"standards":approved,"spec":approved}]})
     };
     fs::write(repo.join("correct.json"), fixture.to_string()).unwrap();
-    let out = cli(&["correct", id, "a", "--fixture", "correct.json"]);
+    let out = cli(&["correct", id, ticket, "--fixture", "correct.json"]);
     assert_eq!(
         out.status.success(),
         !stalled && !exhausted,
@@ -62,6 +62,18 @@ fn scenario(stalled: bool, exhausted: bool) {
         String::from_utf8_lossy(&out.stderr)
     );
     let state: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let context_id = state["corrections"][0]["id"].as_str().unwrap();
+    assert!(!context_id.contains('/'));
+    let context = repo
+        .join(".kiln/contexts")
+        .join(format!("{context_id}.json"));
+    let recorded: Value = serde_json::from_slice(&fs::read(&context).unwrap()).unwrap();
+    assert_eq!(recorded["ticket"]["id"], ticket);
+    assert_eq!(
+        fs::canonicalize(context.parent().unwrap()).unwrap(),
+        fs::canonicalize(repo.join(".kiln/contexts")).unwrap()
+    );
+
     if exhausted {
         assert_eq!(state["corrections"].as_array().unwrap().len(), 3);
         assert_eq!(state["corrections"][2]["outcome"], "exhausted");
@@ -90,4 +102,16 @@ fn stalled_correction_stops_without_approval() {
 #[test]
 fn correction_allowance_exhausts_without_false_success() {
     scenario(false, true);
+}
+
+fn scenario(stalled: bool, exhausted: bool) {
+    scenario_with_ticket(stalled, exhausted, "a");
+}
+#[test]
+fn imported_issue_identity_is_safe_for_correction_contexts() {
+    scenario_with_ticket(false, false, "github:owner/repository#15");
+}
+#[test]
+fn hostile_ticket_identity_cannot_escape_context_directory() {
+    scenario_with_ticket(false, false, "../../escape");
 }
