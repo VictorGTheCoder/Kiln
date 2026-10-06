@@ -8,6 +8,8 @@ The product specification and its decomposition into 19 tickets are approved. Im
 
 The [product specification](docs/spec.md) defines the first-version scope: a Rust engine, CLI, local web interface, Codex as the first agent engine, concurrent execution, and recovery after interruptions. The [GitHub issues](https://github.com/VictorGTheCoder/kiln/issues) are the implementation tracker.
 
+See the [approved ticket index](docs/implementation-tickets.md) for the 19 implementation slices and their blocking dependencies.
+
 ## Target workflow
 
 Approved specs → verified tickets → implementation → review → corrections → integration → global validation → pull request.
