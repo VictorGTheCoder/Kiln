@@ -80,6 +80,17 @@ enum Event {
 impl Engine {
     /// Run every accepted ticket to integration or blockage. Returns the final run.
     pub fn run_tickets(&self, id: &str, providers: &dyn TicketProviders) -> Result<Run> {
+        let _owner = self.own_run(id)?;
+        self.schedule(id, providers, false)
+    }
+
+    /// Caller holds run ownership. On resume, tickets recorded as blocked stay blocked.
+    pub(crate) fn schedule(
+        &self,
+        id: &str,
+        providers: &dyn TicketProviders,
+        resume: bool,
+    ) -> Result<Run> {
         let mut state = self.transact(id, |run| {
             let plan = run
                 .plan
@@ -93,12 +104,26 @@ impl Engine {
                     bail!("ticket {} depends on unknown ticket {missing}", t.id);
                 }
                 let integrated = integrated(run, &t.id);
+                // Resume keeps recorded blockers instead of retrying blocked tickets.
+                let blocker = run
+                    .scheduler
+                    .iter()
+                    .flat_map(|s| &s.tickets)
+                    .find(|r| resume && r.id == t.id && r.state == "blocked")
+                    .map(|r| r.blocker.clone().unwrap_or_default());
                 tickets.push(TicketSchedule {
                     id: t.id.clone(),
                     blocked_by: t.blocked_by.clone(),
-                    state: if integrated { "integrated" } else { "waiting" }.into(),
+                    state: if integrated {
+                        "integrated"
+                    } else if blocker.is_some() {
+                        "blocked"
+                    } else {
+                        "waiting"
+                    }
+                    .into(),
                     waiting_on: Vec::new(),
-                    blocker: None,
+                    blocker,
                     session_id: run
                         .sessions
                         .iter()
@@ -222,11 +247,19 @@ impl Engine {
         integration: &Mutex<()>,
         events: &mpsc::Sender<Event>,
     ) -> Result<()> {
-        let implementer = providers.implementer(ticket)?;
-        let mut run = self.implement_ticket(id, ticket, implementer.as_ref())?;
-        drop(implementer);
+        // Resume continues recorded work: only a ticket without a live attempt is implemented.
+        let current = self.inspect(id)?;
+        let mut run = match latest_session(&current, ticket) {
+            Ok(s) if matches!(s.status.as_str(), "implemented" | "failed") => current,
+            _ => {
+                let implementer = providers.implementer(ticket)?;
+                self.implement_ticket(id, ticket, implementer.as_ref())?
+            }
+        };
         let mut session = latest_session(&run, ticket)?;
-        if session.status == "implemented" {
+        if session.status == "implemented"
+            && !run.reviews.iter().any(|r| r.session_id == session.id)
+        {
             let reviewer = providers.reviewer(ticket)?;
             run = self.review_ticket(id, ticket, reviewer.as_ref())?;
             session = latest_session(&run, ticket)?;
@@ -275,11 +308,12 @@ impl Engine {
     }
 }
 
+/// Latest attempt of a ticket; interrupted attempts are superseded history.
 fn latest_session(run: &Run, ticket: &str) -> Result<crate::execution::ImplementationSession> {
     run.sessions
         .iter()
         .rev()
-        .find(|s| s.ticket_id == ticket)
+        .find(|s| s.ticket_id == ticket && s.status != "interrupted")
         .cloned()
         .context("missing implementation session")
 }

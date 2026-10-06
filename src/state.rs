@@ -38,4 +38,7 @@ pub struct Run {
     /// Remote branch and pull request identity of the verified delivery.
     #[serde(default)]
     pub publication: Option<crate::publication::Publication>,
+    /// Decisions made each time the run was resumed after an interruption.
+    #[serde(default)]
+    pub recoveries: Vec<crate::recovery::Recovery>,
 }

@@ -334,6 +334,7 @@ impl Engine {
                 checks,
                 failure: failure.map(|f| redact(&f)),
             });
+            crate::recovery::fault("review.after_axis", ticket_id);
         }
         let spec = axes.pop().unwrap();
         let standards = axes.pop().unwrap();

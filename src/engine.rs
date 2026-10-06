@@ -98,6 +98,7 @@ impl Engine {
             integrations: Vec::new(),
             validation_reports: Vec::new(),
             publication: None,
+            recoveries: Vec::new(),
         };
         self.save(&run)?;
         Ok(run)
@@ -135,6 +136,19 @@ impl Engine {
         use std::os::fd::AsRawFd;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(RunLock(file))
+    }
+    /// Exclusive scheduling ownership of a run. The operating system releases it
+    /// when the owning process ends, so a held lock means a live scheduler.
+    pub fn own_run(&self, id: &str) -> Result<RunLock> {
+        validate_id(id)?;
+        fs::create_dir_all(self.runs_dir())?;
+        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+            .open(self.runs_dir().join(format!("{id}.owner.lock")))?;
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            bail!("run '{id}' is active in another process; resume only an interrupted run");
         }
         Ok(RunLock(file))
     }

@@ -86,6 +86,16 @@ enum Commands {
         #[arg(long)]
         codex: Option<PathBuf>,
     },
+    /// Reopen an interrupted run: reconcile recorded state with observed Git and process
+    /// state, record each recovery decision, then continue scheduling without
+    /// repeating completed effects.
+    Resume {
+        id: String,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
+    },
     /// Validate the integrated revision against acceptance workflows per criterion.
     Validate {
         id: String,
@@ -272,18 +282,25 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
-        Commands::Run { id, fixture, codex } => {
-            let run = if let Some(path) = fixture {
-                let scenario = kiln::scheduler::FixtureScenario::load(
+        command @ (Commands::Run { .. } | Commands::Resume { .. }) => {
+            let (resume, id, fixture, codex) = match command {
+                Commands::Run { id, fixture, codex } => (false, id, fixture, codex),
+                Commands::Resume { id, fixture, codex } => (true, id, fixture, codex),
+                _ => unreachable!(),
+            };
+            let providers: Box<dyn kiln::scheduler::TicketProviders> = match fixture {
+                Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
                     &engine.repository.join(path),
                     &engine.repository,
-                )?;
-                engine.run_tickets(&id, &scenario)?
-            } else {
-                let providers = kiln::scheduler::CodexProviders(
+                )?),
+                None => Box::new(kiln::scheduler::CodexProviders(
                     kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
-                );
-                engine.run_tickets(&id, &providers)?
+                )),
+            };
+            let run = if resume {
+                engine.resume(&id, providers.as_ref())?
+            } else {
+                engine.run_tickets(&id, providers.as_ref())?
             };
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run.status == "blocked" {
