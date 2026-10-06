@@ -26,6 +26,13 @@ enum Commands {
         #[arg(long)]
         fixture: PathBuf,
     },
+    /// Execute one eligible ticket in an isolated worktree.
+    Implement {
+        id: String,
+        ticket: String,
+        #[arg(long)]
+        fixture: PathBuf,
+    },
     /// Read a recorded run, or list all run identities.
     Inspect { id: Option<String> },
     /// Show recorded state on a loopback-only local web server.
@@ -47,6 +54,25 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&run)?);
             if !run.plan.as_ref().is_some_and(|p| p.executable) {
                 anyhow::bail!("plan rejected; inspect the recorded findings");
+            }
+            return Ok(());
+        }
+        Commands::Implement {
+            id,
+            ticket,
+            fixture,
+        } => {
+            let agent = kiln::execution::FixtureImplementationAgent::load(
+                &engine.repository.join(fixture),
+            )?;
+            let run = engine.implement_ticket(&id, &ticket, &agent)?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            if run
+                .sessions
+                .last()
+                .is_none_or(|s| s.status != "implemented")
+            {
+                anyhow::bail!("implementation failed; inspect recorded session evidence");
             }
             return Ok(());
         }
