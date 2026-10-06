@@ -233,14 +233,13 @@ impl Engine {
                 )?;
             }
             let specs = run
-                .specs
-                .iter()
+                .effective_specs()
+                .into_iter()
                 .filter(|s| {
                     plan.requirements
                         .iter()
                         .any(|r| r.spec_path == s.path && ticket.covers.contains(&r.id))
                 })
-                .cloned()
                 .collect();
             let repository_instructions =
                 fs::read_to_string(worktree.join("AGENTS.md")).unwrap_or_default();

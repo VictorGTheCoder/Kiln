@@ -319,6 +319,7 @@ presents them, with observed usage and any exhaustion, in `scheduler.limits`
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `correction_cycles` | 3 | Correction cycles per ticket. |
+| `replanning_attempts` | 1 | Replanning attempts per ticket after its correction cycles are exhausted; `0` disables. |
 | `implementation_concurrency` | 3 | Tickets simultaneously in their implementation phase. |
 | `duration_limit_seconds` | none | Wall-clock budget of one `kiln run` invocation. |
 | `usage_token_limit` | none | Cumulative provider tokens observed across the run. |
@@ -344,3 +345,52 @@ cannot reset cumulative usage.
 Ticket correction exhaustion is ticket-scoped: the ticket is `blocked` with
 `exhaustion: "correction_cycles"` while `scheduler.limits.exhausted` stays null,
 so later bounded replanning can apply only when run-wide resources remain.
+
+## Bounded replanning
+
+When a ticket exhausts its correction cycles, `kiln run` makes at most
+`replanning_attempts` (default one) replanning attempts for it, only while
+run-wide limits remain (otherwise the ticket is `stopped`, resumable). A fresh
+replanning context receives the ticket, its unresolved findings and the effective
+specs and returns one revised ticket with the same id. The whole plan containing
+it is independently reverified in a separate context (coverage, dependencies,
+verifier outcome) before any revised work starts. A verified revision replaces
+the ticket in `plan`, marks its earlier sessions `superseded`, and the ticket is
+implemented and reviewed again. Each attempt is recorded in `replans` (`attempt`,
+`failures`, `previous`, `revised`, `verification`, `findings`, `outcome`:
+`replanned`, `rejected` or `failed`, and `result`: `integrated` or `blocked`).
+
+Persistent failure after replanning, or a replan that fails reverification,
+blocks the ticket with `exhaustion: "replanning"`. Its descendants never start;
+independent tickets continue. No further attempts or developer prompts follow.
+
+## Autonomous decisions
+
+`kiln decide RUN --ambiguity FILE (--fixture FILE | --codex PATH)` resolves a
+conflicting or ambiguous requirement without developer intervention. The
+ambiguity is `{id, question, positions: [{source, reference, statement}]}` where
+`source` is `product_objective`, `architectural_decision` or `spec`. Objectives
+and architectural decisions are configured as top-level project keys:
+
+```json
+"product_objectives": [{"id": "PO-1", "statement": "..."}],
+"architectural_decisions": [{"id": "ADR-1", "statement": "..."}]
+```
+
+A `spec` reference is a frozen spec path or requirement id. Unrecorded
+references are refused. The engine ranks positions (product objectives, then
+architectural decisions, then specs) and accepts a proposal only when it is
+governed by the highest-ranked position present and preserves rationale and
+evidence; otherwise the decision is recorded as `rejected` with a
+`hierarchy_violation` or `missing_rationale` finding. Every decision is kept in
+`decisions`.
+
+A decision may revise one spec and its affected tickets. The revision is an
+explicit versioned artifact in `spec_revisions` (`version`, `path`,
+`base_sha256`, `content`, `content_sha256`, `decision_id`, `status`); frozen
+`specs` and the repository file are never overwritten. The plan with the revised
+tickets is independently reverified against the revised specs before adoption.
+Only a `verified` revision becomes effective: later sessions, reviews and
+corrections receive it. A `rejected` revision stays visible and leaves the
+accepted plan unchanged. The CLI exits unsuccessfully unless the decision is
+`resolved`.

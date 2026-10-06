@@ -98,6 +98,9 @@ impl Engine {
             integrations: Vec::new(),
             validation_reports: Vec::new(),
             publication: None,
+            decisions: Vec::new(),
+            spec_revisions: Vec::new(),
+            replans: Vec::new(),
         };
         self.save(&run)?;
         Ok(run)

@@ -7,12 +7,14 @@
 //! Missing monetary cost is reported as unavailable, never as zero, and estimates
 //! are reported but never enforced.
 use crate::{ProjectConfig, Run};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, time::Duration};
 
 pub const DEFAULT_CORRECTION_CYCLES: u64 = 3;
+/// Replanning attempts per ticket after its correction cycles are exhausted.
+pub const DEFAULT_REPLANNING_ATTEMPTS: u64 = 1;
 /// Let in-flight provider invocations finish, then start nothing further.
 pub const SETTLE: &str = "settle";
 /// Cancel in-flight provider invocations through their stop handles.
@@ -22,6 +24,9 @@ pub const STOP: &str = "stop";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunLimits {
     pub correction_cycles: u64,
+    /// Bounded replanning attempts per ticket after correction exhaustion (0 disables).
+    #[serde(default = "default_replanning_attempts")]
+    pub replanning_attempts: u64,
     /// Wall-clock budget of one `kiln run` invocation.
     pub duration_limit_seconds: Option<u64>,
     /// Cumulative provider tokens observed across the run.
@@ -55,8 +60,15 @@ impl RunLimits {
             Some(Value::String(p)) if p == SETTLE || p == STOP => p.clone(),
             Some(_) => bail!("limit_policy must be \"settle\" or \"stop\""),
         };
+        let replanning_attempts = match get("replanning_attempts") {
+            None => DEFAULT_REPLANNING_ATTEMPTS,
+            Some(v) => v
+                .as_u64()
+                .context("replanning_attempts must be a non-negative integer")?,
+        };
         Ok(Self {
             correction_cycles: positive("correction_cycles")?.unwrap_or(DEFAULT_CORRECTION_CYCLES),
+            replanning_attempts,
             duration_limit_seconds: positive("duration_limit_seconds")?,
             usage_token_limit: positive("usage_token_limit")?,
             cost_limit_usd,
@@ -114,6 +126,10 @@ impl RunLimits {
         }
         .into()
     }
+}
+
+fn default_replanning_attempts() -> u64 {
+    DEFAULT_REPLANNING_ATTEMPTS
 }
 
 /// Provider usage observed in recorded run state.

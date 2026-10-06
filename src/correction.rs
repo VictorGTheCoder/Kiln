@@ -191,14 +191,13 @@ impl Engine {
                 .context("unknown ticket")?
                 .clone();
             let specs = run
-                .specs
-                .iter()
+                .effective_specs()
+                .into_iter()
                 .filter(|s| {
                     plan.requirements
                         .iter()
                         .any(|r| r.spec_path == s.path && ticket.covers.contains(&r.id))
                 })
-                .cloned()
                 .collect();
             // Session-scoped identity: concurrent tickets correct from independent snapshots.
             let cycle_id = format!("{}-correction-{}", before.id, number + 1);

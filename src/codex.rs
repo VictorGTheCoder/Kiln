@@ -417,6 +417,22 @@ impl crate::planning::PlanningAgent for CodexPlanningAgent {
         self.structured(&format!("{}\nReturn only a JSON object with outcome (verified, failed, unable-to-verify) and findings (array of objects with code and message). Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
     }
 }
+impl crate::decision::DecisionAgent for CodexPlanningAgent {
+    fn decide(
+        &self,
+        request: &crate::decision::DecisionRequest,
+    ) -> Result<crate::decision::Proposal> {
+        self.structured(&format!("{}\nReturn only a JSON object with governing (reference of the governing position), resolution, rationale, evidence (array of strings), optional spec_revision ({{path, content}}) and optional tickets (complete revised tickets). Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
+    }
+}
+impl crate::replanning::ReplanningAgent for CodexPlanningAgent {
+    fn replan(
+        &self,
+        request: &crate::replanning::ReplanRequest,
+    ) -> Result<crate::planning::Ticket> {
+        self.structured(&format!("{}\nReturn only one JSON ticket object with id (unchanged), title, description, acceptance_criteria, covers (exact requirement IDs), blocked_by. Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
+    }
+}
 impl CodexConfig {
     pub fn from_project(
         config: &crate::ProjectConfig,

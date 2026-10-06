@@ -38,4 +38,50 @@ pub struct Run {
     /// Remote branch and pull request identity of the verified delivery.
     #[serde(default)]
     pub publication: Option<crate::publication::Publication>,
+    /// Autonomous decision sessions and their preserved rationale.
+    #[serde(default)]
+    pub decisions: Vec<crate::decision::Decision>,
+    /// Versioned spec revisions made during the run. Frozen `specs` never change.
+    #[serde(default)]
+    pub spec_revisions: Vec<SpecRevision>,
+    /// Bounded replanning attempts after exhausted correction cycles.
+    #[serde(default)]
+    pub replans: Vec<crate::replanning::Replanning>,
+}
+/// A spec revision produced by a decision: an explicit, versioned run artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecRevision {
+    /// Run-wide revision number, starting at 1.
+    pub version: u32,
+    pub path: String,
+    /// Content hash of the effective spec this revision replaces.
+    pub base_sha256: String,
+    pub content: String,
+    pub content_sha256: String,
+    pub decision_id: String,
+    /// verified (effective) | rejected (failed independent reverification)
+    pub status: String,
+}
+impl Run {
+    /// Frozen specs with the latest verified revision of each applied.
+    pub fn effective_specs(&self) -> Vec<FrozenSpec> {
+        self.specs
+            .iter()
+            .map(|spec| {
+                match self
+                    .spec_revisions
+                    .iter()
+                    .rev()
+                    .find(|r| r.path == spec.path && r.status == "verified")
+                {
+                    Some(r) => FrozenSpec {
+                        content: r.content.clone(),
+                        content_sha256: r.content_sha256.clone(),
+                        ..spec.clone()
+                    },
+                    None => spec.clone(),
+                }
+            })
+            .collect()
+    }
 }
