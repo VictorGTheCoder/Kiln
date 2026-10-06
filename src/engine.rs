@@ -94,6 +94,7 @@ impl Engine {
             sessions: Vec::new(),
             corrections: Vec::new(),
             reviews: Vec::new(),
+            integrations: Vec::new(),
         };
         self.save(&run)?;
         Ok(run)

@@ -18,3 +18,5 @@ pub mod codex;
 pub mod review;
 
 pub mod correction;
+
+pub mod integration;
