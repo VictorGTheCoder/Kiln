@@ -303,3 +303,9 @@ as a complete serialized value, including verifier argv, findings and failures;
 registered environment values and scoped auth strings are removed before state
 persistence and CLI return. Regression providers inspect contexts while invocation
 is running, including provider failures, rather than only after completion.
+
+## Autonomous correction
+
+`kiln correct RUN TICKET --codex /path/to/codex` recovers an attempted implementation or rejected review. It supplies frozen applicable specs, exact ticket, unresolved axis findings, checks, and current Git diff to a fresh correction context. Every correction runs build/test and new independent Standards and Spec reviews. It never integrates.
+
+`correction_cycles` is an optional positive integer (default 3). Each attempt is retained in `Run.corrections` with before/after identity, findings, checks, review, and `approved`, `retry`, `no-progress`, or `exhausted` outcome. Repeated invocation cannot reset the allowance. A fixture contains `corrections` (implementation fixture sequence) and `reviews` (independent axis fixture sequence). No unchanged correction is retried indefinitely.
