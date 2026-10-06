@@ -11,7 +11,13 @@ Create `kiln.json` in the target Git repository:
   "build": ["cargo", "build"],
   "test": ["cargo", "test"],
   "startup": ["cargo", "run"],
-  "acceptance_criteria": ["The combined application fulfills both approved specs"]
+  "acceptance_criteria": ["The combined application fulfills both approved specs"],
+  "isolation": {
+    "network": "none",
+    "runtime": "system",
+    "commands": [["cargo", "build"], ["cargo", "test"], ["cargo", "run"]],
+    "secrets": {}
+  }
 }
 ```
 
@@ -124,8 +130,7 @@ has a fresh context identity, relevant frozen specs, ticket, repository AGENTS.m
 and integrated prerequisite session evidence. Requests are retained in
 `.kiln/contexts/`. The engine creates a dedicated integration branch from committed
 HEAD and a separate branch/worktree per session under `.kiln/worktrees/`. Dirty
-files in the developer checkout are never copied or modified. This Git isolation
-is not an operating-system sandbox or an execution authorization policy.
+files in the developer checkout are never copied or modified. Git worktree isolation is combined with the mandatory execution policy below.
 
 Only independently verified executable plans can execute. Prerequisites must have
 an `integrated` session with passing verification and a commit reachable from the
@@ -138,3 +143,35 @@ stdout and stderr. Startup commands are not run because they can be long-lived.
 Failed agent results, empty changes, and failed checks persist a `failed` session
 and make the CLI exit unsuccessfully. None release dependent tickets. Worktrees
 remain available for inspection, correction and later integration.
+
+# Mandatory execution policy
+
+Linux `/usr/bin/bwrap` is required. Preparation runs an actual isolated readiness
+probe and rejects unavailable isolation; subprocess checks have no host fallback.
+`isolation.commands` authorizes exact argv arrays launched by the engine, including
+configured build/test/startup and provider launch argv. A denied command is rejected
+before launch. `runtime: "system"` explicitly delegates all tools and interpreters
+under read-only `/usr`, `/bin`, `/lib`, `/lib64`; it is not a child-executable
+allowlist. Authorized Python/shell/compiler programs may execute arbitrary code
+within the mounted filesystem and selected network policy. Agent adapters must use
+`Sandbox::command` and the request's policy. The fixture adapter is trusted engine
+code: its deterministic file writes validate relative paths and symlink escape;
+it does not launch an untrusted process.
+
+The sandbox has private process, user, IPC and network namespaces, private HOME,
+/tmp and /dev, read-only system runtimes and certificate/resolver data, a writable
+assigned worktree and read-only Git metadata. The original checkout, host home,
+engine state and sockets are absent. Provider-owned additional mounts are scoped
+runtime or authentication paths; arbitrary project-configured mounts are unsupported.
+`network: "none"` denies network connectivity. `allow-all` explicitly shares host
+networking and permits arbitrary destinations, including localhost. Domain
+allowlists are rejected because no enforcing gateway is implemented.
+
+Environment inheritance is cleared. `secrets` maps host variable names to authorized
+roles (`agent`, `build`, `test`, `startup`), for example
+`{"PRIVATE_TOKEN":["agent"]}`. Only names and roles are persisted; values must exist
+before preparation and launch. Captured check output, agent log, failure evidence
+and recorded diff redact exact and JSON-escaped values before persistence or CLI/web
+observation. This does not prevent an authorized arbitrary program from encoding or
+exfiltrating its secret; do not authorize a secret to a program you do not trust.
+Secrets must not be supplied literally in argv, public configuration or frozen specs.

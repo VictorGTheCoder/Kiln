@@ -15,7 +15,7 @@ fn scenario(mutation: Option<&str>) {
         )
         .unwrap();
     }
-    fs::write(repo.path().join("kiln.json"),json!({"build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Together"]}).to_string()).unwrap();
+    fs::write(repo.path().join("kiln.json"),json!({"build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Together"],"isolation":{"network":"none","runtime":"system","commands":[["git"]]}}).to_string()).unwrap();
     let cli = |args: Vec<&str>| {
         Command::new(env!("CARGO_BIN_EXE_kiln"))
             .current_dir(repo.path())
