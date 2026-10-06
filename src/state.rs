@@ -20,6 +20,8 @@ pub struct Run {
     #[serde(default)]
     pub plan: Option<crate::planning::Plan>,
     #[serde(default)]
+    pub imported_issues: Vec<crate::import::ImportedIssue>,
+    #[serde(default)]
     pub integration_branch: Option<String>,
     #[serde(default)]
     pub sessions: Vec<crate::execution::ImplementationSession>,

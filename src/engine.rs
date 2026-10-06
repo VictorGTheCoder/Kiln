@@ -86,6 +86,7 @@ impl Engine {
             config,
             specs,
             plan: None,
+            imported_issues: Vec::new(),
             integration_branch: None,
             sessions: Vec::new(),
         };

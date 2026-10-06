@@ -13,6 +13,18 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Read selected GitHub issues and independently verify against frozen specs.
+    Import {
+        id: String,
+        #[arg(long)]
+        github_repo: String,
+        #[arg(long, required = true)]
+        issue: Vec<u64>,
+        #[arg(long)]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        verification_fixture: PathBuf,
+    },
     /// Validate configuration and freeze approved Markdown specs. No commands are executed.
     Prepare {
         #[arg(long)]
@@ -45,6 +57,29 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let engine = Engine::open(&cli.repo)?;
     let value = match cli.command {
+        Commands::Import {
+            id,
+            github_repo,
+            issue,
+            fixture,
+            verification_fixture,
+        } => {
+            let source: Box<dyn kiln::import::IssueSource> = match fixture {
+                Some(path) => Box::new(kiln::import::FixtureIssues::load(
+                    &engine.repository.join(path),
+                )?),
+                None => Box::new(kiln::import::GitHubIssues),
+            };
+            let verifier =
+                kiln::planning::FixtureAgent::load(&engine.repository.join(verification_fixture))?;
+            let run =
+                engine.import_issues(&id, &github_repo, &issue, source.as_ref(), &verifier)?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            if !run.plan.as_ref().is_some_and(|p| p.executable) {
+                anyhow::bail!("import rejected; inspect recorded findings");
+            }
+            return Ok(());
+        }
         Commands::Prepare { config, spec } => {
             serde_json::to_value(engine.prepare(&config, &spec)?)?
         }
