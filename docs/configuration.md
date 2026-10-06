@@ -223,3 +223,30 @@ retaining exact approved frozen inputs rather than silently changing their conte
 Durable state serialization also redacts registered values as defense for new provider
 fields. Provider adapters must sanitize any newly returned observable fields before
 returning a Run; persistence redaction alone cannot sanitize an in-memory CLI response.
+
+
+## Codex provider
+
+`plan RUN --codex /absolute/path/to/codex` and `implement RUN TICKET --codex /absolute/path/to/codex` use real fresh ephemeral Codex contexts. The fixture option remains available for offline contract checks. Configure a pinned standalone installation and scoped authentication file:
+
+```json
+"codex": {
+  "installation": "/opt/codex/0.160.1/codex",
+  "auth": "/private/codex/auth.json",
+  "timeout_seconds": 1800
+}
+```
+
+An optional `model` selects the project's chosen model. No model override is otherwise supplied. The CLI installation path takes precedence. Authorize the exact `CodexConfig::argv()` in `isolation.commands` (the executable inside the namespace is `/codex/codex`):
+
+```json
+["/codex/codex", "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--color", "never", "--sandbox", "danger-full-access", "-c", "approval_policy=\"never\"", "-c", "features.code_mode=false", "-"]
+```
+
+If configuring a model, insert `"--model", "your-model"` immediately before the final `"-"`. Prompts travel through stdin so authorized argv remains stable. `network=allow-all` is required explicitly for cloud model access; `none` fails before launching. Authentication errors and missing capabilities fail explicitly. A sibling `codex-code-mode-host`, when present, is mounted as a scoped read-only runtime binary because recent installations require it even when the code_mode feature flag is disabled.
+
+Only the executable, optional companion and a private ephemeral copy of auth.json are mounted. No host home or full Codex configuration is exposed. The auth copy is writable for refresh, protected with private directory/file permissions, and removed when the session finishes. Auth string fields and configured secret values are redacted before event data is returned or persisted. This protects observable artifacts; it does not prevent a deliberately hostile process from encoding or transmitting credentials it is authorized to use with unrestricted network access.
+
+The adapter observes JSONL thread identity, completed messages, actionable provider/capability errors and token usage. Unknown event kinds are tolerated; malformed JSONL and missing completed turns fail. Subscription monetary cost is null, not zero. Implementation logs contain a serialized observation with `usage` and `cost`. Zero exit status never proves ticket completion: the engine requires a usable Git diff and independently passing configured checks. Adapted implement-spec/TDD instructions assign exactly one ticket; Rust owns staging, commits and progression.
+
+Planning generation and verification use separate fresh Codex invocations in disposable clones. `CodexPlanningAgent::structured<T>` also supports independently validated structured review responses. `CodexAdapter::invoke` is the shared launch/observation/error boundary and `stop_handle`/`stop` cancel an invocation. Timeout or cancellation terminates the sandbox process group; the PID namespace also contains descendants. There is no host execution fallback.

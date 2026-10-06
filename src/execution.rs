@@ -56,6 +56,10 @@ pub struct AgentResult {
 /// with path-checked writes, not an untrusted executable.
 pub trait ImplementationAgent {
     fn implement(&self, request: &ImplementationRequest) -> Result<AgentResult>;
+    /// Provider credential redaction also applies to diffs, checks and failures.
+    fn redact_output(&self, text: &str) -> String {
+        text.to_owned()
+    }
 }
 #[derive(Deserialize)]
 pub struct FixtureImplementationAgent {
@@ -244,7 +248,8 @@ impl Engine {
                 &["diff", "--cached", "--binary", &session.base_commit],
             )?;
             let result = agent_result?;
-            session.agent_outcome = Some(run.config.isolation.redact(&result.outcome));
+            session.agent_outcome =
+                Some(agent.redact_output(&run.config.isolation.redact(&result.outcome)));
             session.agent_log = result.log;
             if result.outcome != "completed" {
                 bail!("agent outcome: {}", result.outcome);
@@ -315,12 +320,14 @@ impl Engine {
             session.status = "failed".into();
             session.failure = Some(format!("{error:#}"));
         }
-        session.agent_log = run.config.isolation.redact(&session.agent_log);
-        session.diff = run.config.isolation.redact(&session.diff);
-        session.failure = session.failure.map(|f| run.config.isolation.redact(&f));
+        session.agent_log = agent.redact_output(&run.config.isolation.redact(&session.agent_log));
+        session.diff = agent.redact_output(&run.config.isolation.redact(&session.diff));
+        session.failure = session
+            .failure
+            .map(|f| agent.redact_output(&run.config.isolation.redact(&f)));
         for check in &mut session.checks {
-            check.stdout = run.config.isolation.redact(&check.stdout);
-            check.stderr = run.config.isolation.redact(&check.stderr);
+            check.stdout = agent.redact_output(&run.config.isolation.redact(&check.stdout));
+            check.stderr = agent.redact_output(&run.config.isolation.redact(&check.stderr));
         }
         *run.sessions.last_mut().unwrap() = session;
         self.save(&run)?;
