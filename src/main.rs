@@ -32,18 +32,24 @@ enum Commands {
         #[arg(long, required = true)]
         spec: Vec<PathBuf>,
     },
-    /// Generate and independently verify tickets using a deterministic adapter.
+    /// Generate and independently verify tickets using fresh provider contexts.
     Plan {
         id: String,
         #[arg(long)]
-        fixture: PathBuf,
+        #[arg(required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
     },
     /// Execute one eligible ticket in an isolated worktree.
     Implement {
         id: String,
         ticket: String,
         #[arg(long)]
-        fixture: PathBuf,
+        #[arg(required_unless_present = "codex", conflicts_with = "codex")]
+        fixture: Option<PathBuf>,
+        #[arg(long)]
+        codex: Option<PathBuf>,
     },
     /// Read a recorded run, or list all run identities.
     Inspect { id: Option<String> },
@@ -83,9 +89,22 @@ fn run() -> Result<()> {
         Commands::Prepare { config, spec } => {
             serde_json::to_value(engine.prepare(&config, &spec)?)?
         }
-        Commands::Plan { id, fixture } => {
-            let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(fixture))?;
-            let run = engine.plan(&id, &agent)?;
+        Commands::Plan { id, fixture, codex } => {
+            let agent: Box<dyn kiln::planning::PlanningAgent> = if let Some(path) = fixture {
+                Box::new(kiln::planning::FixtureAgent::load(
+                    &engine.repository.join(path),
+                )?)
+            } else {
+                let config = engine.inspect(&id)?.config;
+                Box::new(kiln::codex::CodexPlanningAgent {
+                    adapter: kiln::codex::CodexAdapter::new(
+                        kiln::codex::CodexConfig::from_project(&config, codex)?,
+                    ),
+                    repository: engine.repository.clone(),
+                    isolation: config.isolation,
+                })
+            };
+            let run = engine.plan(&id, agent.as_ref())?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             if !run.plan.as_ref().is_some_and(|p| p.executable) {
                 anyhow::bail!("plan rejected; inspect the recorded findings");
@@ -96,11 +115,18 @@ fn run() -> Result<()> {
             id,
             ticket,
             fixture,
+            codex,
         } => {
-            let agent = kiln::execution::FixtureImplementationAgent::load(
-                &engine.repository.join(fixture),
-            )?;
-            let run = engine.implement_ticket(&id, &ticket, &agent)?;
+            let agent: Box<dyn kiln::execution::ImplementationAgent> = if let Some(path) = fixture {
+                Box::new(kiln::execution::FixtureImplementationAgent::load(
+                    &engine.repository.join(path),
+                )?)
+            } else {
+                Box::new(kiln::codex::CodexAdapter::new(
+                    kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
+                ))
+            };
+            let run = engine.implement_ticket(&id, &ticket, agent.as_ref())?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run
                 .sessions
