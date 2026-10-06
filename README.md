@@ -1,15 +1,19 @@
 # Kiln
 
-Kiln est un orchestrateur Rust qui conduit des specs approuvées jusqu'à une application intégrée et vérifiée, en pilotant les agents, les reviews, les corrections et les dépendances.
+Kiln is a Rust orchestrator that takes approved specs to an integrated, verified application by coordinating agents, reviews, corrections, and dependencies.
 
-## État du projet
+## Project status
 
-Conception produit approuvée. L'implémentation n'a pas commencé et le découpage en tickets reste à valider.
+The product specification and its decomposition into 19 tickets are approved. Implementation has not started.
 
-La [spec produit](docs/spec.md) décrit le périmètre de la première version : moteur Rust, CLI, interface web locale, Codex comme premier moteur d'agent, exécution parallèle et reprise après interruption.
+The [product specification](docs/spec.md) defines the first-version scope: a Rust engine, CLI, local web interface, Codex as the first agent engine, concurrent execution, and recovery after interruptions. The [GitHub issues](https://github.com/VictorGTheCoder/kiln/issues) are the implementation tracker.
 
-## Parcours cible
+## Target workflow
 
-Specs approuvées → tickets vérifiés → implémentation → review → corrections → intégration → validation globale → PR.
+Approved specs → verified tickets → implementation → review → corrections → integration → global validation → pull request.
 
-Le moteur Rust possède l'état de l'exécution. Les skills de Matt Pocock fournissent les instructions aux agents.
+The Rust engine owns execution state. Matt Pocock's skills provide instructions to agents.
+
+## Language
+
+Repository documentation, specs, issues, and project text are written in English.
