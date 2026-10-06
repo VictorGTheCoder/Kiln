@@ -201,10 +201,12 @@ impl Engine {
             bail!("select at least one positive issue number");
         }
         let mut run = self.inspect(id)?;
-        if !matches!(
-            run.status.as_str(),
-            "prepared" | "planned" | "plan_rejected"
-        ) {
+        if !run.sessions.is_empty()
+            || !matches!(
+                run.status.as_str(),
+                "prepared" | "planned" | "plan_rejected"
+            )
+        {
             bail!("cannot import after execution starts");
         }
         let selected: BTreeSet<_> = numbers.iter().copied().collect();

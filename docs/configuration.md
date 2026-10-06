@@ -148,3 +148,35 @@ and never launch implementation, Git worktrees or project commands.
 Rejected imports exit unsuccessfully after recording their evidence.
 Live read-only GitHub contract responses are documented in
 `tests/fixtures/github/README.md` and replayed through the CLI provider boundary.
+
+# Implementing one ticket
+
+```sh
+kiln --repo /path/to/project implement RUN-ID TICKET-ID --fixture implementation-agent.json
+```
+
+The deterministic fixture makes actual file changes and returns a simulated result:
+
+```json
+{"files":{"src/feature.txt":"Implemented content\n"},"outcome":"completed","log":"Session evidence"}
+```
+
+`ImplementationAgent` in `src/execution.rs` is the provider boundary. Every request
+has a fresh context identity, relevant frozen specs, ticket, repository AGENTS.md,
+and integrated prerequisite session evidence. Requests are retained in
+`.kiln/contexts/`. The engine creates a dedicated integration branch from committed
+HEAD and a separate branch/worktree per session under `.kiln/worktrees/`. Dirty
+files in the developer checkout are never copied or modified. This Git isolation
+is not an operating-system sandbox or an execution authorization policy.
+
+Only independently verified executable plans can execute. Prerequisites must have
+an `integrated` session with passing verification and a commit reachable from the
+run integration branch. Implementation does not integrate commits: successful
+sessions remain `implemented`, awaiting subsequent independent review gates.
+
+`Run.sessions` records branch, worktree, base revision, context identity, actual
+binary Git diff, agent result/log, commit, and configured build/test exit codes,
+stdout and stderr. Startup commands are not run because they can be long-lived.
+Failed agent results, empty changes, and failed checks persist a `failed` session
+and make the CLI exit unsuccessfully. None release dependent tickets. Worktrees
+remain available for inspection, correction and later integration.
