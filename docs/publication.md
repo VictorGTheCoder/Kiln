@@ -57,6 +57,12 @@ issue edited since import is surfaced as divergence (the approved repository spe
 stays authoritative); a Kiln comment edited on GitHub is surfaced as a `conflict`, is
 not overwritten, and makes the command exit non-zero.
 
+Only comments authored by the identity Kiln writes as (`gh api user`, resolved once
+per sync) can be adopted as its progress comment. A marked comment by any other
+author is ignored, Kiln posts its own, and the forgery is surfaced as divergence.
+Every state write is a short locked transaction (`Engine::transact`) that changes only
+that issue's synchronization record, so concurrent Kiln commands keep their writes.
+
 GitHub access uses `gh api` (`--gh PATH`); `--fixture github.json` simulates issues with
-`{"issues":[{repository, number, title, body, comments:[{id, body}]}],
+`{"user":"LOGIN", "issues":[{repository, number, title, body, comments:[{id, author, body}]}],
 "interrupt":"before_comment"|"after_comment"}`.

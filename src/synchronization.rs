@@ -26,11 +26,16 @@ pub struct RemoteIssue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueComment {
     pub id: u64,
+    /// Login of the comment author; only Kiln's own identity can own progress.
+    #[serde(default)]
+    pub author: String,
     pub body: String,
 }
 /// The GitHub issue operations synchronization relies on. There is deliberately no
 /// operation that edits an issue's title or body.
 pub trait IssueTracker {
+    /// Login of the authenticated identity Kiln writes comments as.
+    fn current_user(&self) -> Result<String>;
     fn issue(&self, repository: &str, number: u64) -> Result<RemoteIssue>;
     fn comments(&self, repository: &str, number: u64) -> Result<Vec<IssueComment>>;
     fn create_comment(&self, repository: &str, number: u64, body: &str) -> Result<IssueComment>;
@@ -62,7 +67,8 @@ pub struct IssueSynchronization {
 }
 
 /// Simulated GitHub issues in the shared GitHub fixture file:
-/// `{"issues":[{repository, number, title, body, comments:[{id, body}]}], "interrupt"?}`.
+/// `{"user", "issues":[{repository, number, title, body, comments:[{id, author, body}]}],
+/// "interrupt"?}` where `user` is the login Kiln writes as.
 /// `interrupt` (`before_comment` or `after_comment`) fails the next comment creation
 /// at that point once, simulating a process interruption.
 pub struct FixtureIssueTracker {
@@ -105,6 +111,12 @@ impl FixtureIssueTracker {
     }
 }
 impl IssueTracker for FixtureIssueTracker {
+    fn current_user(&self) -> Result<String> {
+        Ok(self.load()?["user"]
+            .as_str()
+            .context("GitHub fixture has no user")?
+            .into())
+    }
     fn issue(&self, repository: &str, number: u64) -> Result<RemoteIssue> {
         let mut state = self.load()?;
         let entry = Self::entry(&mut state, repository, number)?;
@@ -132,6 +144,7 @@ impl IssueTracker for FixtureIssueTracker {
             + 1;
         let comment = IssueComment {
             id,
+            author: self.current_user()?,
             body: body.into(),
         };
         let entry = Self::entry(&mut state, repository, number)?;
@@ -206,11 +219,20 @@ impl GitHubIssueTracker {
     fn comment(value: &serde_json::Value) -> Result<IssueComment> {
         Ok(IssueComment {
             id: value["id"].as_u64().context("comment has no id")?,
+            author: value["user"]["login"].as_str().unwrap_or_default().into(),
             body: value["body"].as_str().unwrap_or_default().into(),
         })
     }
 }
 impl IssueTracker for GitHubIssueTracker {
+    fn current_user(&self) -> Result<String> {
+        let value = self.api(&["--method", "GET", "user"], None)?;
+        Ok(value["login"]
+            .as_str()
+            .filter(|l| !l.is_empty())
+            .context("authenticated GitHub user has no login")?
+            .into())
+    }
     fn issue(&self, repository: &str, number: u64) -> Result<RemoteIssue> {
         let value = self.api(
             &[
@@ -509,14 +531,19 @@ impl Engine {
     }
 
     /// Reflect recorded progress in the progress comment of every imported issue.
+    ///
+    /// Only comments authored by the identity Kiln writes as can be adopted as its
+    /// progress comment. Every state write is a short locked transaction that changes
+    /// only this issue's synchronization record, so concurrent Kiln writers keep theirs.
     pub fn synchronize(&self, id: &str, tracker: &dyn IssueTracker) -> Result<Run> {
-        let mut run = self.inspect(id)?;
+        let run = self.inspect(id)?;
         if run.imported_issues.is_empty() {
             bail!("run {id} has no imported GitHub issues to synchronize");
         }
         let settings = PublicationSettings::from_config(&run.config)?;
         let target_tip = self.remote_target(settings.as_ref())?;
-        let mut sync = run.synchronization.clone().unwrap_or_default();
+        let me = tracker.current_user()?;
+        let mut latest = run.clone();
         for imported in run.imported_issues.clone() {
             let (repository, number) =
                 issue_identity(&imported.url).context("imported issue has an invalid URL")?;
@@ -534,32 +561,40 @@ impl Engine {
             let body = self.render(&run, &ticket_id, &progress, settings.as_ref(), &divergence);
             let desired = sha256(&body);
 
-            let index = match sync.issues.iter().position(|i| i.ticket_id == ticket_id) {
-                Some(index) => index,
-                None => {
-                    sync.issues.push(IssueSynchronization {
-                        ticket_id: ticket_id.clone(),
-                        repository: repository.clone(),
-                        number,
-                        state: progress.state.into(),
-                        status: "pending".into(),
-                        comment_id: None,
-                        published_sha256: None,
-                        pending_sha256: None,
-                        divergence: Vec::new(),
-                    });
-                    sync.issues.len() - 1
-                }
-            };
-            let mut record = sync.issues[index].clone();
+            let mut record = self
+                .inspect(id)?
+                .synchronization
+                .and_then(|s| s.issues.into_iter().find(|i| i.ticket_id == ticket_id))
+                .unwrap_or_else(|| IssueSynchronization {
+                    ticket_id: ticket_id.clone(),
+                    repository: repository.clone(),
+                    number,
+                    state: progress.state.into(),
+                    status: "pending".into(),
+                    comment_id: None,
+                    published_sha256: None,
+                    pending_sha256: None,
+                    divergence: Vec::new(),
+                });
             record.state = progress.state.into();
 
             let comments = tracker.comments(&repository, number)?;
             let mark = marker(&run.id, &ticket_id);
-            let existing = comments
+            for forged in comments
+                .iter()
+                .filter(|c| c.author != me && c.body.contains("kiln:progress"))
+            {
+                divergence.push(format!(
+                    "Comment {} on {repository}#{number} by @{} carries a Kiln progress marker but was not written by Kiln's identity @{me}; it was ignored.",
+                    forged.id,
+                    if forged.author.is_empty() { "unknown" } else { &forged.author }
+                ));
+            }
+            let own: Vec<_> = comments.iter().filter(|c| c.author == me).collect();
+            let existing = own
                 .iter()
                 .find(|c| Some(c.id) == record.comment_id)
-                .or_else(|| comments.iter().find(|c| c.body.contains(&mark)));
+                .or_else(|| own.iter().find(|c| c.body.contains(&mark)));
             match existing {
                 Some(comment) => {
                     let known = [&record.published_sha256, &record.pending_sha256];
@@ -575,9 +610,7 @@ impl Engine {
                         if current != desired {
                             record.pending_sha256 = Some(desired.clone());
                             record.status = "pending".into();
-                            sync.issues[index] = record.clone();
-                            run.synchronization = Some(sync.clone());
-                            self.save(&run)?;
+                            self.record_synchronization(id, &record)?;
                             tracker.update_comment(&repository, comment.id, &body)?;
                         }
                         record.comment_id = Some(comment.id);
@@ -594,9 +627,7 @@ impl Engine {
                     }
                     record.pending_sha256 = Some(desired.clone());
                     record.status = "pending".into();
-                    sync.issues[index] = record.clone();
-                    run.synchronization = Some(sync.clone());
-                    self.save(&run)?;
+                    self.record_synchronization(id, &record)?;
                     let created = tracker.create_comment(&repository, number, &body)?;
                     record.comment_id = Some(created.id);
                     record.published_sha256 = Some(desired.clone());
@@ -605,11 +636,25 @@ impl Engine {
                 }
             }
             record.divergence = divergence;
-            sync.issues[index] = record;
-            run.synchronization = Some(sync.clone());
-            self.save(&run)?;
+            latest = self.record_synchronization(id, &record)?;
         }
-        Ok(run)
+        Ok(latest)
+    }
+
+    /// Upsert one issue's record into the current durable run under the run lock.
+    fn record_synchronization(&self, id: &str, record: &IssueSynchronization) -> Result<Run> {
+        self.transact(id, |latest| {
+            let sync = latest.synchronization.get_or_insert_with(Default::default);
+            match sync
+                .issues
+                .iter_mut()
+                .find(|i| i.ticket_id == record.ticket_id)
+            {
+                Some(existing) => *existing = record.clone(),
+                None => sync.issues.push(record.clone()),
+            }
+            Ok(latest.clone())
+        })
     }
 
     fn render(

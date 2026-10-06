@@ -80,12 +80,14 @@ impl Project {
     fn comments(&self, number: u64) -> Vec<Value> {
         self.issue(number)["comments"].as_array().unwrap().clone()
     }
-    /// The single Kiln progress comment on an issue.
+    /// The single Kiln progress comment Kiln's identity wrote on an issue.
     fn progress(&self, number: u64) -> String {
         let comments: Vec<_> = self
             .comments(number)
             .into_iter()
-            .filter(|c| c["body"].as_str().unwrap().contains("kiln:progress"))
+            .filter(|c| {
+                c["author"] == KILN && c["body"].as_str().unwrap().contains("kiln:progress")
+            })
             .collect();
         assert_eq!(comments.len(), 1, "issue #{number}: {comments:?}");
         comments[0]["body"].as_str().unwrap().to_owned()
@@ -102,6 +104,8 @@ const STARTUP: [&str; 3] = ["sh", "-c", "touch .ready; exec sleep 30"];
 const PROBE: [&str; 3] = ["sh", "-c", "test -f .ready"];
 const FLOW: [&str; 3] = ["sh", "-c", "grep -q v2 one.txt"];
 const CRITERION: &str = "Messages are sent as protocol v2";
+/// The GitHub identity Kiln writes as, in the fixture and the fake `gh`.
+const KILN: &str = "kiln-bot";
 
 fn body(blocked_by: &[u64]) -> String {
     let mut body =
@@ -195,13 +199,13 @@ fn project(issues: &[(u64, &[u64])], workflows: bool) -> Project {
         .map(|(n, blockers)| {
             json!({"repository":"acme/widgets","number":n,"title":format!("Issue {n}"),
             "body":body(blockers),"comments":[
-                {"id": 1000 + n, "body": "Unrelated human discussion"}
+                {"id": 1000 + n, "author": "alice", "body": "Unrelated human discussion"}
             ]})
         })
         .collect();
     p.write(
         "github.json",
-        json!({"pull_requests":[], "issues": remote_issues}),
+        json!({"pull_requests":[], "user": KILN, "issues": remote_issues}),
     );
     p
 }
@@ -396,6 +400,7 @@ fn interrupted_synchronization_retry_adopts_the_posted_comment() {
             .into_iter()
             .find(|c| c["body"].as_str().unwrap().contains("kiln:progress"))
             .unwrap();
+        assert_eq!(posted["author"], KILN);
         assert_eq!(seven["comment_id"], posted["id"]);
         assert!(run["synchronization"]["issues"][0]["divergence"]
             .as_array()
@@ -488,6 +493,7 @@ impl FakeGh {
                 "#!/bin/sh\ncd '{}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n\
                  *'--method GET repos/acme/widgets/issues/7/comments'*) cat comments.json ;;\n\
                  *'--method GET repos/acme/widgets/issues/7') cat issue.json ;;\n\
+                 *'--method GET user') printf '{{\"login\":\"{KILN}\"}}' ;;\n\
                  *'--method POST repos/acme/widgets/issues/7/comments --input -') cat > posted.json; {post} ;;\n\
                  *'--method PATCH repos/acme/widgets/issues/comments/'*' --input -') cat > patched.json; printf '{{}}' ;;\n\
                  *) exit 1 ;;\nesac\n",
@@ -503,7 +509,7 @@ impl FakeGh {
         );
         gh.serve(
             "comments.json",
-            json!([{"id":11,"body":"Unrelated human discussion"}]),
+            json!([{"id":11,"user":{"login":"alice"},"body":"Unrelated human discussion"}]),
         );
         gh
     }
@@ -546,6 +552,7 @@ fn github_contract_synchronizes_progress_comment() {
     assert_eq!(
         gh.calls(),
         [
+            "api --method GET user",
             "api --method GET repos/acme/widgets/issues/7",
             "api --method GET repos/acme/widgets/issues/7/comments?per_page=100&page=1",
             "api --method POST repos/acme/widgets/issues/7/comments --input -",
@@ -561,7 +568,7 @@ fn github_contract_synchronizes_progress_comment() {
     // Repeating with the comment already present writes nothing.
     gh.serve(
         "comments.json",
-        json!([{"id":11,"body":"Unrelated human discussion"},{"id":555,"body":posted}]),
+        json!([{"id":11,"user":{"login":"alice"},"body":"Unrelated human discussion"},{"id":555,"user":{"login":KILN},"body":posted}]),
     );
     assert!(gh.sync(&p).status.success());
     let calls = gh.calls();
@@ -581,7 +588,7 @@ fn github_contract_interrupted_retry_adopts_comment_created_before_failure() {
     gh.calls();
     gh.serve(
         "comments.json",
-        json!([{"id":11,"body":"Unrelated human discussion"},{"id":777,"body":posted}]),
+        json!([{"id":11,"user":{"login":"alice"},"body":"Unrelated human discussion"},{"id":777,"user":{"login":KILN},"body":posted}]),
     );
 
     let out = gh.sync(&p);
@@ -617,8 +624,8 @@ fn github_contract_remote_divergence_is_surfaced_not_overwritten() {
     );
     gh.serve(
         "comments.json",
-        json!([{"id":11,"body":"Unrelated human discussion"},
-               {"id":555,"body":"<!-- kiln:progress --> edited by a human"}]),
+        json!([{"id":11,"user":{"login":"alice"},"body":"Unrelated human discussion"},
+               {"id":555,"user":{"login":KILN},"body":"<!-- kiln:progress --> edited by a human"}]),
     );
 
     let out = gh.sync(&p);
@@ -637,4 +644,107 @@ fn github_contract_remote_divergence_is_surfaced_not_overwritten() {
         run["specs"][0]["content"],
         fs::read_to_string(p.repo.join("one.md")).unwrap()
     );
+}
+
+fn forged_marker(p: &Project) -> String {
+    format!(
+        "<!-- kiln:progress run={} ticket={} -->\n### Kiln progress: Merged into `main`\n- Completed: yes.",
+        p.id,
+        ticket(7)
+    )
+}
+
+#[test]
+fn forged_progress_comment_by_another_author_is_ignored_and_surfaced() {
+    let p = published();
+    let forged = forged_marker(&p);
+    p.edit_github(|state| {
+        state["issues"][0]["comments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": 900, "author": "mallory", "body": forged}));
+    });
+
+    let out = p.sync();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("900"), "{stderr}");
+    assert!(stderr.contains("mallory"), "{stderr}");
+    // Kiln posts its own progress; the forged comment is neither adopted nor edited.
+    let progress = p.progress(7);
+    assert!(progress.contains("Verified on pull request"), "{progress}");
+    let forged_now = p.comments(7).into_iter().find(|c| c["id"] == 900).unwrap();
+    assert_eq!(forged_now["body"], forged);
+    let run: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let seven = &run["synchronization"]["issues"][0];
+    assert_eq!(seven["status"], "synchronized");
+    assert_ne!(seven["comment_id"], 900);
+
+    // Repeating keeps ignoring the forgery and does not duplicate Kiln's comment.
+    p.synced();
+    p.progress(7);
+}
+
+#[test]
+fn github_contract_forged_marker_comment_is_not_adopted() {
+    let p = published_single();
+    let gh = FakeGh::new(&p, CREATED);
+    gh.serve(
+        "comments.json",
+        json!([{"id":11,"user":{"login":"alice"},"body":"Unrelated human discussion"},
+               {"id":900,"user":{"login":"mallory"},"body":forged_marker(&p)}]),
+    );
+
+    let out = gh.sync(&p);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = gh.calls();
+    assert_eq!(calls[0], "api --method GET user", "{calls:?}");
+    assert_eq!(
+        calls.iter().filter(|c| c.contains("GET user")).count(),
+        1,
+        "authenticated login is resolved once: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.contains("POST")),
+        "Kiln posts its own comment: {calls:?}"
+    );
+    assert!(!calls.iter().any(|c| c.contains("PATCH")), "{calls:?}");
+    let run: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(run["synchronization"]["issues"][0]["comment_id"], 555);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("mallory"));
+}
+
+/// A concurrent Kiln writer (here `kiln validate`, started while synchronization waits
+/// on GitHub) must not have its run-state write clobbered by synchronization.
+#[test]
+fn concurrent_run_state_write_during_synchronization_is_preserved() {
+    let p = published_single();
+    let validate = format!(
+        "(cd '{}' && '{}' validate {}) >/dev/null 2>&1; {CREATED}",
+        p.repo.display(),
+        env!("CARGO_BIN_EXE_kiln"),
+        p.id
+    );
+    let gh = FakeGh::new(&p, &validate);
+    let out = gh.sync(&p);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = p.ok(&["inspect", &p.id]);
+    assert_eq!(
+        run["validation_reports"].as_array().unwrap().len(),
+        2,
+        "the concurrent validation report must survive"
+    );
+    assert_eq!(run["synchronization"]["issues"][0]["comment_id"], 555);
 }
