@@ -7,7 +7,9 @@
 //! descendant from starting while independent tickets continue.
 use crate::{
     correction::{CorrectionAgent, FixtureCorrectionAgent},
-    execution::{FixtureImplementationAgent, ImplementationAgent, ImplementationRequest, AgentResult},
+    execution::{
+        AgentResult, FixtureImplementationAgent, ImplementationAgent, ImplementationRequest,
+    },
     review::{FixtureReviewAgent, ReviewAgent},
     Engine, Run,
 };
@@ -125,11 +127,9 @@ impl Engine {
                 // Dispatch the ready frontier in plan order up to the cap.
                 let mut dispatched = false;
                 while state.active.len() < state.implementation_concurrency {
-                    let Some(next) = state
-                        .tickets
-                        .iter_mut()
-                        .find(|t| t.state == "waiting" && t.waiting_on.is_empty() && t.blocker.is_none())
-                    else {
+                    let Some(next) = state.tickets.iter_mut().find(|t| {
+                        t.state == "waiting" && t.waiting_on.is_empty() && t.blocker.is_none()
+                    }) else {
                         break;
                     };
                     next.state = "implementing".into();
@@ -141,8 +141,12 @@ impl Engine {
                     let sender = sender.clone();
                     let integration = &integration;
                     scope.spawn(move || {
-                        let result = self.ticket_pipeline(id, &ticket, providers, integration, &sender);
-                        let _ = sender.send(Event::Finished(ticket, result.map_err(|e| format!("{e:#}"))));
+                        let result =
+                            self.ticket_pipeline(id, &ticket, providers, integration, &sender);
+                        let _ = sender.send(Event::Finished(
+                            ticket,
+                            result.map_err(|e| format!("{e:#}")),
+                        ));
                     });
                 }
                 if dispatched {
@@ -159,7 +163,9 @@ impl Engine {
                         t.state = "awaiting_integration".into();
                         t.session_id = session;
                     }
-                    Event::Integrating(ticket) => find(&mut state, &ticket).state = "integrating".into(),
+                    Event::Integrating(ticket) => {
+                        find(&mut state, &ticket).state = "integrating".into()
+                    }
                     Event::Finished(ticket, result) => {
                         workers -= 1;
                         state.active.retain(|t| *t != ticket);
@@ -180,7 +186,10 @@ impl Engine {
         })?;
         for t in &mut state.tickets {
             if t.state == "waiting" && t.blocker.is_none() {
-                t.blocker = Some(format!("prerequisites {:?} were never integrated", t.waiting_on));
+                t.blocker = Some(format!(
+                    "prerequisites {:?} were never integrated",
+                    t.waiting_on
+                ));
             }
         }
         state.status = if state.tickets.iter().all(|t| t.state == "integrated") {
@@ -232,18 +241,22 @@ impl Engine {
         if session.status != "implemented" || !self.review_gate(&run, &session)? {
             bail!(
                 "{}",
-                session
-                    .failure
-                    .clone()
-                    .unwrap_or_else(|| "implementation did not pass fresh independent review".into())
+                session.failure.clone().unwrap_or_else(|| {
+                    "implementation did not pass fresh independent review".into()
+                })
             );
         }
         let _ = events.send(Event::Implemented(ticket.into(), Some(session.id.clone())));
-        let _serialized = integration.lock().map_err(|_| anyhow::anyhow!("integration lock poisoned"))?;
+        let _serialized = integration
+            .lock()
+            .map_err(|_| anyhow::anyhow!("integration lock poisoned"))?;
         let _ = events.send(Event::Integrating(ticket.into()));
-        let provider = corrector
-            .as_ref()
-            .map(|c| (c.as_ref() as &dyn CorrectionAgent, c.as_ref() as &dyn ReviewAgent));
+        let provider = corrector.as_ref().map(|c| {
+            (
+                c.as_ref() as &dyn CorrectionAgent,
+                c.as_ref() as &dyn ReviewAgent,
+            )
+        });
         let run = self.integrate_ticket(id, ticket, provider)?;
         let attempt = run
             .integrations
@@ -385,7 +398,9 @@ impl FixtureScenario {
         Ok(serde_json::from_value(
             self.tickets
                 .get(ticket)
-                .with_context(|| format!("scenario has no deterministic response for ticket {ticket}"))?
+                .with_context(|| {
+                    format!("scenario has no deterministic response for ticket {ticket}")
+                })?
                 .clone(),
         )?)
     }
@@ -408,23 +423,44 @@ impl Drop for Active<'_> {
 impl ImplementationAgent for ScenarioImplementer<'_> {
     fn implement(&self, request: &ImplementationRequest) -> Result<AgentResult> {
         let scenario = self.scenario;
-        let mut observed = scenario.observed.lock().unwrap();
+        // Declared before the mutex guard so it drops after the guard is released.
+        let _active;
+        let mut observed = scenario
+            .observed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("scenario observation poisoned"))?;
         observed.started.insert(self.ticket.clone());
         observed.active += 1;
-        let _active = Active(scenario);
+        _active = Active(scenario);
         if let Some(limit) = scenario.max_active_implementations {
             if observed.active > limit {
-                bail!("observed {} concurrent implementation sessions; limit {limit}", observed.active);
+                bail!(
+                    "observed {} concurrent implementation sessions; limit {limit}",
+                    observed.active
+                );
             }
         }
         scenario.signal.notify_all();
         let deadline = Instant::now() + RENDEZVOUS_TIMEOUT;
-        while !self.spec.await_started.iter().all(|t| observed.started.contains(t)) {
+        while !self
+            .spec
+            .await_started
+            .iter()
+            .all(|t| observed.started.contains(t))
+        {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                bail!("tickets {:?} never ran concurrently with {}", self.spec.await_started, self.ticket);
+                bail!(
+                    "tickets {:?} never ran concurrently with {}",
+                    self.spec.await_started,
+                    self.ticket
+                );
             }
-            observed = scenario.signal.wait_timeout(observed, left).unwrap().0;
+            observed = scenario
+                .signal
+                .wait_timeout(observed, left)
+                .map_err(|_| anyhow::anyhow!("scenario observation poisoned"))?
+                .0;
         }
         drop(observed);
         if let Some(marker) = &self.spec.await_file {
@@ -449,7 +485,12 @@ impl TicketProviders for FixtureScenario {
         let spec = self.ticket(ticket)?;
         let inner = serde_json::from_value(spec.implementation.clone())
             .context("invalid implementation fixture")?;
-        Ok(Box::new(ScenarioImplementer { scenario: self, ticket: ticket.into(), spec, inner }))
+        Ok(Box::new(ScenarioImplementer {
+            scenario: self,
+            ticket: ticket.into(),
+            spec,
+            inner,
+        }))
     }
     fn reviewer(&self, ticket: &str) -> Result<Box<dyn ReviewAgent + '_>> {
         let review: FixtureReviewAgent = serde_json::from_value(self.ticket(ticket)?.review)
@@ -479,6 +520,8 @@ impl TicketProviders for CodexProviders {
         Ok(Box::new(crate::codex::CodexAdapter::new(self.0.clone())))
     }
     fn corrector(&self, _: &str) -> Result<Option<Box<dyn Corrector + '_>>> {
-        Ok(Some(Box::new(crate::codex::CodexAdapter::new(self.0.clone()))))
+        Ok(Some(Box::new(crate::codex::CodexAdapter::new(
+            self.0.clone(),
+        ))))
     }
 }
