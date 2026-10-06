@@ -14,7 +14,7 @@ fn scenario(mutation: Option<&str>) {
     .unwrap();
     fs::write(
         repo.path().join("kiln.json"),
-        json!({"build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Works"]})
+        json!({"build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Works"],"isolation":{"network":"none","runtime":"system","commands":[["git"]]}})
             .to_string(),
     )
     .unwrap();
@@ -127,7 +127,7 @@ fn github_rest_contract_preserves_native_blocker_and_reports_unselected_prerequi
     .unwrap();
     fs::write(
         repo.path().join("kiln.json"),
-        json!({"build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Works"]})
+        json!({"build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Works"],"isolation":{"network":"none","runtime":"system","commands":[["git"]]}})
             .to_string(),
     )
     .unwrap();

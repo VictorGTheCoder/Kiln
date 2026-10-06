@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, path::Path};
 /// fields are preserved for later execution and limit configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    pub isolation: crate::sandbox::IsolationPolicy,
     pub build: Vec<String>,
     pub test: Vec<String>,
     pub startup: Vec<String>,
@@ -48,6 +49,12 @@ impl ProjectConfig {
                 bail!("{name} executable '{program}' is unavailable; install it or correct the configured command");
             }
         }
+        for argv in [&config.build, &config.test, &config.startup] {
+            if !config.isolation.commands.contains(argv) {
+                bail!("isolation denied unauthorized configured command");
+            }
+        }
+        config.isolation.validate(repository)?;
         Ok(config)
     }
 }

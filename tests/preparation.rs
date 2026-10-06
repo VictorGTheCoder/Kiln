@@ -81,7 +81,7 @@ fn fixture() -> TempDir {
         repo.path().join("kiln.json"),
         serde_json::to_vec(&json!({
             "build": ["git", "status"], "test": ["git", "status"], "startup": ["git", "status"],
-            "acceptance_criteria": ["Both features work together"]
+            "acceptance_criteria": ["Both features work together"], "isolation": {"network":"none","runtime":"system","commands":[["git","status"]]}
         }))
         .unwrap(),
     )
@@ -147,7 +147,7 @@ fn invalid_preparation_explains_missing_commands_and_criteria_without_creating_r
     ] {
         fs::write(
             repo.path().join("kiln.json"),
-            serde_json::to_vec(&config).unwrap(),
+            serde_json::to_vec(&{let mut config = config; config["isolation"] = json!({"network":"none","runtime":"system","commands":[config["build"],config["test"],config["startup"]]}); config}).unwrap(),
         )
         .unwrap();
         let result = prepare(&repo);
@@ -168,7 +168,7 @@ fn project_relative_commands_are_resolved_against_the_repository() {
     fs::write(repo.path().join("check"), "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(repo.path().join("check"), fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(repo.path().join("config/kiln.json"), serde_json::to_vec(&json!({
-        "build": ["./check"], "test": ["./check"], "startup": ["./check"], "acceptance_criteria": ["Works"]
+        "build": ["./check"], "test": ["./check"], "startup": ["./check"], "acceptance_criteria": ["Works"], "isolation": {"network":"none","runtime":"system","commands":[["./check"]]}
     })).unwrap()).unwrap();
     let result = cli(
         &repo,
@@ -185,4 +185,28 @@ fn project_relative_commands_are_resolved_against_the_repository() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+#[test]
+fn preparation_requires_explicit_isolation_policy() {
+    let repo = fixture();
+    let mut config: Value =
+        serde_json::from_slice(&fs::read(repo.path().join("kiln.json")).unwrap()).unwrap();
+    config.as_object_mut().unwrap().remove("isolation");
+    fs::write(repo.path().join("kiln.json"), config.to_string()).unwrap();
+    let output = prepare(&repo);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("isolation"));
+}
+
+#[test]
+fn preparation_rejects_command_outside_authorized_argv() {
+    let repo = fixture();
+    let mut config: Value =
+        serde_json::from_slice(&fs::read(repo.path().join("kiln.json")).unwrap()).unwrap();
+    config["test"] = json!(["git", "--version"]);
+    fs::write(repo.path().join("kiln.json"), config.to_string()).unwrap();
+    let output = prepare(&repo);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("denied unauthorized"));
 }

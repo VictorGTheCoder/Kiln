@@ -38,6 +38,7 @@ pub struct ImplementationSession {
 #[derive(Debug, Clone, Serialize)]
 pub struct ImplementationRequest {
     pub context_id: String,
+    pub isolation: crate::sandbox::IsolationPolicy,
     pub instructions: String,
     pub ticket: Ticket,
     pub specs: Vec<FrozenSpec>,
@@ -50,7 +51,9 @@ pub struct AgentResult {
     pub outcome: String,
     pub log: String,
 }
-/// Providers receive a fresh context and may change files only inside its worktree.
+/// Trusted provider boundary: subprocess adapters MUST launch with request.isolation
+/// through Sandbox. FixtureImplementationAgent is an in-process deterministic adapter
+/// with path-checked writes, not an untrusted executable.
 pub trait ImplementationAgent {
     fn implement(&self, request: &ImplementationRequest) -> Result<AgentResult>;
 }
@@ -120,6 +123,7 @@ impl Engine {
         agent: &dyn ImplementationAgent,
     ) -> Result<Run> {
         let mut run = self.inspect(id)?;
+        run.config.isolation.validate(&self.repository)?;
         let plan = run
             .plan
             .as_ref()
@@ -224,7 +228,7 @@ impl Engine {
                 .collect();
             let repository_instructions =
                 fs::read_to_string(worktree.join("AGENTS.md")).unwrap_or_default();
-            let request=ImplementationRequest { context_id:session_id.clone(),instructions:"Implement this ticket using its frozen specs and prerequisite context. Preserve repository standards. Return a concrete usable change; do not integrate or release dependent tickets.".into(),ticket,specs,repository_instructions,prerequisites,worktree:worktree.clone() };
+            let request=ImplementationRequest { context_id:session_id.clone(),isolation:run.config.isolation.clone(),instructions:"Implement this ticket using its frozen specs and prerequisite context. Preserve repository standards. Return a concrete usable change; do not integrate or release dependent tickets.".into(),ticket,specs,repository_instructions,prerequisites,worktree:worktree.clone() };
             fs::create_dir_all(self.repository.join(".kiln/contexts"))?;
             fs::write(
                 self.repository
@@ -249,10 +253,14 @@ impl Engine {
                 bail!("agent produced no usable Git change");
             }
             for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
-                let result = Command::new(&argv[0])
-                    .args(&argv[1..])
-                    .current_dir(&worktree)
-                    .output();
+                let result = crate::sandbox::Sandbox::command(
+                    &run.config.isolation,
+                    &worktree,
+                    name,
+                    argv,
+                    &[],
+                )
+                .and_then(|mut command| Ok(command.output()?));
                 let check = match result {
                     Ok(result) => CheckResult {
                         name: name.into(),
@@ -306,6 +314,13 @@ impl Engine {
         if let Err(error) = execution {
             session.status = "failed".into();
             session.failure = Some(format!("{error:#}"));
+        }
+        session.agent_log = run.config.isolation.redact(&session.agent_log);
+        session.diff = run.config.isolation.redact(&session.diff);
+        session.failure = session.failure.map(|f| run.config.isolation.redact(&f));
+        for check in &mut session.checks {
+            check.stdout = run.config.isolation.redact(&check.stdout);
+            check.stderr = run.config.isolation.redact(&check.stderr);
         }
         *run.sessions.last_mut().unwrap() = session;
         self.save(&run)?;
