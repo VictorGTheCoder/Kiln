@@ -21,7 +21,11 @@ fn scenario(outcome: &str, axis: &str) {
     )
     .unwrap();
     fs::write(repo.join("original.txt"), "clean").unwrap();
-    fs::write(repo.join("AGENTS.md"), "Use English labels").unwrap();
+    fs::write(
+        repo.join("AGENTS.md"),
+        format!("Use English labels\n{}", PROVIDER_TOKEN),
+    )
+    .unwrap();
     fs::write(repo.join(".gitignore"), ".kiln/\n").unwrap();
     fs::write(repo.join("kiln.json"),json!({"build":["git","status","--porcelain"],"test":["git","diff","--check"],"startup":["git","--version"],"acceptance_criteria":["works"],"isolation":{"network":"none","runtime":"system","secrets":{"KILN_TEST_SECRET":["agent"]},"commands":[["git","status","--porcelain"],["git","rev-parse","--verify","absent-ref"],["git","diff","--check"],["git","--version"]]}}).to_string()).unwrap();
     git(repo, &["add", "."]);
@@ -106,6 +110,32 @@ fn scenario(outcome: &str, axis: &str) {
         outcome == "approved"
     );
     if outcome == "approved" {
+        let auth = repo.join("provider-auth.json");
+        fs::write(
+            &auth,
+            json!({"tokens":{"access_token":PROVIDER_TOKEN}}).to_string(),
+        )
+        .unwrap();
+        for fail in [true, false] {
+            let provider = CredentialReviewer {
+                repository: repo.into(),
+                fail,
+                adapter: kiln::codex::CodexAdapter::new(kiln::codex::CodexConfig {
+                    installation: "/unavailable-codex".into(),
+                    auth: auth.clone(),
+                    model: None,
+                    timeout_seconds: 1,
+                }),
+            };
+            let redacted_run = engine.review_ticket(id, "a", &provider).unwrap();
+            let recorded = serde_json::to_string(redacted_run.reviews.last().unwrap()).unwrap();
+            assert!(!recorded.contains(PROVIDER_TOKEN));
+            assert!(
+                !fs::read_to_string(repo.join(".kiln/runs").join(format!("{id}.json")))
+                    .unwrap()
+                    .contains(PROVIDER_TOKEN)
+            );
+        }
         let snapshot_run = engine
             .review_ticket(id, "a", &SnapshotReviewer { mutate: false })
             .unwrap();
@@ -180,6 +210,49 @@ impl kiln::review::ReviewAgent for SnapshotReviewer {
             evidence: "Read feature.txt at supplied implementation snapshot".into(),
             log: String::new(),
             acceptance_checks: vec![],
+        })
+    }
+}
+
+const PROVIDER_TOKEN: &str = "unregistered-provider-auth-value-9234234";
+struct CredentialReviewer {
+    repository: std::path::PathBuf,
+    fail: bool,
+    adapter: kiln::codex::CodexAdapter,
+}
+impl kiln::review::ReviewAgent for CredentialReviewer {
+    fn prepare_redaction(&self) -> anyhow::Result<()> {
+        self.adapter.prepare_redaction()
+    }
+    fn redact_output(&self, text: &str) -> String {
+        kiln::execution::ImplementationAgent::redact_output(&self.adapter, text)
+    }
+    fn review(
+        &self,
+        request: &kiln::review::ReviewRequest,
+    ) -> anyhow::Result<kiln::review::ReviewResult> {
+        // Observe the durable artifact while invocation is running, before its return/failure.
+        let context = fs::read_to_string(
+            self.repository
+                .join(".kiln/contexts")
+                .join(format!("{}.json", request.context_id)),
+        )?;
+        assert!(!context.contains(PROVIDER_TOKEN));
+        assert!(context.contains("[REDACTED]"));
+        if self.fail {
+            anyhow::bail!("provider failed with {PROVIDER_TOKEN}");
+        }
+        Ok(kiln::review::ReviewResult {
+            outcome: "approved".into(),
+            findings: vec![kiln::review::ReviewFinding {
+                code: PROVIDER_TOKEN.into(),
+                message: PROVIDER_TOKEN.into(),
+                evidence: PROVIDER_TOKEN.into(),
+                required: true,
+            }],
+            evidence: PROVIDER_TOKEN.into(),
+            log: PROVIDER_TOKEN.into(),
+            acceptance_checks: vec![vec!["git".into(), "show".into(), PROVIDER_TOKEN.into()]],
         })
     }
 }

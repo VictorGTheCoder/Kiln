@@ -295,3 +295,11 @@ integration/correction seam: it requires the latest review of that session to
 approve its exact commit, and checks that its worktree is clean and HEAD still
 matches. Uncommitted edits and later commits invalidate approval. Review does not
 change the implementation session status or merge commits.
+
+Providers initialize credential redactors through `prepare_redaction` before
+Kiln persists an implementation or review input context. Missing or invalid Codex
+authentication fails explicitly before that write. Review artifacts are sanitized
+as a complete serialized value, including verifier argv, findings and failures;
+registered environment values and scoped auth strings are removed before state
+persistence and CLI return. Regression providers inspect contexts while invocation
+is running, including provider failures, rather than only after completion.

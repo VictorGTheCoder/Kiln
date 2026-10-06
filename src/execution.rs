@@ -55,6 +55,11 @@ pub struct AgentResult {
 /// through Sandbox. FixtureImplementationAgent is an in-process deterministic adapter
 /// with path-checked writes, not an untrusted executable.
 pub trait ImplementationAgent {
+    /// Initialize provider credential redaction before recording any context.
+    fn prepare_redaction(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn implement(&self, request: &ImplementationRequest) -> Result<AgentResult>;
     /// Provider credential redaction also applies to diffs, checks and failures.
     fn redact_output(&self, text: &str) -> String {
@@ -126,6 +131,7 @@ impl Engine {
         ticket_id: &str,
         agent: &dyn ImplementationAgent,
     ) -> Result<Run> {
+        agent.prepare_redaction()?;
         let mut run = self.inspect(id)?;
         run.config.isolation.validate(&self.repository)?;
         let plan = run
@@ -238,7 +244,11 @@ impl Engine {
                 self.repository
                     .join(".kiln/contexts")
                     .join(format!("{session_id}.json")),
-                serde_json::to_vec_pretty(&request)?,
+                agent.redact_output(
+                    &run.config
+                        .isolation
+                        .redact(&serde_json::to_string_pretty(&request)?),
+                ),
             )?;
             let agent_result = agent.implement(&request);
             // Collect actual changes even when the provider reports failure.
