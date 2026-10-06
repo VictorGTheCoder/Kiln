@@ -59,6 +59,7 @@ impl ProjectConfig {
                 bail!("isolation denied unauthorized configured command");
             }
         }
+        crate::validation::ValidationSettings::from_config(&config)?;
         let serialized = serde_json::to_string(&config)?;
         if config.isolation.redact(&serialized) != serialized {
             bail!("public configuration contains a registered secret value; use secret variable references only");

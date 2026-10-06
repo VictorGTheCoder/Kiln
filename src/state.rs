@@ -31,4 +31,6 @@ pub struct Run {
     pub corrections: Vec<crate::correction::CorrectionCycle>,
     #[serde(default)]
     pub integrations: Vec<crate::integration::IntegrationAttempt>,
+    #[serde(default)]
+    pub validation_reports: Vec<crate::validation::ValidationReport>,
 }
