@@ -531,3 +531,78 @@ fn configured_secret_values_never_reach_the_interface() {
     assert!(page.contains("leaked-[REDACTED].md"));
     assert!(page.contains("<html lang=\"en\">"));
 }
+
+#[test]
+fn replanning_decisions_and_spec_revisions_explain_the_effective_work() {
+    let repo = Repo::new(
+        json!({"product_objectives":[{"id":"PO-1","statement":"Reports open in spreadsheets"}]}),
+    );
+    let id = repo.planned(&[("a", "one.md", &[]), ("c", "two.md", &["a"])]);
+    // A decision revises one.md; the frozen version stays recorded beside it.
+    let revised = "# One\n## Acceptance criteria\n- Works as CSV\n";
+    repo.write("ambiguity.json", json!({"id":"format","question":"Which <format>?","positions":[
+        {"source":"spec","reference":"one.md","statement":"Format is open"},
+        {"source":"product_objective","reference":"PO-1","statement":"Spreadsheet users need CSV"}]}));
+    repo.write("decision.json", json!({"proposal":{"governing":"PO-1","resolution":"Export CSV","rationale":"Objectives outrank specs",
+        "evidence":["PO-1 requires spreadsheets"],"spec_revision":{"path":"one.md","content":revised}},
+        "verification":{"outcome":"verified","findings":[]}}));
+    repo.ok(&[
+        "decide",
+        &id,
+        "--ambiguity",
+        "ambiguity.json",
+        "--fixture",
+        "decision.json",
+    ]);
+    // Ticket a exhausts its corrections, is replanned, and still fails.
+    let rejected = json!({"outcome":"rejected","findings":[{"code":"wrong","message":"Still incorrect","evidence":"x","required":true}],"evidence":"Observed change"});
+    let corrections: Vec<Value> = (0..3)
+        .map(|n| json!({"files":{"bad.txt":format!("attempt {n}")},"outcome":"completed"}))
+        .collect();
+    let reviews: Vec<Value> = (0..3)
+        .map(|_| json!({"standards":approved(),"spec":rejected}))
+        .collect();
+    let a = json!({"implementation":{"files":{"bad.txt":"wrong"},"outcome":"completed"},
+        "review":{"standards":approved(),"spec":rejected},
+        "corrections":{"corrections":corrections,"reviews":reviews},
+        "replanning":{"ticket":{"id":"a","title":"a","description":"Smaller approach","acceptance_criteria":["works"],"covers":["one.md#ac-1"],"blocked_by":[]},
+            "verification":{"outcome":"verified","findings":[]},
+            "implementation":{"files":{"still.txt":"works"},"outcome":"completed"},
+            "review":{"standards":approved(),"spec":rejected}}});
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{"a":a,"c":works("c.txt")}}),
+    );
+    assert!(!repo
+        .cli(&["run", &id, "--fixture", "scenario.json"])
+        .status
+        .success());
+    let state = repo.inspect(&id);
+    assert_eq!(ticket(&state, "a")["exhaustion"], "replanning");
+
+    let page = repo.serve(&[]).page(&id);
+    // Frozen spec plus the verified revision in effect.
+    let revision = &state["spec_revisions"][0];
+    let specs = &page[page.find("Frozen specs").unwrap()..page.find("Active sessions").unwrap()];
+    assert!(specs.contains(state["specs"][0]["content_sha256"].as_str().unwrap()));
+    assert!(specs.contains("Revision 1"));
+    assert!(specs.contains(revision["content_sha256"].as_str().unwrap()));
+    assert!(specs.contains("state-verified"));
+    assert!(specs.contains("Works as CSV"));
+    // Why a is blocked: the replanning attempt and its result.
+    assert!(ticket_row(&page, "a").contains("Exhausted: replanning"));
+    let replans = &page[page.find("Replanning").unwrap()..];
+    let attempt = &state["replans"][0];
+    assert!(replans.contains(attempt["id"].as_str().unwrap()));
+    assert!(replans.contains(&format!("state-{}", attempt["outcome"].as_str().unwrap())));
+    assert!(replans.contains("Smaller approach"));
+    assert!(replans.contains("Result: <span class=\"badge bad state-blocked\""));
+    // Decision history with escaped question text.
+    let decisions = &page[page.find("Decisions").unwrap()..];
+    assert!(decisions.contains("Which &lt;format&gt;?"));
+    assert!(decisions.contains("Export CSV"));
+    assert!(decisions.contains("Objectives outrank specs"));
+    assert!(decisions.contains("PO-1"));
+    // Superseded sessions are labelled as such in the session history.
+    assert!(page.contains("state-superseded"));
+}

@@ -151,6 +151,23 @@ fn run_page(run: &Run, live: Option<bool>) -> String {
         );
     }
     html.push_str("</table>");
+    if !run.spec_revisions.is_empty() {
+        html.push_str("<p>Spec revisions made by decisions during the run (the latest verified revision of a spec is in effect):</p><table><tr><th>Revision</th><th>Path</th><th>Status</th><th>Content SHA-256</th><th>Decision</th></tr>");
+        for r in &run.spec_revisions {
+            let _ = write!(
+                html,
+                "<tr><td>Revision {}</td><td><code>{}</code><details><summary>Revised content</summary><pre>{}</pre></details></td><td>{}</td><td><code>{}</code><br><span class=\"muted\">replaces <code>{}</code></span></td><td><code>{}</code></td></tr>",
+                r.version,
+                esc(&r.path),
+                esc(&r.content),
+                badge(&r.status),
+                esc(&r.content_sha256),
+                esc(&r.base_sha256),
+                esc(&r.decision_id)
+            );
+        }
+        html.push_str("</table>");
+    }
 
     html.push_str("<h2>Active sessions</h2>");
     let active = run
@@ -174,9 +191,12 @@ fn run_page(run: &Run, live: Option<bool>) -> String {
 
     html.push_str(&tickets(run));
     html.push_str(&limits(run));
+    html.push_str(&sessions(run));
     html.push_str(&reviews(run));
     html.push_str(&corrections(run));
     html.push_str(&integrations(run));
+    html.push_str(&replans(run));
+    html.push_str(&decisions(run));
     html.push_str(&validation(run));
     html.push_str(&recoveries(run));
     html.push_str(&delivery(run));
@@ -327,6 +347,134 @@ fn recoveries(run: &Run) -> String {
     html
 }
 
+fn sessions(run: &Run) -> String {
+    let mut html = "<h2>Implementation sessions</h2>".to_owned();
+    if run.sessions.is_empty() {
+        html.push_str("<p class=\"muted\">No implementation sessions have been recorded.</p>");
+        return html;
+    }
+    html.push_str("<table><tr><th>Ticket</th><th>Session</th><th>Status</th><th>Details</th></tr>");
+    for s in &run.sessions {
+        let mut details = format!("Branch <code>{}</code>", esc(&s.branch));
+        if let Some(commit) = &s.commit {
+            let _ = write!(details, "<br>Commit <code>{}</code>", esc(commit));
+        }
+        if let Some(outcome) = &s.agent_outcome {
+            let _ = write!(details, "<br>Agent outcome: {}", esc(outcome));
+        }
+        if let Some(failure) = &s.failure {
+            let _ = write!(details, "<br>Failure: {}", esc(failure));
+        }
+        details.push_str(&checks(&s.checks));
+        let _ = write!(
+            html,
+            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{details}</td></tr>",
+            esc(&s.ticket_id),
+            esc(&s.id),
+            badge(&s.status)
+        );
+    }
+    html.push_str("</table>");
+    html
+}
+
+fn replans(run: &Run) -> String {
+    let mut html = "<h2>Replanning</h2>".to_owned();
+    if run.replans.is_empty() {
+        html.push_str("<p class=\"muted\">No ticket has been replanned.</p>");
+        return html;
+    }
+    html.push_str(
+        "<table><tr><th>Ticket</th><th>Attempt</th><th>Outcome</th><th>Details</th></tr>",
+    );
+    for r in &run.replans {
+        let mut details = String::from("Unresolved findings:<ul>");
+        for f in &r.failures {
+            let _ = write!(details, "<li>{}</li>", esc(f));
+        }
+        details.push_str("</ul>");
+        let _ = write!(details, "Previous: {}", esc(&r.previous.description));
+        if let Some(revised) = &r.revised {
+            let _ = write!(details, "<br>Revised: {}", esc(&revised.description));
+        }
+        for f in &r.findings {
+            let _ = write!(
+                details,
+                "<br>Finding <code>{}</code>: {}",
+                esc(&f.code),
+                esc(&f.message)
+            );
+        }
+        if let Some(result) = &r.result {
+            let _ = write!(details, "<br>Result: {}", badge(result));
+        }
+        let _ = write!(
+            html,
+            "<tr><td><code>{}</code></td><td>Attempt {} <code>{}</code></td><td>{}</td><td>{details}</td></tr>",
+            esc(&r.ticket_id),
+            r.attempt,
+            esc(&r.id),
+            badge(&r.outcome)
+        );
+    }
+    html.push_str("</table>");
+    html
+}
+
+fn decisions(run: &Run) -> String {
+    let mut html = "<h2>Decisions</h2>".to_owned();
+    if run.decisions.is_empty() {
+        html.push_str("<p class=\"muted\">No autonomous decisions have been recorded.</p>");
+        return html;
+    }
+    for d in &run.decisions {
+        let _ = write!(
+            html,
+            "<h3>{} <code>{}</code></h3><p><strong>Question:</strong> {}</p><p><strong>Resolution:</strong> {}</p><p><strong>Rationale:</strong> {}</p>",
+            badge(&d.outcome),
+            esc(&d.id),
+            esc(&d.question),
+            esc(&d.resolution),
+            esc(&d.rationale)
+        );
+        if let Some(g) = &d.governing {
+            let _ = write!(
+                html,
+                "<p><strong>Governing position:</strong> <code>{}</code> ({}): {}</p>",
+                esc(&g.reference),
+                esc(&g.source),
+                esc(&g.statement)
+            );
+        }
+        html.push_str("<ol>");
+        for p in &d.positions {
+            let _ = write!(
+                html,
+                "<li><code>{}</code> ({}): {}</li>",
+                esc(&p.reference),
+                esc(&p.source),
+                esc(&p.statement)
+            );
+        }
+        html.push_str("</ol>");
+        for e in &d.evidence {
+            let _ = write!(html, "<p class=\"muted\">Evidence: {}</p>", esc(e));
+        }
+        for f in &d.findings {
+            let _ = write!(
+                html,
+                "<p>Finding <code>{}</code>: {}</p>",
+                esc(&f.code),
+                esc(&f.message)
+            );
+        }
+        if let Some(v) = d.spec_revision {
+            let _ = write!(html, "<p>Produced spec revision {v}.</p>");
+        }
+    }
+    html
+}
+
 fn limits(run: &Run) -> String {
     let mut html = "<h2>Limits and usage</h2>".to_owned();
     let Some(limits) = run.scheduler.as_ref().and_then(|s| s.limits.as_ref()) else {
@@ -350,8 +498,9 @@ fn limits(run: &Run) -> String {
     };
     let _ = write!(
         html,
-        "<table><tr><th>Correction cycles per ticket</th><td>{}</td></tr><tr><th>Duration limit</th><td>{}</td></tr><tr><th>Usage token limit</th><td>{}</td></tr><tr><th>Cost limit</th><td>{}</td></tr><tr><th>Limit policy</th><td>{}</td></tr><tr><th>Cost ceiling enforcement</th><td><code>{}</code></td></tr><tr><th>Tokens used</th><td>{} across {} provider contexts ({} without usage data)</td></tr><tr><th>Cost</th><td>{cost}</td></tr></table>",
+        "<table><tr><th>Correction cycles per ticket</th><td>{}</td></tr><tr><th>Replanning attempts per ticket</th><td>{}</td></tr><tr><th>Duration limit</th><td>{}</td></tr><tr><th>Usage token limit</th><td>{}</td></tr><tr><th>Cost limit</th><td>{}</td></tr><tr><th>Limit policy</th><td>{}</td></tr><tr><th>Cost ceiling enforcement</th><td><code>{}</code></td></tr><tr><th>Tokens used</th><td>{} across {} provider contexts ({} without usage data)</td></tr><tr><th>Cost</th><td>{cost}</td></tr></table>",
         configured.correction_cycles,
+        configured.replanning_attempts,
         or_none(configured.duration_limit_seconds.map(|s| format!("{s} seconds"))),
         or_none(configured.usage_token_limit.map(|t| t.to_string())),
         or_none(configured.cost_limit_usd.map(|c| format!("${c}"))),
