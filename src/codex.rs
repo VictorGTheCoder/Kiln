@@ -79,6 +79,15 @@ impl CodexAdapter {
             credentials: Mutex::new(Vec::new()),
         }
     }
+    /// Eagerly load scoped authentication redactors before durable input recording.
+    pub fn prepare_redaction(&self) -> Result<()> {
+        let auth = std::fs::read(&self.config.auth)
+            .context("Codex authentication unavailable: configure an authenticated auth.json")?;
+        let value: Value = serde_json::from_slice(&auth)
+            .map_err(|_| anyhow::anyhow!("Codex authentication file is invalid"))?;
+        collect_strings(&value, &mut self.credentials.lock().unwrap());
+        Ok(())
+    }
     /// Clonable cancellation handle; stopping kills the sandbox and descendants.
     pub fn stop_handle(&self) -> Arc<AtomicBool> {
         self.stopped.clone()
@@ -118,7 +127,7 @@ impl CodexAdapter {
             serde_json::from_slice(&auth).context("Codex authentication file is invalid")?;
         let mut credentials = Vec::new();
         collect_strings(&auth_json, &mut credentials);
-        *self.credentials.lock().unwrap() = credentials.clone();
+        self.credentials.lock().unwrap().extend(credentials.clone());
         let redact = |input: &str| {
             let mut value = policy.redact(input);
             for credential in &credentials {
@@ -340,6 +349,10 @@ fn collect_strings(value: &Value, result: &mut Vec<String>) {
     }
 }
 impl ImplementationAgent for CodexAdapter {
+    fn prepare_redaction(&self) -> Result<()> {
+        CodexAdapter::prepare_redaction(self)
+    }
+
     fn redact_output(&self, text: &str) -> String {
         let mut result = text.to_owned();
         for credential in self.credentials.lock().unwrap().iter() {
@@ -418,6 +431,10 @@ impl CodexConfig {
 }
 
 impl crate::review::ReviewAgent for CodexAdapter {
+    fn prepare_redaction(&self) -> Result<()> {
+        CodexAdapter::prepare_redaction(self)
+    }
+
     fn redact_output(&self, text: &str) -> String {
         ImplementationAgent::redact_output(self, text)
     }

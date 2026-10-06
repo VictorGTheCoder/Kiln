@@ -67,6 +67,11 @@ pub struct ReviewRequest {
     pub worktree: PathBuf,
 }
 pub trait ReviewAgent {
+    /// Runs before the first durable context is written, including failed invocations.
+    fn prepare_redaction(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn review(&self, request: &ReviewRequest) -> Result<ReviewResult>;
     fn redact_output(&self, text: &str) -> String {
         text.into()
@@ -175,6 +180,7 @@ impl Engine {
             && clean(path)?)
     }
     pub fn review_ticket(&self, id: &str, ticket_id: &str, agent: &dyn ReviewAgent) -> Result<Run> {
+        agent.prepare_redaction()?;
         let mut run = self.inspect(id)?;
         let session = run
             .sessions
@@ -329,7 +335,7 @@ impl Engine {
         let passed = [&spec, &standards].iter().all(|a| a.verified())
             && git(Path::new(&session.worktree), &["rev-parse", "HEAD"])? == commit
             && clean(Path::new(&session.worktree))?;
-        run.reviews.push(ReviewSession {
+        let review = ReviewSession {
             id: review_id,
             session_id: session.id,
             ticket_id: ticket_id.into(),
@@ -338,7 +344,14 @@ impl Engine {
             standards,
             spec,
             passed,
-        });
+        };
+        // Serialize once so future provider-added fields and argv cannot bypass redaction.
+        let safe_review = agent.redact_output(
+            &run.config
+                .isolation
+                .redact(&serde_json::to_string(&review)?),
+        );
+        run.reviews.push(serde_json::from_str(&safe_review)?);
         self.save(&run)?;
         Ok(run)
     }
