@@ -19,4 +19,8 @@ pub struct Run {
     pub specs: Vec<FrozenSpec>,
     #[serde(default)]
     pub plan: Option<crate::planning::Plan>,
+    #[serde(default)]
+    pub integration_branch: Option<String>,
+    #[serde(default)]
+    pub sessions: Vec<crate::execution::ImplementationSession>,
 }

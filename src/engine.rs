@@ -86,6 +86,8 @@ impl Engine {
             config,
             specs,
             plan: None,
+            integration_branch: None,
+            sessions: Vec::new(),
         };
         self.save(&run)?;
         Ok(run)
