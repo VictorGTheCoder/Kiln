@@ -85,6 +85,7 @@ impl Engine {
             status: "prepared".into(),
             config,
             specs,
+            plan: None,
         };
         self.save(&run)?;
         Ok(run)

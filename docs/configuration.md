@@ -54,3 +54,55 @@ repository-relative path, SHA-256 identity, and observed HEAD revision (null for
 repositories without a commit). The content identity covers uncommitted inputs;
 HEAD alone does not assert that a spec matches its committed version. External
 edits never mutate an existing run's frozen inputs.
+
+# Generating a verified plan
+
+Approved frozen specs must contain an `Acceptance criteria` Markdown heading
+with nonempty bullet or numbered criteria. Kiln derives IDs such as
+`docs/first.md#ac-1` in source order and records their frozen spec SHA-256.
+Missing explicit criteria blocks planning; agent-supplied coverage is never the
+source of requirements. External file edits do not affect planning inputs.
+
+```sh
+kiln --repo /path/to/project plan RUN-ID --fixture planning-agent.json
+kiln --repo /path/to/project inspect RUN-ID
+```
+
+The deterministic adapter supports account-free engine testing. It is explicitly
+simulated, not evidence of real model quality. Its JSON protocol is:
+
+```json
+{
+  "tickets": [{
+    "id": "feature-a",
+    "title": "Deliver feature A",
+    "description": "Complete observable behavior",
+    "acceptance_criteria": ["The feature is demonstrably usable"],
+    "covers": ["docs/first.md#ac-1"],
+    "blocked_by": []
+  }],
+  "verification": {"outcome": "verified", "findings": []}
+}
+```
+
+Verification outcomes are `verified`, `failed`, and `unable-to-verify`.
+Findings contain `code` and `message`; any finding or nonverified outcome blocks
+execution. The engine independently rejects missing coverage, unknown criterion
+IDs, unknown blockers, dependency cycles, duplicate identities, and tickets
+without observable acceptance criteria. A favorable fixture opinion does not
+bypass these checks. Semantic decomposition quality remains the responsibility
+of the separate verifier adapter; structural checks alone do not prove it.
+
+`PlanningAgent` in `src/planning.rs` is the provider boundary. Generation receives
+only frozen specs, requirements, and adapted to-tickets instructions. Verification
+receives a separate context identity, frozen specs, requirements, generated
+tickets, and independent verifier instructions. Provider implementations must
+launch fresh sessions for these distinct requests. The fixture supplies distinct
+simulated role responses; future real providers implement the same boundary.
+`validate_plan` is reusable for imported ticket plans.
+
+The durable `Run.plan` contains requirements, tickets, dependency graph,
+verification outcome, findings, context identities, and executable status.
+Accepted plans set `status` to `planned`; rejected plans set `plan_rejected`,
+persist evidence, and exit unsuccessfully. Rejected plans may be regenerated.
+Existing CLI inspection and web run/API pages show the same persisted plan.
