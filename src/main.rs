@@ -104,6 +104,17 @@ enum Commands {
         #[arg(long)]
         gh: Option<PathBuf>,
     },
+    /// Reflect recorded, verified progress in a Kiln progress comment on each imported
+    /// issue. Issue titles, bodies and other comments are never modified.
+    Sync {
+        id: String,
+        /// Simulated GitHub state file (no network access).
+        #[arg(long, conflicts_with = "gh")]
+        fixture: Option<PathBuf>,
+        /// gh program used for real GitHub access (default: gh on PATH).
+        #[arg(long)]
+        gh: Option<PathBuf>,
+    },
     /// Show verified, failed and unable-to-verify criteria of the latest validation.
     Report { id: String },
     /// Read a recorded run, or list all run identities.
@@ -331,6 +342,32 @@ fn run() -> Result<()> {
                 }),
             };
             serde_json::to_value(engine.publish(&id, host.as_ref())?)?
+        }
+        Commands::Sync { id, fixture, gh } => {
+            let tracker: Box<dyn kiln::synchronization::IssueTracker> = match fixture {
+                Some(path) => Box::new(kiln::synchronization::FixtureIssueTracker::new(
+                    &engine.repository.join(path),
+                )),
+                None => Box::new(kiln::synchronization::GitHubIssueTracker {
+                    program: gh.unwrap_or_else(|| "gh".into()),
+                }),
+            };
+            let run = engine.synchronize(&id, tracker.as_ref())?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            let issues = run
+                .synchronization
+                .as_ref()
+                .map(|s| s.issues.as_slice())
+                .unwrap_or_default();
+            for note in issues.iter().flat_map(|i| &i.divergence) {
+                eprintln!("Kiln: divergence: {note}");
+            }
+            if issues.iter().any(|i| i.status == "conflict") {
+                anyhow::bail!(
+                    "synchronization conflict; remote edits were surfaced, not overwritten"
+                );
+            }
+            return Ok(());
         }
         Commands::Report { id } => {
             let run = engine.inspect(&id)?;
