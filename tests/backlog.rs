@@ -189,7 +189,8 @@ fn frozen_backlog_gives_every_open_issue_a_disposition_and_retains_open_edges() 
 
     assert_eq!(dispositions.len(), snapshot.len());
     assert_eq!(dispositions[0].status, "eligible");
-    assert_eq!(dispositions[1].status, "container");
+    assert_eq!(dispositions[1].status, "skipped");
+    assert_eq!(dispositions[1].kind, "container");
     assert_eq!(dispositions[2].status, "blocked");
     assert_eq!(dispositions[2].dependencies, ["github:example/project#1"]);
     assert_eq!(dispositions[3].status, "unable-to-verify");
@@ -285,8 +286,16 @@ fn start_backlog_freezes_and_independently_verifies_the_whole_issue_graph() {
         run["plan"]["dependency_graph"]["github:example/project#3"][0],
         "github:example/project#1"
     );
+    assert!(run["specs"].as_array().unwrap().iter().any(|spec| {
+        spec["path"] == "github-example-project-3.md"
+            && spec["content"]
+                .as_str()
+                .unwrap()
+                .contains("github:example/project#1")
+    }));
     assert_eq!(run["backlog"]["dispositions"][1]["status"], "blocked");
-    assert_eq!(run["backlog"]["dispositions"][3]["status"], "container");
+    assert_eq!(run["backlog"]["dispositions"][3]["status"], "skipped");
+    assert_eq!(run["backlog"]["dispositions"][3]["kind"], "container");
     assert_eq!(
         run["backlog"]["dispositions"][4]["status"],
         "unable-to-verify"

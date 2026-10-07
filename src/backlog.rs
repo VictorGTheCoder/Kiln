@@ -63,7 +63,7 @@ pub fn classify_snapshot(
                     "tracking issue" | "type: tracking" | "type:tracking")
             });
             let (status, reason) = if is_container {
-                ("container", "Issue is an epic or tracking container; open child issues remain independently eligible.".to_owned())
+                ("skipped", "Issue is an epic or tracking container; open child issues remain independently eligible.".to_owned())
             } else if !dependencies.is_empty() {
                 ("blocked", format!("Waiting for open issue dependencies: {}.", dependencies.join(", ")))
             } else if !external_dependencies.is_empty() {
@@ -77,6 +77,7 @@ pub fn classify_snapshot(
             };
             BacklogIssueDisposition {
                 issue: identity,
+                kind: if is_container { "container" } else { "actionable" }.into(),
                 selected: issue.number == selected_issue,
                 plan_candidate: status == "eligible",
                 status: status.into(),
@@ -252,10 +253,7 @@ impl Engine {
                 );
                 continue;
             }
-            if matches!(
-                disposition.status.as_str(),
-                "container" | "unable-to-verify"
-            ) {
+            if disposition.kind == "container" || disposition.status == "unable-to-verify" {
                 continue;
             }
             let explicit = section(&issue.body, "Acceptance criteria");
@@ -351,7 +349,16 @@ impl Engine {
                 .iter()
                 .map(|comment| format!("> {comment}\n"))
                 .collect::<String>();
-            let content = format!("# {}\n\nSource: {}\n\n## Issue context\n\n{}\n## Issue discussion\n\n{}\n## Acceptance criteria\n{}\n", issue.title, issue.url, quoted_body, discussion, disposition.inferred_criteria.iter().map(|criterion| format!("- {criterion}\n")).collect::<String>());
+            let dependency_evidence = if disposition.dependencies.is_empty() {
+                "No open blockers were present in the frozen issue snapshot.\n".to_owned()
+            } else {
+                disposition
+                    .dependencies
+                    .iter()
+                    .map(|dependency| format!("- {dependency}\n"))
+                    .collect::<String>()
+            };
+            let content = format!("# {}\n\nSource: {}\n\n## Issue context\n\n{}\n## Issue discussion\n\n{}\n## Frozen dependency evidence\n{}\n## Acceptance criteria\n{}\n", issue.title, issue.url, quoted_body, discussion, dependency_evidence, disposition.inferred_criteria.iter().map(|criterion| format!("- {criterion}\n")).collect::<String>());
             specs.push(FrozenSpec {
                 path,
                 content_sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
@@ -435,6 +442,15 @@ impl Engine {
             .find(|issue| issue.number == issue_number)
             .with_context(|| format!("issue #{issue_number} is not open in the start snapshot"))?;
         let selected_issue = issue.clone();
+        if classify_snapshot(github_repository, &snapshot, issue_number)
+            .iter()
+            .find(|disposition| {
+                disposition.issue == format!("github:{github_repository}#{issue_number}")
+            })
+            .is_some_and(|disposition| disposition.kind == "container")
+        {
+            bail!("issue #{issue_number} is an epic or tracking container and cannot be selected for implementation");
+        }
         if !issue.blocked_by.is_empty() {
             bail!("issue #{issue_number} has unresolved dependencies; one-issue runs require an independent issue");
         }

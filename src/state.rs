@@ -89,6 +89,9 @@ fn single_backlog_mode() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacklogIssueDisposition {
     pub issue: String,
+    /// actionable | container
+    #[serde(default = "actionable_issue_kind")]
+    pub kind: String,
     /// Whether this issue was selected by the command that created the run.
     #[serde(default)]
     pub selected: bool,
@@ -96,12 +99,15 @@ pub struct BacklogIssueDisposition {
     /// prerequisites to produce an executable plan ticket.
     #[serde(default)]
     pub plan_candidate: bool,
-    /// eligible | blocked | container | skipped | completed | failed | unable-to-verify
+    /// eligible | blocked | skipped | completed | failed | unable-to-verify
     pub status: String,
     pub dependencies: Vec<String>,
     pub reason: String,
     #[serde(default)]
     pub inferred_criteria: Vec<String>,
+}
+fn actionable_issue_kind() -> String {
+    "actionable".into()
 }
 /// A spec revision produced by a decision: an explicit, versioned run artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
