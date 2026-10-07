@@ -46,7 +46,7 @@ Record actual start/end timestamps and deviations. Do not expose earlier provide
 | Authorize isolated evaluation copies | Owner said the TFT repo may be used for the pilot. Keep copies isolated and do not merge or deploy. | **Complete for pilot scope** |
 | Name three actual developer needs | T1 comes from issue #28; T2 and T3 are bounded slices of the owner's open Playbook 18.2 request. T3's follow-up is labeled evaluator-authored. | **Complete with provenance recorded** |
 | Freeze exact base commits and checks | All tasks use `bb4806e17b842f19a83de2113f1ec9677a1be6aa`; per-task checks are recorded in their packets. | **Complete** |
-| Confirm provider access and compatible environments | Codex is available through this environment. Devin and Copilot entitlement, controls, and compatible execution environments have not been verified. | **Unresolved; no scored runs** |
+| Confirm provider access and compatible environments | Codex is available through this environment. The owner is unfamiliar with Devin and GitHub Copilot; no access to either comparator is established. | **Unavailable for this pilot unless access is later supplied; no scored runs** |
 | Authorize usage allowances | No purchase or dollar allowance is assumed. Provider-native caps and stop behavior are unknown until account access is checked. | **Unresolved; no scored runs** |
 | Freeze decision threshold | At least 30% lower active time than the better competitor, no lower no-repair acceptance, and no higher measured variable cost. | **Complete** |
 | Freeze three task packets | T1, T2, and T3 packets preserve source requests, shared instructions, acceptance criteria, checks, evaluator procedures, and the Kiln workflow contract. | **Complete** |
@@ -57,8 +57,8 @@ Scored attempts must not start until these prerequisites are resolved and record
 
 - **Codex/Kiln:** the current Codex environment is available. Kiln has not yet been run against this repository.
 - **TypeScript environment:** the TFT repository's CI uses Node 20 and its engine package requires Node 20 or newer. The current shell has Node `v22.22.1` and npm `10.9.4`, so the declared runtime versions are compatible. Dependency installation and project checks have not been run during packet preparation.
-- **Devin:** no Devin connector or credentials are available in this session; account entitlement is unknown.
-- **Copilot cloud agent:** GitHub CLI is authenticated, but the Copilot entitlement and cloud-agent availability for this private repository are unverified. No Copilot CLI extension is installed; this alone does not establish whether the cloud agent is available.
+- **Devin:** a separate AI coding-agent service. No connector or credentials are available in this session, and the owner has not confirmed an account. Treat access as unavailable for this pilot; no subscription purchase is assumed.
+- **GitHub Copilot cloud agent:** GitHub's cloud coding agent, separate from this Codex session. GitHub CLI is authenticated, but entitlement and cloud-agent availability for this private repository are unverified. The owner is unfamiliar with it; treat access as unavailable for this pilot unless access is later supplied. No subscription purchase is assumed.
 - **Onboarding:** no provider has been onboarded for a scored run. Onboarding minutes are therefore unmeasured, not zero.
 - **Usage controls:** no provider-native cap or authorized allowance is known. No purchase or extra spending is authorized by this record. These controls must be recorded before any attempt starts.
 
