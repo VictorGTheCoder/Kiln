@@ -32,7 +32,7 @@ Inspected checkout: `54ce0f0b95b3826365b95face519120a59de5c89`.
 
 ## Available access
 
-GitHub CLI is authenticated as the repository owner. A read-only assignees query for Kiln returned only the owner; this does not establish either account-wide absence or availability of Copilot. The browser had only a blank page. No authenticated Devin connection was established. Live trials require a selected target repository and confirmed provider access; a clarification is pending.
+GitHub CLI is authenticated as the repository owner. The pilot target is `VictorGTheCoder/tft-improvement-system`. Codex is available in the current environment, but the Kiln workflow has not been preflighted on this target. Devin account access and Copilot cloud-agent entitlement are unverified; provider usage controls are also unknown. Live trials cannot start until compatible access and authorized allowances are confirmed.
 
 GitHub documents that cloud-agent access requires a paid Copilot plan and repository enablement. Assigning an issue starts work and creates a PR. [Start a task](https://docs.github.com/en/copilot/how-tos/copilot-on-github/use-copilot-agents/kick-off-a-task). Devin API automation requires Devin credentials and organization permissions. [Authentication](https://docs.devin.ai/api-reference/authentication).
 
@@ -46,11 +46,13 @@ Freeze repository identity and authorization, exact base commits, actual task pr
 
 | ID | Required category | Actual task |
 | --- | --- | --- |
-| T1 | Reproducible bug | Candidate from TFT Improvement System issue #28: preserve the distinct instances of duplicate champions when presenting a board transition. |
-| T2 | Incremental feature | Candidate from issue #28: connect the existing NextBoard analysis to real evidence so the user-facing feature can return useful results. The issue also permits hiding/removing the path if that feature is not intended to be active, so the desired outcome must be frozen. |
-| T3 | Follow-up revision | A separate initial task and its exact follow-up request are still needed. |
+| T1 | Reproducible bug | Preserve the distinct instances of duplicate champions when presenting a board transition. Source: TFT Improvement System issue #28. |
+| T2 | Incremental feature | Make Master+ scope and the role of GM+/Challenger cross-checks visible in the 18.2 Playbook and Meta Pulse while preserving the 18.1 live default. Source: the owner's open Playbook 18.2 request. |
+| T3 | Follow-up revision | Make AD/Hunter the primary Master+ Nidalee route, then apply the frozen same-session revision that keeps AP Marksman as a conditional conversion. Source: the same request. |
 
-T1 and T2 are sourced from the owner's open issue [#28 in TFT Improvement System](https://github.com/VictorGTheCoder/tft-improvement-system/issues/28); they remain candidates until the expected product behavior and evaluator cases are frozen. Do not invent needs, seed artificial defects, or treat historical issues as current developer requests. Each task needs the exact copyable original prompt, shared provider instructions, acceptance checks, approved Kiln spec, and evaluator procedure.
+The repository is [TFT Improvement System](https://github.com/VictorGTheCoder/tft-improvement-system), frozen at `bb4806e17b842f19a83de2113f1ec9677a1be6aa`. T1 is sourced from open issue [#28](https://github.com/VictorGTheCoder/tft-improvement-system/issues/28); T2/T3 are bounded slices of the owner's open Playbook 18.2 request. The latter has an implementation on an unmerged PR branch, so evaluation copies must expose only the frozen base and must not include PR refs or review context. Record any provider/session exposure as contamination.
+
+The executable packets, including original request text, shared provider instructions, acceptance checks, approved Kiln specs, required commands, and independent evaluator procedures, are in [`docs/pilot/tasks/`](../pilot/tasks/).
 
 Useful supplementary Rust tasks already exist as historical Kiln issues: [#33](https://github.com/VictorGTheCoder/kiln/issues/33) (HTML-escaped secret redaction), [#27](https://github.com/VictorGTheCoder/kiln/issues/27) (publication concurrent state preservation), and [#30](https://github.com/VictorGTheCoder/kiln/issues/30) (credential-field selection). They are closed. Replay requires identifying pre-fix commits, excluding future solution history, and independently confirming the starting failure. They are not launch-ready benchmark targets.
 
@@ -82,4 +84,4 @@ If the advantage appears only in one task category, narrow the product to that c
 
 ## Next executable step
 
-Confirm the target TypeScript repository, actual developer needs, copy authorization, provider access and usage controls, and the decision threshold. Then freeze three task packets and compatible environments before any scored run. Until then, the scorecard remains unrun and no scored attempt is authorized.
+Confirm Devin and Copilot access, their compatible environments, native usage controls, and authorized allowances. Record onboarding and effective stop behavior before any scored run. The repository, base commit, decision rule, and task packets are frozen; the scorecard remains unrun until these access and budget prerequisites are resolved.

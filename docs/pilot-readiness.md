@@ -1,14 +1,17 @@
 # Competitive pilot readiness
 
-Status: **blocked from scored runs**. This record captures preparation under issues [#35](https://github.com/VictorGTheCoder/Kiln/issues/35) and [#36](https://github.com/VictorGTheCoder/Kiln/issues/36). The repository and base commit are selected; task packets are not frozen, and no provider trial has started.
+Status: **blocked from scored runs**. This record captures preparation under issues [#35](https://github.com/VictorGTheCoder/Kiln/issues/35) and [#36](https://github.com/VictorGTheCoder/Kiln/issues/36). Repository, base commit, and task packets are frozen; provider access and usage controls remain unverified. No provider trial has started.
 
 ## Selected repository
 
 - **Repository:** [VictorGTheCoder/tft-improvement-system](https://github.com/VictorGTheCoder/tft-improvement-system), a private TypeScript application for post-game TFT learning and decision review.
 - **Authorization:** the owner authorized use of this repository for the pilot in the conversation. Evaluation copies must be isolated from each other and from existing PR implementations.
 - **Frozen base commit:** `bb4806e17b842f19a83de2113f1ec9677a1be6aa` (`master`, inspected from a clean read-only clone on 2026-10-07).
-- **Repository checks:** root `npm test` runs `node test-core.js`, Overwolf capture checks, and site validation. `ui-v2` has its own Vite build and engine integration check; the exact commands for each packet still need to be fixed after selecting its code path.
-- **Existing source of real needs:** open issue [#28](https://github.com/VictorGTheCoder/tft-improvement-system/issues/28) names an unconnected NextBoard analysis path and loss of duplicate champion instances in presentation. These are candidate task sources, not frozen packets yet.
+- **Repository checks:** root `npm test`, engine tests/typecheck, and the `ui-v2` build/integration checks are allocated by task in the packets.
+- **T1 bug source:** open issue [#28](https://github.com/VictorGTheCoder/tft-improvement-system/issues/28) identifies duplicate champion instances being collapsed in transition presentation.
+- **T2 feature source:** the owner's [open Playbook 18.2 change request](https://github.com/VictorGTheCoder/tft-improvement-system/pull/26) asks for explicit Master+ scope in Playbook and Meta Pulse. The packet preserves the 18.1 live default and 18.2 editorial-only boundary.
+- **T3 revision source:** the same request identifies AD/Hunter as Nidalee's primary Master+ route and AP Marksman as a situational alternate. The packet adds a fixed follow-up request to make that conditional behavior observable.
+- **Contamination control:** the open PR contains an implementation outside the frozen base. Provider copies must include only the pinned base commit and no PR branch/review context. Record any model/account exposure as contamination; do not use the original repository as a provider workspace.
 
 ## Frozen study shape
 
@@ -18,7 +21,7 @@ Status: **blocked from scored runs**. This record captures preparation under iss
 - **Wall-clock limit:** 45 minutes per attempt. The clock starts when the provider begins work and ends at delivery or stop. Any extension requires a recorded deviation and applies consistently to affected attempts.
 - **Change permissions:** only reversible development, checks, commits, and pull request delivery in an authorized isolated copy. No merging, deployment, production changes, purchases, or external messages.
 - **Spec preparation:** Kiln receives an approved spec with the same functional requirements supplied to the other systems. Record original request and spec-preparation minutes; the current pilot measures Kiln's spec-driven workflow, not automatic prompt interpretation.
-- **Decision rule:** unresolved. The 30% active-time improvement threshold in the research document is a proposal, not a frozen criterion. The owner must confirm or replace it before scored runs.
+- **Decision rule:** continue only if Kiln reduces active developer time per accepted change by at least 30% against the better competitor, has no lower no-repair acceptance rate, and does not have higher measured variable cost per accepted change. If cost is unavailable, report it as unavailable and make no cost-advantage claim. This is a small-sample product screen, not a statistical superiority claim.
 
 ## Provider order
 
@@ -41,23 +44,23 @@ Record actual start/end timestamps and deviations. Do not expose earlier provide
 | --- | --- | --- |
 | Select one real TypeScript repository | Owner selected `tft-improvement-system`; it contains a substantial TypeScript application. | **Complete** |
 | Authorize isolated evaluation copies | Owner said the TFT repo may be used for the pilot. Keep copies isolated and do not merge or deploy. | **Complete for pilot scope** |
-| Name three actual developer needs | Issue #28 provides two concrete needs: duplicate-champion presentation and the disconnected NextBoard path. A distinct third need and the final task/category mapping remain unidentified. | **Partially complete** |
-| Freeze exact base commits and checks | Base commit is frozen as `bb4806e17b842f19a83de2113f1ec9677a1be6aa`. Per-task checks depend on finalized task scopes. | **Partially complete** |
-| Confirm provider access and compatible environments | GitHub CLI access is available. Devin and Copilot access, account controls, and compatible execution environments are unverified. Local Codex availability alone does not prove the Kiln workflow is ready on the target. | **Owner confirmation and preflight required** |
-| Authorize usage allowances | No paid purchase or dollar allowance is assumed. Native caps and stop behavior depend on the accounts selected. | **Owner confirmation required** |
-| Freeze decision threshold | Current 30% threshold is only proposed. | **Owner decision required** |
-| Freeze three task packets | Original prompts, equivalent provider instructions, approved Kiln specs, acceptance criteria, required checks, evaluator steps, and evidence targets need final task scopes. | **Pending** |
+| Name three actual developer needs | T1 comes from issue #28; T2 and T3 are bounded slices of the owner's open Playbook 18.2 request. T3's follow-up is labeled evaluator-authored. | **Complete with provenance recorded** |
+| Freeze exact base commits and checks | All tasks use `bb4806e17b842f19a83de2113f1ec9677a1be6aa`; per-task checks are recorded in their packets. | **Complete** |
+| Confirm provider access and compatible environments | Codex is available through this environment. Devin and Copilot entitlement, controls, and compatible execution environments have not been verified. | **Unresolved; no scored runs** |
+| Authorize usage allowances | No purchase or dollar allowance is assumed. Provider-native caps and stop behavior are unknown until account access is checked. | **Unresolved; no scored runs** |
+| Freeze decision threshold | At least 30% lower active time than the better competitor, no lower no-repair acceptance, and no higher measured variable cost. | **Complete** |
+| Freeze three task packets | T1, T2, and T3 packets preserve source requests, shared instructions, acceptance criteria, checks, evaluator procedures, and the Kiln workflow contract. | **Complete** |
 
 Scored attempts must not start until these prerequisites are resolved and recorded. Access failures or unavailable measurements should be reported, not replaced with assumptions.
 
 ## Repository inspection findings
 
-Issue #28 identifies two candidate needs, and the checked-out source confirms both concerns:
+Issue #28 and the checked-out source confirm the duplicate-champion concern:
 
-- `ui-v2/src/lib/spot-analysis.ts` defines `earlyEvidence18_1 = null` and passes it to `analyzeNextBoards()`. The existing UI therefore receives `no-data` for that path. Issue #28 asks to reconnect real evidence if the feature is meant to be active, or remove/mask the inactive path. The packet must choose one observable outcome after the owner confirms the intended behavior.
-- The same file builds `Map<championId, UnitState>` for current board and bench units. Multiple copies of one champion overwrite each other, so transitions can display the wrong instance or lose its star/item details. This is a reproducible bug candidate; the packet still needs a frozen fixture and evaluator steps.
+- `ui-v2/src/lib/spot-analysis.ts` defines `earlyEvidence18_1 = null` and passes it to `analyzeNextBoards()`. The existing POC document records zero authorized early-game observations and an explicit no-data fallback to V1 directions. This is not a task candidate because adding fabricated early-game evidence would violate the product's source constraints.
+- The same file builds `Map<championId, UnitState>` for current board and bench units. Multiple copies of one champion overwrite each other, so transitions can display the wrong instance or lose its star/item details. This is T1.
 
-The repository also has an open PR #26 containing a completed implementation for a separate Playbook 18.2 content audit. It is not selected as a benchmark task because its existing solution would create avoidable contamination.
+T2 and T3 are sourced from the owner's open Playbook 18.2 request. Its implementation exists on a branch outside the frozen base; provider copies must exclude that branch and its review context. If a provider can still access the prior implementation through its account or session, record that exposure and mark the attempt potentially contaminated.
 
 ## Attempt measurement rules
 
