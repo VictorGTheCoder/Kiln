@@ -180,6 +180,10 @@ enum Commands {
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
     },
+    /// Let active ticket work settle, then pause before starting more work.
+    Pause { id: String },
+    /// Stop active work safely and prevent any more tickets from starting.
+    Cancel { id: String },
     /// Validate the integrated revision against acceptance workflows per criterion.
     Validate {
         id: String,
@@ -753,6 +757,14 @@ fn run() -> Result<()> {
                 );
             }
             return Ok(());
+        }
+        Commands::Pause { id } => {
+            engine.request_control(&id, "pause")?;
+            serde_json::json!({"id": id, "requested": "pause"})
+        }
+        Commands::Cancel { id } => {
+            engine.request_control(&id, "cancel")?;
+            serde_json::json!({"id": id, "requested": "cancel"})
         }
         Commands::Report { id } => {
             let run = engine.inspect(&id)?;
