@@ -90,6 +90,7 @@ impl Engine {
             config,
             specs,
             backlog: None,
+            delivery_groups: Vec::new(),
             plan: None,
             imported_issues: Vec::new(),
             integration_branch: None,

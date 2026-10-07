@@ -15,6 +15,32 @@ Epic and tracking labels identify containers. Their open actionable issues remai
 
 The deterministic graph scenario uses `--issue-fixture`, `--planning-fixture`, and `--run-fixture`. Add `--plan-only` to freeze and independently verify a graph without starting implementation.
 
+After scheduling, Kiln records dependency-connected delivery groups. Every edge
+keeps its prerequisite in the same group, so independent groups can be delivered
+without duplicating shared prerequisite work. `kiln publish RUN` rebuilds a branch
+for each fully integrated group, runs the configured build/test checks and the
+configured `validation.workflows` for every covered criterion, then opens or
+reconciles one draft PR for that group. Groups that are blocked, failed, or missing
+criterion evidence remain out of publication; they do not hold up independent
+verified groups. Group branches are based on the frozen run base and contain only
+their group's reviewed ticket commits.
+
+Kiln discovers required status checks from GitHub branch protection and waits for
+checks bound to the exact PR head commit. `publication.required_checks_timeout_seconds`
+and `publication.required_checks_poll_seconds` set the wait bound and polling rate
+(defaults: 600 seconds and 5 seconds). CI observations, evidence links, local group
+validation, repair counts, and PR identity are included in `inspect` and `report`,
+and the latest outcome is written to the draft PR description.
+
+When a required check fails, `publish` uses the configured
+`correction_cycles` budget and a correction/review provider to make a bounded repair.
+Pass `--repair-fixture repair.json` for deterministic runs; its shape is
+`{"corrections":[{"files":{},"outcome":"completed"}],"reviews":[{"standards":{"outcome":"approved","evidence":"..."},"spec":{"outcome":"approved","evidence":"..."}}]}`.
+Every repair creates a new group head and must pass fresh independent Standards and
+Spec review, configured local validation for all group criteria, and required CI
+for that exact commit. Failed or interrupted attempts stay in the run and the PR
+remains draft. Kiln does not merge, deploy, or write issue content or state.
+
 `kiln start-issue` takes one open, independent GitHub issue through Kiln's existing workflow from a single CLI invocation:
 
 ```sh

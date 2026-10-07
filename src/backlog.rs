@@ -391,6 +391,7 @@ impl Engine {
                 decisions: vec!["The complete open-issue snapshot was frozen once; issues created afterward are excluded from this run.".into(), "Epic and tracking issues are containers; actionable open issues are planned independently.".into(), "Issue tracker records remain read-only.".into()],
                 evidence: vec![format!("Snapshotted {} open issues for {github_repository} at {} ms since epoch.", snapshot.len(), now.as_millis())], skill_version: SKILL_VERSION.into(), outcome: "prepared".into(),
             }),
+            delivery_groups: Vec::new(),
             plan: None, imported_issues: snapshot, integration_branch: None, sessions: Vec::new(), corrections: Vec::new(), reviews: Vec::new(), integrations: Vec::new(), validation_reports: Vec::new(), publication: None, decisions: Vec::new(), spec_revisions: Vec::new(), replans: Vec::new(), spec_replans: Vec::new(), recoveries: Vec::new(), synchronization: None,
         };
         self.save(&run)?;
@@ -542,6 +543,7 @@ impl Engine {
                 skill_version: SKILL_VERSION.into(),
                 outcome: "prepared".into(),
             }),
+            delivery_groups: Vec::new(),
             plan: None,
             imported_issues: vec![selected_issue],
             integration_branch: None,
@@ -677,6 +679,36 @@ impl Engine {
                 run.status
             ));
         }
+        let previous: BTreeMap<_, _> = run
+            .delivery_groups
+            .iter()
+            .cloned()
+            .map(|group| (group.id.clone(), group))
+            .collect();
+        run.delivery_groups = crate::delivery::derive(run)
+            .into_iter()
+            .map(|mut group| {
+                if let Some(old) = previous.get(&group.id) {
+                    if group.status == "integrated"
+                        && !matches!(
+                            old.status.as_str(),
+                            "pending" | "integrated" | "blocked" | "failed"
+                        )
+                    {
+                        group.status = old.status.clone();
+                        group.reason = old.reason.clone();
+                    }
+                    group.branch = old.branch.clone();
+                    group.commit = old.commit.clone();
+                    group.validation = old.validation.clone();
+                    group.reviews = old.reviews.clone();
+                    group.pull_request = old.pull_request.clone();
+                    group.ci_attempts = old.ci_attempts.clone();
+                    group.repair_attempts = old.repair_attempts;
+                }
+                group
+            })
+            .collect();
         self.save(run)
             .with_context(|| format!("persist issue outcomes for {id}"))
     }

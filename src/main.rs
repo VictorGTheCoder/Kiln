@@ -220,6 +220,15 @@ enum Commands {
         /// gh program used for real GitHub access (default: gh on PATH).
         #[arg(long)]
         gh: Option<PathBuf>,
+        /// Deterministic correction and fresh-review sequence for delivery-group CI failures.
+        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        repair_fixture: Option<PathBuf>,
+        /// Codex executable used for bounded delivery-group CI repair.
+        #[arg(long, conflicts_with = "claude")]
+        codex: Option<PathBuf>,
+        /// Claude Code executable used for bounded delivery-group CI repair.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Reflect recorded, verified progress in a Kiln progress comment on each imported
     /// issue. Issue titles, bodies and other comments are never modified.
@@ -805,11 +814,18 @@ fn run() -> Result<()> {
                     }
                 }
             };
-            let run = if resume {
+            let mut run = if resume {
                 engine.resume(&id, providers.as_ref())?
             } else {
                 engine.run_tickets(&id, providers.as_ref())?
             };
+            if run
+                .backlog
+                .as_ref()
+                .is_some_and(|backlog| backlog.mode == "issue-graph")
+            {
+                engine.record_backlog_results(&id, &mut run)?;
+            }
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run.status == "blocked" {
                 anyhow::bail!("run blocked; inspect scheduler blockers and ticket evidence");
@@ -851,7 +867,14 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
-        Commands::Publish { id, fixture, gh } => {
+        Commands::Publish {
+            id,
+            fixture,
+            gh,
+            repair_fixture,
+            codex,
+            claude,
+        } => {
             let host: Box<dyn kiln::publication::PullRequestHost> = match fixture {
                 Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
                     &engine.repository.join(path),
@@ -860,7 +883,36 @@ fn run() -> Result<()> {
                     program: gh.unwrap_or_else(|| "gh".into()),
                 }),
             };
-            serde_json::to_value(engine.publish(&id, host.as_ref())?)?
+            let run = engine.inspect(&id)?;
+            serde_json::to_value(
+                if run
+                    .backlog
+                    .as_ref()
+                    .is_some_and(|backlog| backlog.mode == "issue-graph")
+                {
+                    if let Some(path) = repair_fixture {
+                        let agent = kiln::correction::FixtureCorrectionAgent::load(
+                            &engine.repository.join(path),
+                        )?;
+                        engine.publish_delivery_groups_with_repair(
+                            &id,
+                            host.as_ref(),
+                            Some((&agent, &agent)),
+                        )?
+                    } else {
+                        let config = run.config;
+                        with_adapter!(Provider::select(codex, claude), &config, |agent| {
+                            engine.publish_delivery_groups_with_repair(
+                                &id,
+                                host.as_ref(),
+                                Some((&agent, &agent)),
+                            )?
+                        })
+                    }
+                } else {
+                    engine.publish(&id, host.as_ref())?
+                },
+            )?
         }
         Commands::Sync { id, fixture, gh } => {
             let tracker: Box<dyn kiln::synchronization::IssueTracker> = match fixture {
@@ -898,10 +950,25 @@ fn run() -> Result<()> {
         }
         Commands::Report { id } => {
             let run = engine.inspect(&id)?;
-            let report = run.validation_reports.last().ok_or_else(|| {
-                anyhow::anyhow!("run {id} has no validation report; run `kiln validate {id}` first")
-            })?;
-            report.summary(&run.id)
+            if run
+                .backlog
+                .as_ref()
+                .is_some_and(|backlog| backlog.mode == "issue-graph")
+            {
+                serde_json::json!({
+                    "run_id": run.id,
+                    "delivery_groups": run.delivery_groups,
+                    "validation_reports": run.validation_reports,
+                    "publication": run.publication,
+                })
+            } else {
+                let report = run.validation_reports.last().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "run {id} has no validation report; run `kiln validate {id}` first"
+                    )
+                })?;
+                report.summary(&run.id)
+            }
         }
         Commands::Inspect { id: Some(id) } => {
             let run = engine.inspect(&id)?;

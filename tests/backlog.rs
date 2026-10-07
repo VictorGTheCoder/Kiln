@@ -340,7 +340,9 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
     project.write("kiln.json", json!({
         "build":["git","diff","--check"], "test":["git","diff","--check"], "startup":["git","--version"],
         "acceptance_criteria":["Open issue work is scheduled according to dependency edges"],
-        "isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]}
+        "isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]},
+        "validation":{"workflows":[{"criterion":"github-example-project-3.md#ac-1","command":["git","diff","--check"]}]},
+        "publication":{"github_repository":"example/project","target_branch":"main","remote":"origin","required_checks_timeout_seconds":1,"required_checks_poll_seconds":1}
     }));
     project.write("issues.json", json!({"issues":[
         {"number":1,"url":"https://github.com/example/project/issues/1","title":"Fails","body":acceptance("Fail this implementation"),"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
@@ -395,6 +397,223 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         .any(
             |ticket| ticket["id"] == "github:example/project#3" && ticket["state"] == "integrated"
         ));
+    let groups = run["delivery_groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2);
+    let dependent_group = groups
+        .iter()
+        .find(|group| {
+            group["tickets"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("github:example/project#2"))
+        })
+        .unwrap();
+    assert_eq!(
+        dependent_group["tickets"],
+        json!(["github:example/project#1", "github:example/project#2"])
+    );
+    assert_eq!(
+        dependent_group["dependency_edges"][0],
+        json!({"ticket":"github:example/project#2","prerequisite":"github:example/project#1"})
+    );
+    assert_eq!(dependent_group["status"], "failed");
+    let independent_group = groups
+        .iter()
+        .find(|group| {
+            group["tickets"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("github:example/project#3"))
+        })
+        .unwrap();
+    assert_eq!(
+        independent_group["tickets"],
+        json!(["github:example/project#3"])
+    );
+    assert_eq!(independent_group["status"], "integrated");
+
+    project.write(
+        "github.json",
+        json!({"pull_requests":[],"required_check_names":["linux"],"check_runs":[{"pull_request":1,"commit":"stale-head","name":"linux","status":"completed","conclusion":"success","id":"stale-1"}]}),
+    );
+    project.write(
+        "repair.json",
+        json!({
+            "corrections":[{"files":{"ci-repaired.txt":"repair applied\n"},"outcome":"completed"}],
+            "reviews":[{"standards":{"outcome":"approved","evidence":"Reviewed standards for repaired group"},"spec":{"outcome":"approved","evidence":"Reviewed group requirements after repair"}}]
+        }),
+    );
+    let first_publish = project.cli(&[
+        "publish",
+        run["id"].as_str().unwrap(),
+        "--fixture",
+        "github.json",
+        "--repair-fixture",
+        "repair.json",
+    ]);
+    assert!(
+        first_publish.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first_publish.stderr)
+    );
+    let published: Value = serde_json::from_slice(&first_publish.stdout).unwrap();
+    let group = published["delivery_groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["tickets"] == json!(["github:example/project#3"]))
+        .unwrap();
+    assert_eq!(group["status"], "ci-pending");
+    assert_eq!(group["ci_attempts"][0]["checks"][0]["status"], "pending");
+    assert_eq!(
+        group["ci_attempts"][0]["checks"][0]["commit"],
+        group["commit"]
+    );
+    assert!(!group["ci_attempts"][0]["observations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let fixture: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("github.json")).unwrap()).unwrap();
+    assert_eq!(fixture["pull_requests"].as_array().unwrap().len(), 1);
+    assert_eq!(fixture["pull_requests"][0]["head"], group["branch"]);
+    assert_eq!(fixture["pull_requests"][0]["draft"], true);
+    let commit = group["commit"].as_str().unwrap();
+    project.write(
+        "github.json",
+        json!({
+            "pull_requests":fixture["pull_requests"].clone(),
+            "required_check_names":["linux"],
+            "check_runs":[{"pull_request":1,"commit":commit,"name":"linux","status":"completed","conclusion":"success","id":"run-17","url":"https://github.com/example/project/actions/runs/17"}]
+        }),
+    );
+    let second_publish = project.cli(&[
+        "publish",
+        run["id"].as_str().unwrap(),
+        "--fixture",
+        "github.json",
+        "--repair-fixture",
+        "repair.json",
+    ]);
+    assert!(
+        second_publish.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second_publish.stderr)
+    );
+    let verified: Value = serde_json::from_slice(&second_publish.stdout).unwrap();
+    let group = verified["delivery_groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["tickets"] == json!(["github:example/project#3"]))
+        .unwrap();
+    assert_eq!(group["status"], "verified");
+    assert_eq!(group["ci_attempts"][0]["checks"][0]["commit"], commit);
+    assert!(group["pull_request"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Required GitHub checks"));
+    let fixture: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("github.json")).unwrap()).unwrap();
+    let mut checks = fixture["check_runs"].as_array().unwrap().clone();
+    checks[0]["conclusion"] = json!("failure");
+    project.write(
+        "github.json",
+        json!({
+            "pull_requests":fixture["pull_requests"].clone(),
+            "required_check_names":["linux"],
+            "check_runs":checks,
+            "check_snapshots":[
+                {"required_check_names":["linux"],"check_runs":[{"pull_request":1,"commit":commit,"name":"linux","status":"completed","conclusion":"failure","id":"run-18","url":"https://github.com/example/project/actions/runs/18"}]},
+                {"required_check_names":["linux"],"check_runs":[{"pull_request":1,"commit":"current","name":"linux","status":"completed","conclusion":"success","id":"run-19","url":"https://github.com/example/project/actions/runs/19"}]}
+            ]
+        }),
+    );
+    let failed_publish = project.cli(&[
+        "publish",
+        run["id"].as_str().unwrap(),
+        "--fixture",
+        "github.json",
+        "--repair-fixture",
+        "repair.json",
+    ]);
+    assert!(
+        failed_publish.status.success(),
+        "{}",
+        String::from_utf8_lossy(&failed_publish.stderr)
+    );
+    let failed: Value = serde_json::from_slice(&failed_publish.stdout).unwrap();
+    let group = failed["delivery_groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["tickets"] == json!(["github:example/project#3"]))
+        .unwrap();
+    assert_eq!(group["status"], "verified");
+    assert_eq!(group["repair_attempts"], 1);
+    assert_eq!(group["reviews"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        group["ci_attempts"][2]["checks"][0]["conclusion"],
+        "failure"
+    );
+    assert_eq!(
+        group["ci_attempts"][3]["checks"][0]["commit"],
+        group["commit"]
+    );
+    assert!(group["pull_request"]["draft"].as_bool().unwrap());
+    assert!(group["pull_request"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Required GitHub checks"));
+    project.write(
+        "github.json",
+        json!({
+            "pull_requests":fixture["pull_requests"].clone(),
+            "required_check_names":["linux"],
+            "check_runs":[{"pull_request":1,"commit":"current","name":"linux","status":"completed","conclusion":"failure","id":"run-20","url":"https://github.com/example/project/actions/runs/20"}]
+        }),
+    );
+    project.write("empty-repair.json", json!({"corrections":[],"reviews":[]}));
+    let unresolved = project.cli(&[
+        "publish",
+        run["id"].as_str().unwrap(),
+        "--fixture",
+        "github.json",
+        "--repair-fixture",
+        "empty-repair.json",
+    ]);
+    assert!(
+        unresolved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unresolved.stderr)
+    );
+    let unresolved: Value = serde_json::from_slice(&unresolved.stdout).unwrap();
+    let group = unresolved["delivery_groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["tickets"] == json!(["github:example/project#3"]))
+        .unwrap();
+    assert_eq!(group["status"], "repair-failed");
+    assert!(group["reason"]
+        .as_str()
+        .unwrap()
+        .contains("correction fixture sequence exhausted"));
+    assert!(group["pull_request"]["draft"].as_bool().unwrap());
+    assert!(group["pull_request"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("CI finding"));
+    let report = project.cli(&["report", run["id"].as_str().unwrap()]);
+    assert!(report.status.success());
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(
+        report["delivery_groups"][1]["ci_attempts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
 }
 
 #[test]

@@ -22,6 +22,11 @@ pub struct Run {
     /// Frozen open-issue inputs and derived criteria for a one-command backlog run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backlog: Option<BacklogRun>,
+    /// Dependency-connected delivery units for whole-snapshot backlog runs.
+    /// Group membership is frozen from the verified plan; outcomes track only
+    /// the durable scheduler dispositions for those tickets.
+    #[serde(default)]
+    pub delivery_groups: Vec<crate::delivery::DeliveryGroup>,
     #[serde(default)]
     pub plan: Option<crate::planning::Plan>,
     #[serde(default)]

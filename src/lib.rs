@@ -35,5 +35,6 @@ pub mod validation;
 pub mod publication;
 
 pub mod backlog;
+pub mod delivery;
 pub mod recovery;
 pub mod synchronization;
