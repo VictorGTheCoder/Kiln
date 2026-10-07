@@ -1,4 +1,5 @@
 mod config;
+pub mod control;
 mod engine;
 mod state;
 pub mod web;
