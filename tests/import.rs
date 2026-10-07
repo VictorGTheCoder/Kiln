@@ -329,3 +329,56 @@ fn github_rest_contract_preserves_native_blocker_and_reports_unselected_prerequi
         .iter()
         .any(|f| f["code"] == "unknown_blocker"));
 }
+
+#[test]
+fn github_rest_issue_type_object_is_retained_for_unlabelled_container() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    fs::write(
+        repo.path().join("spec.md"),
+        "## Acceptance criteria\n- Approved requirement\n",
+    )
+    .unwrap();
+    fs::write(repo.path().join("kiln.json"), json!({"build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Works"],"isolation":{"network":"none","runtime":"system","commands":[["git"]]}}).to_string()).unwrap();
+    fs::write(
+        repo.path().join("verify.json"),
+        json!({"tickets":[],"verification":{"outcome":"verified","findings":[]}}).to_string(),
+    )
+    .unwrap();
+    let bin = repo.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("gh"), "#!/bin/sh\ncase \"$4\" in\n repos/example/project/issues/4) printf '{\"number\":4,\"html_url\":\"https://github.com/example/project/issues/4\",\"title\":\"Epic\",\"body\":\"Tracks children\",\"type\":{\"name\":\"Epic\"},\"labels\":[],\"state\":\"open\"}';;\n repos/example/project/issues/4/dependencies/blocked_by?*) printf '[]';;\n repos/example/project/issues/4/comments?*) printf '[]';;\n *) echo \"unexpected $4\" >&2; exit 1;;\nesac\n").unwrap();
+    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_kiln"))
+            .current_dir(repo.path())
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let prepared = cli(&["prepare", "--config", "kiln.json", "--spec", "spec.md"]);
+    let run: Value = serde_json::from_slice(&prepared.stdout).unwrap();
+
+    let output = cli(&[
+        "import",
+        run["id"].as_str().unwrap(),
+        "--github-repo",
+        "example/project",
+        "--issue",
+        "4",
+        "--verification-fixture",
+        "verify.json",
+    ]);
+
+    let imported: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(imported["imported_issues"][0]["type"], "Epic");
+}

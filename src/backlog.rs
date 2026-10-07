@@ -61,6 +61,8 @@ pub fn classify_snapshot(
                 matches!(label.trim().to_ascii_lowercase().as_str(),
                     "epic" | "type: epic" | "type:epic" | "tracking" |
                     "tracking issue" | "type: tracking" | "type:tracking")
+            }) || issue.issue_type.as_deref().is_some_and(|kind| {
+                matches!(kind.trim().to_ascii_lowercase().as_str(), "epic" | "tracking")
             });
             let (status, reason) = if is_container {
                 ("skipped", "Issue is an epic or tracking container; open child issues remain independently eligible.".to_owned())

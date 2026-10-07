@@ -507,6 +507,18 @@ impl PullRequestHost for FixturePullRequests {
 pub struct GitHubPullRequests {
     pub program: PathBuf,
 }
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
 impl Default for GitHubPullRequests {
     fn default() -> Self {
         Self {
@@ -671,21 +683,19 @@ impl PullRequestHost for GitHubPullRequests {
         let base = pull["base"]["ref"]
             .as_str()
             .context("pull request response omitted base branch")?;
+        let base_path = encode_path_segment(base);
         let protection = match self.api(
             &[
                 "--method",
                 "GET",
-                &format!("repos/{repository}/branches/{base}/protection/required_status_checks"),
+                &format!(
+                    "repos/{repository}/branches/{base_path}/protection/required_status_checks"
+                ),
             ],
             None,
         ) {
             Ok(value) => value,
-            Err(error) if format!("{error:#}").contains("404") => {
-                return Ok(RequiredChecks {
-                    configured: false,
-                    checks: Vec::new(),
-                })
-            }
+            Err(error) if format!("{error:#}").contains("404") => serde_json::Value::Null,
             Err(error) => return Err(error).context("read required branch-protection checks"),
         };
         let mut required: Vec<String> = protection["contexts"]
@@ -701,6 +711,35 @@ impl PullRequestHost for GitHubPullRequests {
                 .flatten()
                 .filter_map(|value| value["context"].as_str().map(str::to_owned)),
         );
+        let effective_rules = self
+            .api(
+                &[
+                    "--method",
+                    "GET",
+                    &format!("repos/{repository}/rules/branches/{base_path}"),
+                ],
+                None,
+            )
+            .context("read effective branch rules")?;
+        let effective_rules = effective_rules
+            .as_array()
+            .context("invalid effective branch-rules response")?;
+        for rule in effective_rules {
+            if rule["type"].as_str() != Some("required_status_checks") {
+                continue;
+            }
+            let checks = rule["parameters"]["required_status_checks"]
+                .as_array()
+                .context("required_status_checks rule omitted its required contexts")?;
+            for check in checks {
+                required.push(
+                    check["context"]
+                        .as_str()
+                        .context("required_status_checks rule contains an unnamed context")?
+                        .to_owned(),
+                );
+            }
+        }
         required.sort();
         required.dedup();
         if required.is_empty() {

@@ -8,6 +8,33 @@ use std::{
     process::{Command, Output},
 };
 
+fn github_rules_host(
+    rules: &str,
+    fail_rules_read: bool,
+    check_runs: &str,
+) -> (tempfile::TempDir, kiln::publication::GitHubPullRequests) {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("gh");
+    let rules_case = if fail_rules_read {
+        "echo 'rules endpoint unavailable' >&2; exit 1".to_owned()
+    } else {
+        format!("printf '%s' '{}'", rules.replace('\'', "'\\''"))
+    };
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'/calls.log\ncase \"$*\" in\n*'repos/acme/widgets/pulls/7'*) printf '{{\"head\":{{\"sha\":\"sha-123\"}},\"base\":{{\"ref\":\"main\"}}}}' ;;\n*'branches/main/protection/required_status_checks'*) printf '{{\"contexts\":[\"legacy-check\"],\"checks\":[]}}' ;;\n*'rules/branches/main'*) {} ;;\n*'commits/sha-123/check-runs'*) printf '%s' '{}' ;;\n*'commits/sha-123/status'*) printf '{{\"statuses\":[]}}' ;;\n*) echo \"unexpected endpoint: $*\" >&2; exit 2 ;;\nesac\n",
+        temp.path().display(),
+        rules_case,
+        check_runs.replace('\'', "'\\''")
+    );
+    fs::write(&script, body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    (
+        temp,
+        kiln::publication::GitHubPullRequests { program: script },
+    )
+}
+
 struct Project {
     _temp: tempfile::TempDir,
     repo: PathBuf,
@@ -480,6 +507,87 @@ fn github_contract_reconciles_listed_pull_request_with_update() {
         !calls.contains("graphql"),
         "approved-spec publication must not convert PRs to draft: {calls}"
     );
+}
+
+#[test]
+fn effective_branch_rules_add_ruleset_checks_to_classic_protection_checks() {
+    use kiln::publication::wait_for_required_checks;
+    use std::time::Duration;
+    let (temp, host) = github_rules_host(
+        r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"},{"context":"lint"}]}}]"#,
+        false,
+        r#"{"check_runs":[{"name":"build","status":"completed","conclusion":"success","head_sha":"sha-123","id":1},{"name":"lint","status":"completed","conclusion":"success","head_sha":"sha-123","id":2},{"name":"legacy-check","status":"completed","conclusion":"success","head_sha":"sha-123","id":3}]}"#,
+    );
+
+    let outcome = wait_for_required_checks(
+        &host,
+        "acme/widgets",
+        7,
+        "sha-123",
+        Duration::from_millis(10),
+        Duration::ZERO,
+    );
+
+    assert_eq!(outcome.status, "passed");
+    assert_eq!(outcome.checks.len(), 3);
+    assert!(outcome.checks.iter().all(|check| check.commit == "sha-123"));
+    assert_eq!(
+        outcome
+            .checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<Vec<_>>(),
+        ["build", "legacy-check", "lint"]
+    );
+    let calls = fs::read_to_string(temp.path().join("calls.log")).unwrap();
+    assert!(calls.contains("repos/acme/widgets/rules/branches/main"));
+    assert!(calls.contains("repos/acme/widgets/commits/sha-123/check-runs"));
+}
+
+#[test]
+fn failed_ruleset_required_check_fails_the_exact_head_gate() {
+    use kiln::publication::wait_for_required_checks;
+    use std::time::Duration;
+    let (_temp, host) = github_rules_host(
+        r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]"#,
+        false,
+        r#"{"check_runs":[{"name":"build","status":"completed","conclusion":"failure","head_sha":"sha-123","id":1}]}"#,
+    );
+
+    let outcome = wait_for_required_checks(
+        &host,
+        "acme/widgets",
+        7,
+        "sha-123",
+        Duration::from_millis(10),
+        Duration::ZERO,
+    );
+
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.checks[0].name, "build");
+    assert_eq!(outcome.checks[0].commit, "sha-123");
+}
+
+#[test]
+fn unreadable_effective_branch_rules_are_unavailable_not_no_checks() {
+    use kiln::publication::wait_for_required_checks;
+    use std::time::Duration;
+    let (_temp, host) = github_rules_host("[]", true, "{\"check_runs\":[]}");
+
+    let outcome = wait_for_required_checks(
+        &host,
+        "acme/widgets",
+        7,
+        "sha-123",
+        Duration::from_millis(10),
+        Duration::ZERO,
+    );
+
+    assert_eq!(outcome.status, "unavailable");
+    assert!(outcome
+        .failure
+        .unwrap()
+        .contains("rules endpoint unavailable"));
 }
 
 #[test]

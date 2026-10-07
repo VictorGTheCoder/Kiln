@@ -14,6 +14,15 @@ pub struct ImportedIssue {
     pub url: String,
     pub title: String,
     pub body: String,
+    /// GitHub's authoritative issue type; REST responses may use a string or
+    /// an object containing `name`.
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_issue_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub issue_type: Option<String>,
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
@@ -28,6 +37,25 @@ pub struct ImportedIssue {
     #[serde(default)]
     pub dependency_source: String,
 }
+fn deserialize_issue_type<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(issue_type_name(value.as_ref()))
+}
+
+fn issue_type_name(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(name) => Some(name.clone()),
+        serde_json::Value::Object(object) => object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
 pub trait IssueSource {
     fn selected(&self, repository: &str, numbers: &[u64]) -> Result<Vec<ImportedIssue>>;
     fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>>;
@@ -133,6 +161,7 @@ impl IssueSource for GitHubIssues {
                         .context("issue has no title")?
                         .into(),
                     body: value["body"].as_str().unwrap_or("").into(),
+                    issue_type: issue_type_name(value.get("type")),
                     labels: value["labels"]
                         .as_array()
                         .context("issue has no labels")?

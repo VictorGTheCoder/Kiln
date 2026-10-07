@@ -171,6 +171,7 @@ fn frozen_backlog_gives_every_open_issue_a_disposition_and_retains_open_edges() 
         url: format!("https://github.com/example/project/issues/{number}"),
         title: format!("Issue {number}"),
         body: String::new(),
+        issue_type: None,
         labels: labels.iter().map(|label| (*label).to_owned()).collect(),
         assignee: None,
         comments: Vec::new(),
@@ -227,11 +228,12 @@ fn start_backlog_freezes_and_independently_verifies_the_whole_issue_graph() {
             {"number":1,"url":"https://github.com/example/project/issues/1","title":"Base","body":criterion("Create base"),"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
             {"number":2,"url":"https://github.com/example/project/issues/2","title":"Dependent","body":format!("{}\n## Blocked by\n- #1\n", criterion("Use base")),"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
             {"number":3,"url":"https://github.com/example/project/issues/3","title":"Native dependency","body":criterion("Use base natively"),"labels":[],"comments":[],"assignee":null,"blocked_by":["github:example/project#1"],"state":"OPEN"},
-            {"number":4,"url":"https://github.com/example/project/issues/4","title":"Epic","body":"Tracks child work","labels":["epic"],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
+            {"number":4,"url":"https://github.com/example/project/issues/4","title":"Epic","body":"Tracks child work","type":{"name":"Epic"},"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
             {"number":5,"url":"https://github.com/example/project/issues/5","title":"Ambiguous","body":"Make it better","labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
             {"number":6,"url":"https://github.com/example/project/issues/6","title":"Depends on ambiguous","body":criterion("Wait for issue 5"),"labels":[],"comments":[],"assignee":null,"blocked_by":["github:example/project#5"],"state":"OPEN"},
             {"number":7,"url":"https://github.com/example/project/issues/7","title":"Inferred","body":"Write an observable behavior","labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
-            {"number":8,"url":"https://github.com/example/project/issues/8","title":"Closed at snapshot","body":criterion("Must not appear"),"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"CLOSED"}
+            {"number":8,"url":"https://github.com/example/project/issues/8","title":"Closed at snapshot","body":criterion("Must not appear"),"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"CLOSED"},
+            {"number":9,"url":"https://github.com/example/project/issues/9","title":"Tracking record","body":"A record only","type":"Tracking","labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"}
         ]}).to_string(),
     )
     .unwrap();
@@ -275,7 +277,7 @@ fn start_backlog_freezes_and_independently_verifies_the_whole_issue_graph() {
     let run: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         run["backlog"]["issue_snapshot"].as_array().unwrap().len(),
-        7
+        8
     );
     assert_eq!(run["plan"]["verification"]["outcome"], "verified");
     assert_eq!(
@@ -296,6 +298,10 @@ fn start_backlog_freezes_and_independently_verifies_the_whole_issue_graph() {
     assert_eq!(run["backlog"]["dispositions"][1]["status"], "blocked");
     assert_eq!(run["backlog"]["dispositions"][3]["status"], "skipped");
     assert_eq!(run["backlog"]["dispositions"][3]["kind"], "container");
+    assert_eq!(run["backlog"]["issue_snapshot"][3]["type"], "Epic");
+    assert_eq!(run["backlog"]["dispositions"][7]["status"], "skipped");
+    assert_eq!(run["backlog"]["dispositions"][7]["kind"], "container");
+    assert_eq!(run["backlog"]["issue_snapshot"][7]["type"], "Tracking");
     assert_eq!(
         run["backlog"]["dispositions"][4]["status"],
         "unable-to-verify"
