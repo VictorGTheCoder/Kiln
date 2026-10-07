@@ -23,10 +23,13 @@ enum Commands {
         #[arg(long)]
         fixture: Option<PathBuf>,
         #[arg(long)]
-        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         verification_fixture: Option<PathBuf>,
         #[arg(long, conflicts_with = "verification_fixture")]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with_all = ["codex", "verification_fixture"])]
+        claude: Option<PathBuf>,
     },
     /// Validate configuration and freeze approved Markdown specs. No commands are executed.
     Prepare {
@@ -39,37 +42,49 @@ enum Commands {
     Plan {
         id: String,
         #[arg(long)]
-        #[arg(required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Execute one eligible ticket in an isolated worktree.
     Implement {
         id: String,
         ticket: String,
         #[arg(long)]
-        #[arg(required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Review an exact implementation commit in independent contexts.
     Review {
         id: String,
         ticket: String,
-        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     Correct {
         id: String,
         ticket: String,
-        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Resolve an ambiguity autonomously by the decision hierarchy (product
     /// objectives > architectural decisions > specs) and record the decision.
@@ -78,10 +93,13 @@ enum Commands {
         /// Ambiguity description: {id, question, positions:[{source, reference, statement}]}.
         #[arg(long)]
         ambiguity: PathBuf,
-        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Apply revised approved specs explicitly: capture them as a new input version,
     /// independently reverify the revised plan, invalidate affected work and evidence,
@@ -91,38 +109,50 @@ enum Commands {
         /// Approved spec (a frozen input of the run) whose current content to apply.
         #[arg(long, required = true)]
         spec: Vec<PathBuf>,
-        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Integrate an exact reviewed change and verify the combined result.
     Integrate {
         id: String,
         ticket: String,
-        #[arg(long, conflicts_with = "codex")]
+        #[arg(long, conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Schedule every accepted ticket: concurrent independent sessions, prerequisite
     /// ordering across specs, serialized verified integration.
     Run {
         id: String,
-        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Reopen an interrupted run: reconcile recorded state with observed Git and process
     /// state, record each recovery decision, then continue scheduling without
     /// repeating completed effects.
     Resume {
         id: String,
-        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
     },
     /// Validate the integrated revision against acceptance workflows per criterion.
     Validate {
@@ -163,6 +193,51 @@ enum Commands {
         bind: std::net::SocketAddr,
     },
 }
+/// Real provider selected by `--codex PATH` or `--claude PATH` (mutually exclusive).
+enum Provider {
+    Codex(Option<PathBuf>),
+    Claude(Option<PathBuf>),
+}
+impl Provider {
+    fn select(codex: Option<PathBuf>, claude: Option<PathBuf>) -> Self {
+        match claude {
+            Some(path) => Self::Claude(Some(path)),
+            None => Self::Codex(codex),
+        }
+    }
+}
+/// Bind `$a` to a fresh adapter of the selected provider and evaluate `$body`.
+macro_rules! with_adapter {
+    ($provider:expr, $config:expr, |$a:ident| $body:expr) => {
+        match $provider {
+            Provider::Codex(path) => {
+                let $a = kiln::codex::CodexAdapter::new(kiln::codex::CodexConfig::from_project(
+                    $config, path,
+                )?);
+                $body
+            }
+            Provider::Claude(path) => {
+                let $a = kiln::claude::ClaudeAdapter::new(
+                    kiln::claude::ClaudeConfig::from_project($config, path)?,
+                );
+                $body
+            }
+        }
+    };
+}
+/// Bind `$a` to fresh planning contexts (disposable clones) of the selected provider.
+macro_rules! with_planner {
+    ($provider:expr, $engine:expr, $config:expr, |$a:ident| $body:expr) => {
+        with_adapter!($provider, &$config, |adapter| {
+            let $a = kiln::agent::PlanningContexts {
+                adapter,
+                repository: $engine.repository.clone(),
+                isolation: $config.isolation.clone(),
+            };
+            $body
+        })
+    };
+}
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let engine = Engine::open(&cli.repo)?;
@@ -174,6 +249,7 @@ fn run() -> Result<()> {
             fixture,
             verification_fixture,
             codex,
+            claude,
         } => {
             let source: Box<dyn kiln::import::IssueSource> = match fixture {
                 Some(path) => Box::new(kiln::import::FixtureIssues::load(
@@ -188,12 +264,8 @@ fn run() -> Result<()> {
                     )?)
                 } else {
                     let config = engine.inspect(&id)?.config;
-                    Box::new(kiln::codex::CodexPlanningAgent {
-                        adapter: kiln::codex::CodexAdapter::new(
-                            kiln::codex::CodexConfig::from_project(&config, codex)?,
-                        ),
-                        repository: engine.repository.clone(),
-                        isolation: config.isolation,
+                    with_planner!(Provider::select(codex, claude), engine, config, |a| {
+                        Box::new(a)
                     })
                 };
             let run = engine.import_issues(
@@ -212,19 +284,20 @@ fn run() -> Result<()> {
         Commands::Prepare { config, spec } => {
             serde_json::to_value(engine.prepare(&config, &spec)?)?
         }
-        Commands::Plan { id, fixture, codex } => {
+        Commands::Plan {
+            id,
+            fixture,
+            codex,
+            claude,
+        } => {
             let agent: Box<dyn kiln::planning::PlanningAgent> = if let Some(path) = fixture {
                 Box::new(kiln::planning::FixtureAgent::load(
                     &engine.repository.join(path),
                 )?)
             } else {
                 let config = engine.inspect(&id)?.config;
-                Box::new(kiln::codex::CodexPlanningAgent {
-                    adapter: kiln::codex::CodexAdapter::new(
-                        kiln::codex::CodexConfig::from_project(&config, codex)?,
-                    ),
-                    repository: engine.repository.clone(),
-                    isolation: config.isolation,
+                with_planner!(Provider::select(codex, claude), engine, config, |a| {
+                    Box::new(a)
                 })
             };
             let run = engine.plan(&id, agent.as_ref())?;
@@ -239,15 +312,15 @@ fn run() -> Result<()> {
             ticket,
             fixture,
             codex,
+            claude,
         } => {
             let agent: Box<dyn kiln::execution::ImplementationAgent> = if let Some(path) = fixture {
                 Box::new(kiln::execution::FixtureImplementationAgent::load(
                     &engine.repository.join(path),
                 )?)
             } else {
-                Box::new(kiln::codex::CodexAdapter::new(
-                    kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
-                ))
+                let config = engine.inspect(&id)?.config;
+                with_adapter!(Provider::select(codex, claude), &config, |a| Box::new(a))
             };
             let run = engine.implement_ticket(&id, &ticket, agent.as_ref())?;
             println!("{}", serde_json::to_string_pretty(&run)?);
@@ -265,15 +338,15 @@ fn run() -> Result<()> {
             ticket,
             fixture,
             codex,
+            claude,
         } => {
             let agent: Box<dyn kiln::review::ReviewAgent> = if let Some(path) = fixture {
                 Box::new(kiln::review::FixtureReviewAgent::load(
                     &engine.repository.join(path),
                 )?)
             } else {
-                Box::new(kiln::codex::CodexAdapter::new(
-                    kiln::codex::CodexConfig::from_project(&engine.inspect(&id)?.config, codex)?,
-                ))
+                let config = engine.inspect(&id)?.config;
+                with_adapter!(Provider::select(codex, claude), &config, |a| Box::new(a))
             };
             let run = engine.review_ticket(&id, &ticket, agent.as_ref())?;
             println!("{}", serde_json::to_string_pretty(&run)?);
@@ -287,17 +360,16 @@ fn run() -> Result<()> {
             ticket,
             fixture,
             codex,
+            claude,
         } => {
             let run = if let Some(path) = fixture {
                 let a =
                     kiln::correction::FixtureCorrectionAgent::load(&engine.repository.join(path))?;
                 engine.correct_ticket(&id, &ticket, &a, &a)?
             } else {
-                let a = kiln::codex::CodexAdapter::new(kiln::codex::CodexConfig::from_project(
-                    &engine.inspect(&id)?.config,
-                    codex,
-                )?);
-                engine.correct_ticket(&id, &ticket, &a, &a)?
+                let config = engine.inspect(&id)?.config;
+                with_adapter!(Provider::select(codex, claude), &config, |a| engine
+                    .correct_ticket(&id, &ticket, &a, &a)?)
             };
             println!("{}", serde_json::to_string_pretty(&run)?);
             let session = run
@@ -316,6 +388,7 @@ fn run() -> Result<()> {
             ambiguity,
             fixture,
             codex,
+            claude,
         } => {
             let ambiguity = kiln::decision::Ambiguity::load(&engine.repository.join(ambiguity))?;
             let run = if let Some(path) = fixture {
@@ -324,14 +397,9 @@ fn run() -> Result<()> {
                 engine.decide(&id, &ambiguity, &agent, &agent)?
             } else {
                 let config = engine.inspect(&id)?.config;
-                let agent = kiln::codex::CodexPlanningAgent {
-                    adapter: kiln::codex::CodexAdapter::new(
-                        kiln::codex::CodexConfig::from_project(&config, codex)?,
-                    ),
-                    repository: engine.repository.clone(),
-                    isolation: config.isolation,
-                };
-                engine.decide(&id, &ambiguity, &agent, &agent)?
+                with_planner!(Provider::select(codex, claude), engine, config, |agent| {
+                    engine.decide(&id, &ambiguity, &agent, &agent)?
+                })
             };
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run.decisions.last().is_none_or(|d| d.outcome != "resolved") {
@@ -344,6 +412,7 @@ fn run() -> Result<()> {
             spec,
             fixture,
             codex,
+            claude,
         } => {
             let run = if let Some(path) = fixture {
                 let agent = kiln::spec_replanning::FixtureSpecReplanning::load(
@@ -352,14 +421,9 @@ fn run() -> Result<()> {
                 engine.replan_specs(&id, &spec, &agent)?
             } else {
                 let config = engine.inspect(&id)?.config;
-                let agent = kiln::codex::CodexPlanningAgent {
-                    adapter: kiln::codex::CodexAdapter::new(
-                        kiln::codex::CodexConfig::from_project(&config, codex)?,
-                    ),
-                    repository: engine.repository.clone(),
-                    isolation: config.isolation,
-                };
-                engine.replan_specs(&id, &spec, &agent)?
+                with_planner!(Provider::select(codex, claude), engine, config, |agent| {
+                    engine.replan_specs(&id, &spec, &agent)?
+                })
             };
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run
@@ -376,18 +440,17 @@ fn run() -> Result<()> {
             ticket,
             fixture,
             codex,
+            claude,
         } => {
             let _owner = engine.own_run(&id)?;
             let run = if let Some(path) = fixture {
                 let a =
                     kiln::correction::FixtureCorrectionAgent::load(&engine.repository.join(path))?;
                 engine.integrate_ticket(&id, &ticket, Some((&a, &a)))?
-            } else if let Some(path) = codex {
-                let a = kiln::codex::CodexAdapter::new(kiln::codex::CodexConfig::from_project(
-                    &engine.inspect(&id)?.config,
-                    Some(path),
-                )?);
-                engine.integrate_ticket(&id, &ticket, Some((&a, &a)))?
+            } else if codex.is_some() || claude.is_some() {
+                let config = engine.inspect(&id)?.config;
+                with_adapter!(Provider::select(codex, claude), &config, |a| engine
+                    .integrate_ticket(&id, &ticket, Some((&a, &a)))?)
             } else {
                 engine.integrate_ticket(&id, &ticket, None)?
             };
@@ -402,9 +465,19 @@ fn run() -> Result<()> {
             return Ok(());
         }
         command @ (Commands::Run { .. } | Commands::Resume { .. }) => {
-            let (resume, id, fixture, codex) = match command {
-                Commands::Run { id, fixture, codex } => (false, id, fixture, codex),
-                Commands::Resume { id, fixture, codex } => (true, id, fixture, codex),
+            let (resume, id, fixture, codex, claude) = match command {
+                Commands::Run {
+                    id,
+                    fixture,
+                    codex,
+                    claude,
+                } => (false, id, fixture, codex, claude),
+                Commands::Resume {
+                    id,
+                    fixture,
+                    codex,
+                    claude,
+                } => (true, id, fixture, codex, claude),
                 _ => unreachable!(),
             };
             let providers: Box<dyn kiln::scheduler::TicketProviders> = match fixture {
@@ -414,12 +487,22 @@ fn run() -> Result<()> {
                 )?),
                 None => {
                     let config = engine.inspect(&id)?.config;
-                    Box::new(
-                        kiln::scheduler::CodexProviders::new(
-                            kiln::codex::CodexConfig::from_project(&config, codex)?,
-                        )
-                        .with_replanning(engine.repository.clone(), config.isolation),
-                    )
+                    let repository = engine.repository.clone();
+                    let isolation = config.isolation.clone();
+                    match Provider::select(codex, claude) {
+                        Provider::Codex(path) => Box::new(
+                            kiln::scheduler::CodexProviders::new(
+                                kiln::codex::CodexConfig::from_project(&config, path)?,
+                            )
+                            .with_replanning(repository, isolation),
+                        ),
+                        Provider::Claude(path) => Box::new(
+                            kiln::scheduler::ClaudeProviders::new(
+                                kiln::claude::ClaudeConfig::from_project(&config, path)?,
+                            )
+                            .with_replanning(repository, isolation),
+                        ),
+                    }
                 }
             };
             let run = if resume {
