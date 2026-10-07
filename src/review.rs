@@ -119,26 +119,7 @@ fn clean(repo: &Path) -> Result<bool> {
     Ok(git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty())
 }
 fn check(run: &Run, repo: &Path, name: &str, argv: &[String]) -> CheckResult {
-    let result = crate::sandbox::Sandbox::command(&run.config.isolation, repo, name, argv, &[])
-        .and_then(|mut c| Ok(c.output()?));
-    match result {
-        Ok(r) => CheckResult {
-            name: name.into(),
-            command: argv.into(),
-            exit_code: r.status.code(),
-            stdout: String::from_utf8_lossy(&r.stdout).into(),
-            stderr: String::from_utf8_lossy(&r.stderr).into(),
-            passed: r.status.success(),
-        },
-        Err(e) => CheckResult {
-            name: name.into(),
-            command: argv.into(),
-            exit_code: None,
-            stdout: String::new(),
-            stderr: e.to_string(),
-            passed: false,
-        },
-    }
+    crate::sandbox::Sandbox::check(&run.config.isolation, repo, name, argv)
 }
 impl AxisReview {
     pub fn verified(&self) -> bool {
@@ -217,7 +198,11 @@ impl Engine {
         let review_id = format!(
             "{}-review-{}",
             session.id,
-            run.reviews.iter().filter(|r| r.session_id == session.id).count() + 1
+            run.reviews
+                .iter()
+                .filter(|r| r.session_id == session.id)
+                .count()
+                + 1
         );
         let mut axes = Vec::new();
         for axis in ["standards", "spec"] {

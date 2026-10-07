@@ -77,7 +77,12 @@ impl Engine {
     }
     /// One replanning attempt. Returns the recorded attempt; when `replanned`, the
     /// plan holds the verified revision and the ticket's earlier sessions are superseded.
-    pub fn replan_ticket(&self, id: &str, ticket: &str, agent: &dyn Replanner) -> Result<Replanning> {
+    pub fn replan_ticket(
+        &self,
+        id: &str,
+        ticket: &str,
+        agent: &dyn Replanner,
+    ) -> Result<Replanning> {
         let run = self.inspect(id)?;
         let previous = run
             .plan
@@ -109,7 +114,11 @@ impl Engine {
             ticket: previous,
             failures,
             specs: specs.clone(),
-            tickets: run.plan.as_ref().map(|p| p.tickets.clone()).unwrap_or_default(),
+            tickets: run
+                .plan
+                .as_ref()
+                .map(|p| p.tickets.clone())
+                .unwrap_or_default(),
         });
         let mut adopted = None;
         match revised {
@@ -126,12 +135,18 @@ impl Engine {
                     &run,
                     &specs,
                     std::slice::from_ref(&revised),
+                    &[],
                     agent,
                     &replan_id,
                     &context_id,
                 )?;
                 record.findings = plan.findings.clone();
-                record.outcome = if plan.executable { "replanned" } else { "rejected" }.into();
+                record.outcome = if plan.executable {
+                    "replanned"
+                } else {
+                    "rejected"
+                }
+                .into();
                 if plan.executable {
                     adopted = Some(plan.clone());
                 }
@@ -142,7 +157,11 @@ impl Engine {
         self.transact(id, |run| {
             if let Some(plan) = adopted {
                 run.plan = Some(plan);
-                for s in run.sessions.iter_mut().filter(|s| s.ticket_id == ticket && s.status != "integrated") {
+                for s in run
+                    .sessions
+                    .iter_mut()
+                    .filter(|s| s.ticket_id == ticket && s.status != "integrated")
+                {
                     s.status = "superseded".into();
                 }
             }

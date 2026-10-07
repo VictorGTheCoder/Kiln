@@ -29,7 +29,20 @@ fn scenario(mode: &str) {
     if mode == "combination" {
         fs::write(repo.join("check.sh"), "#!/bin/sh\nif test -f other.txt && test \"$(cat feature.txt)\" = works; then exit 1; fi\n").unwrap();
     }
-    fs::write(repo.join("kiln.json"), json!({"build":["git","diff","--check"],"test":["git","diff","--check"],"startup":["git","--version"],"acceptance_criteria":["works"],"isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]}}).to_string()).unwrap();
+    let integration_wait = [
+        "sh",
+        "-c",
+        "case \"$PWD\" in *-integration-*) mkdir -p .kiln; touch .kiln/integration_started; while test ! -f .kiln/release; do sleep 0.05; done;; esac",
+    ];
+    let mut config = json!({"build":["git","diff","--check"],"test":["git","diff","--check"],"startup":["git","--version"],"acceptance_criteria":["works"],"isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]}});
+    if mode == "locking" {
+        config["test"] = json!(integration_wait);
+        config["isolation"]["commands"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(integration_wait));
+    }
+    fs::write(repo.join("kiln.json"), config.to_string()).unwrap();
     if mode == "combination" {
         let mut config: Value =
             serde_json::from_slice(&fs::read(repo.join("kiln.json")).unwrap()).unwrap();
@@ -133,6 +146,40 @@ fn scenario(mode: &str) {
         fs::write(repo.join("correct.json"),json!({"corrections":[{"files":files,"outcome":"completed"}],"reviews":[{"standards":approved,"spec":approved}]}).to_string()).unwrap();
     }
     fs::write(repo.join("one.md"), "dirty primary").unwrap();
+    if mode == "locking" {
+        fs::write(
+            repo.join("scenario.json"),
+            json!({"tickets":{}}).to_string(),
+        )
+        .unwrap();
+        let integration = repo
+            .join(".kiln/worktrees")
+            .join(format!("{id}-integration-1"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kiln"))
+            .args(["integrate", id, "a"])
+            .current_dir(repo)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        while !integration.join(".kiln/integration_started").exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "direct integration never reached its configured check"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let resume = cli(&["resume", id, "--fixture", "scenario.json"]);
+        assert!(!resume.status.success());
+        assert!(String::from_utf8_lossy(&resume.stderr).contains("active in another process"));
+        fs::write(integration.join(".kiln/release"), "continue").unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "direct integration failed after release"
+        );
+        return;
+    }
     let out = if ["corrected", "unresolved", "combination"].contains(&mode) {
         cli(&["integrate", id, "a", "--fixture", "correct.json"])
     } else {
@@ -206,4 +253,9 @@ fn edits_after_review_require_renewed_validation() {
 #[test]
 fn combined_failure_does_not_publish_passing_ticket() {
     scenario("combination");
+}
+
+#[test]
+fn direct_integration_holds_run_ownership_against_resume() {
+    scenario("locking");
 }

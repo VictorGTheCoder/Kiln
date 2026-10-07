@@ -3,9 +3,132 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
+
+#[derive(Clone, Default)]
+pub(crate) struct CommandCancellation(Arc<AtomicBool>);
+impl CommandCancellation {
+    pub(crate) fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+thread_local! {
+    static COMMAND_CANCELLATION: std::cell::RefCell<Option<CommandCancellation>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn with_command_cancellation<T>(
+    cancellation: CommandCancellation,
+    operation: impl FnOnce() -> T,
+) -> T {
+    COMMAND_CANCELLATION.with(|current| {
+        let previous = current.replace(Some(cancellation));
+        let result = operation();
+        current.replace(previous);
+        result
+    })
+}
+
+pub(crate) fn command_cancellation_active() -> bool {
+    COMMAND_CANCELLATION.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .is_some_and(CommandCancellation::is_cancelled)
+    })
+}
+
+fn output(mut command: Command, cancellation: Option<CommandCancellation>) -> Result<Output> {
+    let Some(cancellation) = cancellation else {
+        return Ok(command.output()?);
+    };
+    if cancellation.is_cancelled() {
+        bail!("project command cancelled by run stop policy");
+    }
+    use std::os::unix::process::CommandExt;
+    command
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let pid = child.id() as i32;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("project command stdout is unavailable")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("project command stderr is unavailable")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let stdout_sender = sender.clone();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout_sender.send((true, stdout.read_to_end(&mut bytes).map(|_| bytes)));
+    });
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = sender.send((false, stderr.read_to_end(&mut bytes).map(|_| bytes)));
+    });
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
+    let mut termination_started = None;
+    loop {
+        while let Ok((is_stdout, result)) = receiver.try_recv() {
+            if is_stdout {
+                stdout = Some(result?);
+            } else {
+                stderr = Some(result?);
+            }
+        }
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        if cancellation.is_cancelled() && termination_started.is_none() {
+            unsafe { libc::kill(-pid, libc::SIGTERM) };
+            termination_started = Some(Instant::now());
+        }
+        if termination_started
+            .is_some_and(|started| started.elapsed() >= Duration::from_millis(150))
+        {
+            // Kill the group even when its leader has exited: descendants may still
+            // be running and holding the captured output pipes open.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            if status.is_none() {
+                status = Some(child.wait()?);
+            }
+            termination_started = None;
+        }
+        if status.is_some() && stdout.is_some() && stderr.is_some() {
+            break;
+        }
+        if cancellation.is_cancelled() && termination_started.is_none() {
+            bail!("project command cancelled by run stop policy");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if cancellation.is_cancelled() {
+        bail!("project command cancelled by run stop policy");
+    }
+    Ok(Output {
+        status: status.expect("command status checked before leaving loop"),
+        stdout: stdout.expect("stdout checked before leaving loop"),
+        stderr: stderr.expect("stderr checked before leaving loop"),
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +202,38 @@ pub struct Mount {
 }
 pub struct Sandbox;
 impl Sandbox {
+    pub(crate) fn output(command: Command) -> Result<Output> {
+        let cancellation = COMMAND_CANCELLATION.with(|current| current.borrow().clone());
+        output(command, cancellation)
+    }
+
+    pub(crate) fn check(
+        policy: &IsolationPolicy,
+        worktree: &Path,
+        name: &str,
+        argv: &[String],
+    ) -> crate::execution::CheckResult {
+        let result =
+            Self::supervised_command(policy, worktree, name, argv, &[]).and_then(Self::output);
+        let (exit_code, stdout, stderr, passed) = match result {
+            Ok(output) => (
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                output.status.success(),
+            ),
+            Err(error) => (None, String::new(), error.to_string(), false),
+        };
+        crate::execution::CheckResult {
+            name: name.into(),
+            command: argv.to_vec(),
+            exit_code,
+            stdout: policy.redact(&stdout),
+            stderr: policy.redact(&stderr),
+            passed,
+        }
+    }
+
     fn base(policy: &IsolationPolicy, worktree: &Path, mounts: &[Mount]) -> Result<Command> {
         Self::base_with_session(policy, worktree, mounts, true)
     }

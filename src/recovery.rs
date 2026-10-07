@@ -71,25 +71,7 @@ fn check(
     name: &str,
     argv: &[String],
 ) -> CheckResult {
-    let output = crate::sandbox::Sandbox::command(&config.isolation, worktree, name, argv, &[])
-        .and_then(|mut command| Ok(command.output()?));
-    let (exit_code, stdout, stderr, passed) = match output {
-        Ok(o) => (
-            o.status.code(),
-            String::from_utf8_lossy(&o.stdout).into_owned(),
-            String::from_utf8_lossy(&o.stderr).into_owned(),
-            o.status.success(),
-        ),
-        Err(e) => (None, String::new(), e.to_string(), false),
-    };
-    CheckResult {
-        name: name.into(),
-        command: argv.to_vec(),
-        exit_code,
-        stdout: config.isolation.redact(&stdout),
-        stderr: config.isolation.redact(&stderr),
-        passed,
-    }
+    crate::sandbox::Sandbox::check(&config.isolation, worktree, name, argv)
 }
 
 impl Engine {
@@ -105,11 +87,9 @@ impl Engine {
         self.transact(id, |run| {
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
             let mut decisions = Vec::new();
-            // No process of this run is alive (ownership is held), so an integration lock
-            // naming this run was left by the interrupted process.
-            let lock = self.repository.join(".kiln/integration.lock");
-            if std::fs::read_to_string(&lock).is_ok_and(|owner| owner == run.id) {
-                std::fs::remove_file(&lock)?;
+            // A lock inode persists for process-safe flock. Clear stale metadata only
+            // after acquiring it; a live integration keeps the inode and marker intact.
+            if self.clear_interrupted_integration_marker(&run.id)? {
                 decisions.push(decision(None, "integration.lock", "released", "integration lock was left by this run's interrupted process; no live owner remains".into()));
             }
             let tip = run
@@ -282,8 +262,10 @@ impl Engine {
                     .sessions
                     .iter_mut()
                     .rev()
-                    .find(|s| s.ticket_id == ticket && s.status != "interrupted");
-                if let Some(session) = latest.filter(|s| s.status == "failed") {
+                    .find(|s| s.ticket_id == ticket);
+                if let Some(session) = latest.filter(|s| {
+                    matches!(s.status.as_str(), "failed" | "interrupted")
+                }) {
                     let reason = format!(
                         "session was stopped by an exhausted run-wide limit before completing ({}); restarting in a fresh session without charging a correction cycle",
                         session.failure.as_deref().unwrap_or("no recorded failure")

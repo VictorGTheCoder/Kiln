@@ -62,6 +62,11 @@ const PROBE: [&str; 3] = ["sh", "-c", "test -f .ready"];
 const NEVER_READY: [&str; 3] = ["sh", "-c", "test -f .never"];
 const CHECK: [&str; 3] = ["sh", "-c", "test -f one.txt"];
 const VERIFIER_TEST: [&str; 3] = ["sh", "-c", "test -f two.txt"];
+const WAIT_FOR_VALIDATION_RELEASE: [&str; 3] = [
+    "sh",
+    "-c",
+    "touch .validation_started; while test ! -f .validation_release; do sleep 0.05; done",
+];
 
 fn project(probe: [&str; 3]) -> (Project, String, Value) {
     let temp = tempfile::tempdir().unwrap();
@@ -96,7 +101,7 @@ fn project(probe: [&str; 3]) -> (Project, String, Value) {
             "build": CHECK, "test": CHECK, "startup": STARTUP,
             "acceptance_criteria": ["Sender and receiver work together"],
             "isolation": {"runtime":"system","network":"none",
-                "commands":[CHECK, STARTUP, PROBE, NEVER_READY, FLOW, VERIFIER_TEST]},
+                "commands":[CHECK, STARTUP, PROBE, NEVER_READY, FLOW, VERIFIER_TEST, WAIT_FOR_VALIDATION_RELEASE]},
             "validation": {"startup_probe": probe, "timeout_ms": 3000, "workflows": [
                 {"criterion":"one.md#ac-1","command":FLOW},
                 {"criterion":"two.md#ac-1","command":FLOW}
@@ -124,6 +129,127 @@ fn project(probe: [&str; 3]) -> (Project, String, Value) {
     let approved = json!({"outcome":"approved","findings":[],"evidence":"Observed change"});
     p.write("review.json", json!({"standards":approved,"spec":approved}));
     (p, id, prepared)
+}
+
+#[test]
+fn validation_ownership_prevents_a_concurrent_replan_from_being_overwritten() {
+    let (p, id, _) = project(PROBE);
+    p.deliver(&id, "a", json!({"one.txt":"v2\n"}));
+    p.deliver(&id, "b", json!({"two.txt":"v2\n"}));
+    p.deliver(&id, "c", json!({"two.extra":"kept\n"}));
+    p.write(
+        "verifier.json",
+        json!({"acceptance_checks":[
+            {"criterion":"one.md#ac-1","command":WAIT_FOR_VALIDATION_RELEASE},
+            {"criterion":"two.md#ac-2","command":VERIFIER_TEST}
+        ]}),
+    );
+    let mut validation = Command::new(env!("CARGO_BIN_EXE_kiln"))
+        .args(["validate", &id, "--verifier", "verifier.json"])
+        .current_dir(&p.repo)
+        .spawn()
+        .unwrap();
+    let worktree = p
+        .repo
+        .join(".kiln/worktrees")
+        .join(format!("{id}-validation-1"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !worktree.join(".validation_started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "validation did not start its delayed check"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    fs::write(
+        p.repo.join("one.md"),
+        "# Sender\n## Acceptance criteria\n- Messages use protocol v3\n",
+    )
+    .unwrap();
+    p.write("replan.json", json!({"tickets":[
+        {"id":"a","title":"Send protocol v3","description":"Send v3","acceptance_criteria":["one sends v3"],"covers":["one.md#ac-1"],"blocked_by":[]}
+    ],"verification":{"outcome":"verified","findings":[]}}));
+    let concurrent_replan = p.cli(&[
+        "replan",
+        &id,
+        "--spec",
+        "one.md",
+        "--fixture",
+        "replan.json",
+    ]);
+    assert!(
+        !concurrent_replan.status.success(),
+        "replanning cannot overlap validation"
+    );
+    assert!(
+        String::from_utf8_lossy(&concurrent_replan.stderr).contains("active in another process")
+    );
+    fs::write(worktree.join(".validation_release"), "release").unwrap();
+    assert!(validation.wait().unwrap().success());
+
+    let replanned = p.ok(&[
+        "replan",
+        &id,
+        "--spec",
+        "one.md",
+        "--fixture",
+        "replan.json",
+    ]);
+    assert_eq!(replanned["validation_reports"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        replanned["spec_replans"][0]["invalidated_validation_reports"],
+        json!([replanned["validation_reports"][0]["id"]])
+    );
+    assert_eq!(replanned["spec_replans"][0]["input_version"], 1);
+}
+
+#[test]
+fn validation_report_is_stale_when_the_integration_branch_moves_mid_check() {
+    let (p, id, _) = project(PROBE);
+    p.deliver(&id, "a", json!({"one.txt":"v2\n"}));
+    p.deliver(&id, "b", json!({"two.txt":"v2\n"}));
+    p.deliver(&id, "c", json!({"two.extra":"kept\n"}));
+    p.write(
+        "verifier.json",
+        json!({"acceptance_checks":[
+            {"criterion":"one.md#ac-1","command":WAIT_FOR_VALIDATION_RELEASE},
+            {"criterion":"two.md#ac-2","command":VERIFIER_TEST}
+        ]}),
+    );
+    let validation = Command::new(env!("CARGO_BIN_EXE_kiln"))
+        .args(["validate", &id, "--verifier", "verifier.json"])
+        .current_dir(&p.repo)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let worktree = p
+        .repo
+        .join(".kiln/worktrees")
+        .join(format!("{id}-validation-1"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !worktree.join(".validation_started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "validation did not start its delayed check"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let branch = format!("kiln/{id}/integration");
+    let primary_tip = p.git(&["rev-parse", "HEAD"]);
+    p.git(&["update-ref", &format!("refs/heads/{branch}"), &primary_tip]);
+    fs::write(worktree.join(".validation_release"), "release").unwrap();
+    let out = validation.wait_with_output().unwrap();
+    assert!(!out.status.success(), "stale validation must not succeed");
+    let run: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let report = latest(&run);
+    assert_eq!(report["outcome"], "stale");
+    assert!(report["failure"]
+        .as_str()
+        .unwrap()
+        .contains("integration branch changed"));
 }
 
 fn criterion<'a>(report: &'a Value, id: &str) -> &'a Value {

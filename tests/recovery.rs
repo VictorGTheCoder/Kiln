@@ -301,6 +301,26 @@ fn integration_attempts<'a>(run: &'a Value, id: &str) -> Vec<&'a Value> {
 }
 
 #[test]
+fn resume_recovers_an_empty_legacy_integration_lock_marker() {
+    let repo = Repo::new(None);
+    let id = repo.planned(&[("a", "one.md", &[]), ("b", "two.md", &[])]);
+    repo.scenario(
+        json!({"tickets":{"a":works("a.txt", "works"),"b":works("b.txt", "also works")}}),
+    );
+    fs::create_dir_all(repo.path.join(".kiln")).unwrap();
+    fs::write(repo.path.join(".kiln/integration.lock"), b"").unwrap();
+
+    let out = repo.cli(&["run", &id, "--fixture", "scenario.json"]);
+    let run: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("no run state: {}", String::from_utf8_lossy(&out.stderr)));
+
+    assert_success(&out);
+    assert_eq!(run["status"], "awaiting_validation");
+    assert_eq!(integration_attempts(&run, "a").len(), 1);
+    assert_eq!(integration_attempts(&run, "b").len(), 1);
+}
+
+#[test]
 fn integration_ref_updated_before_its_record_is_adopted_not_merged_again() {
     let repo = Repo::new(None);
     let id = repo.planned(&[("a", "one.md", &[]), ("z", "two.md", &["a"])]);
@@ -532,7 +552,12 @@ fn resume_refuses_a_run_whose_scheduler_process_is_still_alive() {
     loop {
         assert!(std::time::Instant::now() < deadline, "run never started a");
         let run = repo.inspect(&id);
-        if run["scheduler"]["tickets"].is_array() && ticket(&run, "a")["state"] == "implementing" {
+        if run["scheduler"]["tickets"].is_array()
+            && ticket(&run, "a")["state"] == "implementing"
+            && sessions_for(&run, "a")
+                .last()
+                .is_some_and(|session| session["status"] == "running")
+        {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -580,11 +605,17 @@ fn limit_stopped_ticket_resumes_in_a_fresh_session_and_completes() {
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0]["status"], "interrupted");
     assert_eq!(sessions[1]["status"], "integrated");
-    assert_eq!(run["corrections"].as_array().unwrap().len(), 0, "a stop is not a failure to correct");
+    assert_eq!(
+        run["corrections"].as_array().unwrap().len(),
+        0,
+        "a stop is not a failure to correct"
+    );
     assert!(
-        decisions(&run, "a").iter().any(|d| d["action"] == "restarted"
-            && d["subject"] == cancelled
-            && d["reason"].as_str().unwrap().contains("limit")),
+        decisions(&run, "a")
+            .iter()
+            .any(|d| d["action"] == "restarted"
+                && d["subject"] == cancelled
+                && d["reason"].as_str().unwrap().contains("limit")),
         "{:?}",
         decisions(&run, "a")
     );
