@@ -1,0 +1,391 @@
+//! Bounded autonomous correction, with durable evidence for every attempted cycle.
+use crate::{
+    execution::{git, AgentResult, CheckResult, ImplementationSession},
+    planning::Ticket,
+    review::{ReviewAgent, ReviewSession},
+    Engine, FrozenSpec, Run,
+};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    cell::Cell,
+    fs,
+    path::{Path, PathBuf},
+};
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionCycle {
+    pub id: String,
+    pub ticket_id: String,
+    pub before: ImplementationSession,
+    pub findings: Vec<String>,
+    pub after: ImplementationSession,
+    pub review: Option<ReviewSession>,
+    pub outcome: String,
+    pub failure: Option<String>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct CorrectionRequest {
+    pub context_id: String,
+    pub ticket: Ticket,
+    pub specs: Vec<FrozenSpec>,
+    pub diff: String,
+    pub findings: Vec<String>,
+    pub checks: Vec<CheckResult>,
+    pub repository_instructions: String,
+    pub isolation: crate::sandbox::IsolationPolicy,
+    pub worktree: PathBuf,
+}
+pub trait CorrectionAgent {
+    fn prepare_redaction(&self) -> Result<()> {
+        Ok(())
+    }
+    fn correct(&self, request: &CorrectionRequest) -> Result<AgentResult>;
+    fn redact_output(&self, s: &str) -> String {
+        s.into()
+    }
+}
+#[derive(Deserialize)]
+pub struct FixtureCorrectionAgent {
+    corrections: Vec<crate::execution::FixtureImplementationAgent>,
+    reviews: Vec<crate::review::FixtureReviewAgent>,
+    #[serde(skip)]
+    correction_index: Cell<usize>,
+    #[serde(skip)]
+    review_index: Cell<usize>,
+}
+impl FixtureCorrectionAgent {
+    pub fn load(path: &Path) -> Result<Self> {
+        Ok(serde_json::from_slice(&fs::read(path)?)?)
+    }
+}
+impl CorrectionAgent for FixtureCorrectionAgent {
+    fn correct(&self, r: &CorrectionRequest) -> Result<AgentResult> {
+        let i = self.correction_index.get();
+        self.correction_index.set(i + 1);
+        let agent = self
+            .corrections
+            .get(i)
+            .context("correction fixture sequence exhausted")?;
+        crate::execution::ImplementationAgent::implement(
+            agent,
+            &crate::execution::ImplementationRequest {
+                context_id: r.context_id.clone(),
+                isolation: r.isolation.clone(),
+                instructions: "Correct unresolved findings".into(),
+                ticket: r.ticket.clone(),
+                specs: r.specs.clone(),
+                repository_instructions: r.repository_instructions.clone(),
+                prerequisites: vec![],
+                worktree: r.worktree.clone(),
+            },
+        )
+    }
+}
+impl ReviewAgent for FixtureCorrectionAgent {
+    fn review(&self, r: &crate::review::ReviewRequest) -> Result<crate::review::ReviewResult> {
+        let i = self.review_index.get();
+        let agent = self
+            .reviews
+            .get(i)
+            .context("review fixture sequence exhausted")?;
+        let result = agent.review(r);
+        if r.axis == "spec" {
+            self.review_index.set(i + 1);
+        }
+        result
+    }
+}
+/// Outcome of a correction attempt cut short by a provider usage limit; it is
+/// evidence only and is not charged against the ticket's correction cycles.
+pub const PROVIDER_LIMIT: &str = "provider_limit";
+
+impl Engine {
+    /// Reusable scheduler entry. Never integrates; consumers must use review_gate.
+    pub fn correct_ticket(
+        &self,
+        id: &str,
+        ticket_id: &str,
+        agent: &dyn CorrectionAgent,
+        reviewer: &dyn ReviewAgent,
+    ) -> Result<Run> {
+        self.correct_ticket_within(id, ticket_id, agent, reviewer, &|| true)
+    }
+    /// As `correct_ticket`, but starts another cycle only while `resources_remain`
+    /// (run-wide limits). A cycle not started is not counted against the ticket.
+    pub fn correct_ticket_within(
+        &self,
+        id: &str,
+        ticket_id: &str,
+        agent: &dyn CorrectionAgent,
+        reviewer: &dyn ReviewAgent,
+        resources_remain: &dyn Fn() -> bool,
+    ) -> Result<Run> {
+        agent.prepare_redaction()?;
+        reviewer.prepare_redaction()?;
+        let mut run = self.inspect(id)?;
+        let limit = crate::limits::RunLimits::from_config(&run.config)?.correction_cycles;
+        // Attempts cut short by a provider usage limit are not charged.
+        let used = run
+            .corrections
+            .iter()
+            .filter(|c| c.ticket_id == ticket_id && c.outcome != PROVIDER_LIMIT)
+            .count() as u64;
+        let mut index = run
+            .sessions
+            .iter()
+            .rposition(|s| {
+                s.ticket_id == ticket_id && ["failed", "implemented"].contains(&s.status.as_str())
+            })
+            .context("correction requires attempted implementation")?;
+        if run.sessions[index].status == "implemented"
+            && !crate::review::reviewed(&run, &run.sessions[index].id)
+        {
+            run = self.review_ticket(id, ticket_id, reviewer)?;
+        }
+        if self.review_gate(&run, &run.sessions[index])? {
+            return Ok(run);
+        }
+        if run
+            .corrections
+            .iter()
+            .rev()
+            .find(|c| c.ticket_id == ticket_id)
+            .is_some_and(|c| match c.outcome.as_str() {
+                // An explicit increase to the run's correction budget reopens
+                // an exhausted ticket when it grants another cycle.
+                "exhausted" => used >= limit,
+                // A stall is final unless a later review of this session brings new required findings.
+                "no-progress" => !c.review.as_ref().is_some_and(|stalled| {
+                    run.reviews
+                        .iter()
+                        .skip_while(|r| r.id != stalled.id)
+                        .skip(1)
+                        .filter(|r| r.session_id == run.sessions[index].id)
+                        .last()
+                        .is_some_and(|r| {
+                            [&r.standards, &r.spec]
+                                .iter()
+                                .any(|axis| axis.result.findings.iter().any(|f| f.required))
+                        })
+                }),
+                _ => false,
+            })
+        {
+            return Ok(run);
+        }
+        for number in used..limit {
+            if !resources_remain() {
+                break;
+            }
+            let before = run.sessions[index].clone();
+            let worktree = PathBuf::from(&before.worktree);
+            let mut findings = vec![];
+            if let Some(f) = &before.failure {
+                findings.push(f.clone());
+            }
+            if let Some(r) = run.reviews.iter().rev().find(|r| r.session_id == before.id) {
+                for axis in [&r.standards, &r.spec] {
+                    for f in &axis.result.findings {
+                        if f.required {
+                            findings.push(format!(
+                                "{} {}: {} ({})",
+                                axis.axis, f.code, f.message, f.evidence
+                            ));
+                        }
+                    }
+                    if let Some(f) = &axis.failure {
+                        findings.push(format!("{}: {}", axis.axis, f));
+                    }
+                    if !axis.verified() {
+                        findings.push(format!(
+                            "{} outcome: {} evidence: {}",
+                            axis.axis, axis.result.outcome, axis.result.evidence
+                        ));
+                    }
+                }
+            }
+            let plan = run.plan.as_ref().context("missing plan")?;
+            let ticket = plan
+                .tickets
+                .iter()
+                .find(|t| t.id == ticket_id)
+                .context("unknown ticket")?
+                .clone();
+            let specs = run
+                .effective_specs()
+                .into_iter()
+                .filter(|s| {
+                    plan.requirements
+                        .iter()
+                        .any(|r| r.spec_path == s.path && ticket.covers.contains(&r.id))
+                })
+                .collect();
+            // Session-scoped identity: concurrent tickets correct from independent snapshots.
+            let attempt = run
+                .corrections
+                .iter()
+                .filter(|c| c.ticket_id == ticket_id)
+                .count();
+            let cycle_id = format!("{}-correction-{}", before.id, attempt + 1);
+            let request = CorrectionRequest {
+                context_id: cycle_id.clone(),
+                ticket,
+                specs,
+                diff: git(&worktree, &["diff", "--binary", &before.base_commit])?,
+                findings: findings.clone(),
+                checks: before.checks.clone(),
+                repository_instructions: fs::read_to_string(worktree.join("AGENTS.md"))
+                    .unwrap_or_default(),
+                isolation: run.config.isolation.clone(),
+                worktree: worktree.clone(),
+            };
+            let redact = |s: &str| {
+                reviewer.redact_output(&agent.redact_output(&run.config.isolation.redact(s)))
+            };
+            let context_path = self
+                .repository
+                .join(".kiln/contexts")
+                .join(format!("{cycle_id}.json"));
+            fs::write(
+                &context_path,
+                redact(&serde_json::to_string_pretty(&request)?),
+            )?;
+            let mut after = before.clone();
+            after.context_id = cycle_id.clone();
+            after.verification_passed = false;
+            after.commit = None;
+            after.checks.clear();
+            after.failure = None;
+            after.status = "failed".into();
+            let attempt = (|| -> Result<()> {
+                let result = agent.correct(&request);
+                git(&worktree, &["add", "-A", "--", "."])?;
+                after.diff = git(
+                    &worktree,
+                    &["diff", "--cached", "--binary", &before.base_commit],
+                )?;
+                let result = result?;
+                if after.diff.is_empty() {
+                    bail!("correction produced no usable Git change");
+                }
+                after.agent_outcome = Some(result.outcome.clone());
+                after.agent_log = result.log;
+                if result.outcome != "completed" {
+                    bail!("correction outcome: {}", result.outcome);
+                }
+                for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
+                    after.checks.push(crate::sandbox::Sandbox::check(
+                        &run.config.isolation,
+                        &worktree,
+                        name,
+                        argv,
+                    ));
+                }
+                if after.checks.iter().any(|c| !c.passed) {
+                    bail!("configured verification failed");
+                }
+                if !git(&worktree, &["diff", "--name-only"])?.is_empty()
+                    || !git(&worktree, &["ls-files", "--others", "--exclude-standard"])?.is_empty()
+                    || git(
+                        &worktree,
+                        &["diff", "--cached", "--binary", &before.base_commit],
+                    )? != after.diff
+                {
+                    bail!("verification changed repository content");
+                }
+                if !git(&worktree, &["diff", "--cached", "--name-only"])?.is_empty() {
+                    git(
+                        &worktree,
+                        &[
+                            "-c",
+                            "user.name=Kiln",
+                            "-c",
+                            "user.email=kiln@localhost",
+                            "commit",
+                            "-m",
+                            &format!("Correct ticket {ticket_id}"),
+                        ],
+                    )?;
+                }
+                after.commit = Some(git(&worktree, &["rev-parse", "HEAD"])?);
+                after.verification_passed = true;
+                after.status = "implemented".into();
+                Ok(())
+            })();
+            let mut cut_short = None;
+            if let Err(e) = attempt {
+                cut_short = crate::limits::ProviderLimit::in_error(&e).cloned();
+                after.failure = Some(format!("{e:#}"));
+            }
+            fs::write(
+                &context_path,
+                redact(&serde_json::to_string_pretty(&request)?),
+            )?;
+            after.provider_limit = cut_short;
+            after = serde_json::from_str(&redact(&serde_json::to_string(&after)?))?;
+            let mut provider_limit = after.provider_limit.clone();
+            let no_progress = after.diff == before.diff;
+            // A correction cut short by a provider limit leaves the session as it was.
+            if provider_limit.is_none() {
+                run.sessions[index] = after.clone();
+                run = self.save_ticket(&run, ticket_id)?;
+            }
+            let review = if after.verification_passed && provider_limit.is_none() {
+                match self.review_ticket(id, ticket_id, reviewer) {
+                    Ok(reviewed) => run = reviewed,
+                    Err(e) => match crate::limits::ProviderLimit::in_error(&e) {
+                        Some(l) => {
+                            provider_limit = Some(l.clone());
+                            run = self.inspect(id)?;
+                        }
+                        None => return Err(e),
+                    },
+                }
+                run.reviews.last().cloned()
+            } else {
+                None
+            };
+            let approved =
+                provider_limit.is_none() && self.review_gate(&run, &run.sessions[index])?;
+            let outcome = if provider_limit.is_some() {
+                PROVIDER_LIMIT
+            } else if approved {
+                "approved"
+            } else if no_progress {
+                "no-progress"
+            } else if number + 1 == limit {
+                "exhausted"
+            } else {
+                "retry"
+            };
+            let cycle = CorrectionCycle {
+                id: cycle_id,
+                ticket_id: ticket_id.into(),
+                before,
+                findings,
+                failure: after.failure.clone(),
+                after,
+                review,
+                outcome: outcome.into(),
+            };
+            let safe = reviewer.redact_output(
+                &agent.redact_output(&run.config.isolation.redact(&serde_json::to_string(&cycle)?)),
+            );
+            run.corrections.push(serde_json::from_str(&safe)?);
+            run = self.save_ticket(&run, ticket_id)?;
+            if let Some(provider_limit) = provider_limit {
+                // Recorded first; the caller stops the run on the typed limit.
+                return Err(provider_limit.into());
+            }
+            if approved || no_progress {
+                return Ok(run);
+            }
+            index = run
+                .sessions
+                .iter()
+                .rposition(|s| s.ticket_id == ticket_id)
+                .unwrap();
+        }
+        Ok(run)
+    }
+}
