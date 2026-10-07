@@ -113,7 +113,11 @@ impl Repo {
     }
     /// Start `kiln serve` on an ephemeral loopback port.
     fn serve(&self, env: &[(&str, &str)]) -> Server {
+        self.serve_with_args(env, &[])
+    }
+    fn serve_with_args(&self, env: &[(&str, &str)], extra: &[&str]) -> Server {
         let mut command = self.command(&["serve", "--bind", "127.0.0.1:0"]);
+        command.args(extra);
         for (k, v) in env {
             command.env(k, v);
         }
@@ -174,11 +178,176 @@ impl Server {
             body.to_owned(),
         )
     }
+    fn post(&self, path: &str, origin: Option<&str>, body: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(&self.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let port = self.address.rsplit(':').next().unwrap();
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: localhost:{port}\r\n").unwrap();
+        if let Some(origin) = origin {
+            write!(stream, "Origin: {origin}\r\n").unwrap();
+        }
+        write!(stream, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        (
+            head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            body.to_owned(),
+        )
+    }
     fn page(&self, id: &str) -> String {
         let (status, body) = self.get(&format!("/runs/{id}"));
         assert_eq!(status, 200, "{body}");
         body
     }
+}
+
+#[test]
+fn local_web_starts_whole_backlog_and_rejects_cross_origin_mutations() {
+    let repo = Repo::new(json!({}));
+    let issue = json!({"issues":[{"number":1,"url":"https://github.com/example/project/issues/1","title":"<script>Backlog</script>","body":"## Acceptance criteria\n- Implement the behavior\n","labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"}]});
+    repo.write("issues.json", issue);
+    repo.write("planning.json", json!({"tickets":[{"id":"github:example/project#1","title":"Implement behavior","description":"Implement it","acceptance_criteria":["Implement the behavior"],"covers":["github-example-project-1.md#ac-1"],"blocked_by":[]}],"verification":{"outcome":"verified","findings":[]}}));
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{"github:example/project#1":works("backlog.txt")}}),
+    );
+    let server = repo.serve_with_args(
+        &[],
+        &[
+            "--backlog-config",
+            "kiln.json",
+            "--github-repo",
+            "example/project",
+            "--issue-fixture",
+            "issues.json",
+            "--planning-fixture",
+            "planning.json",
+            "--run-fixture",
+            "scenario.json",
+        ],
+    );
+    let home = server.get("/");
+    assert_eq!(home.0, 200);
+    assert!(home.1.contains("Start backlog run"));
+    assert_eq!(server.get("/actions/start").0, 404, "GET cannot start work");
+    assert_eq!(
+        server
+            .post("/actions/start", Some("http://attacker.invalid"), "")
+            .0,
+        403
+    );
+    let (status, body) = server.post(
+        "/actions/start",
+        Some(&format!(
+            "http://localhost:{}",
+            server.address.rsplit(':').next().unwrap()
+        )),
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Backlog run started"));
+    wait_until("web-started backlog run to complete", || {
+        let (status, body) = server.get("/api/runs");
+        status == 200 && body.contains("delivery-blocked")
+    });
+    let (status, body) = server.get("/api/runs");
+    assert_eq!(status, 200);
+    assert!(body.contains("<script>Backlog</script>"));
+    let id = serde_json::from_str::<Value>(&body).unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let page = server.page(&id);
+    assert!(page.contains("Backlog issues"));
+    assert!(page.contains("&lt;script&gt;Backlog&lt;/script&gt;"));
+    assert!(page.contains("github:example/project#1"));
+    assert!(page.contains("Delivery groups and CI"));
+    assert!(page.contains("Delivery groups and CI"));
+    assert!(page.contains("delivery-blocked"));
+}
+
+#[test]
+fn local_web_pause_resume_and_cancel_follow_durable_scheduler_state() {
+    let repo = Repo::new(json!({}));
+    let id = repo.planned(&[("a", "one.md", &[]), ("b", "two.md", &[])]);
+    let mut scenario = works("a.txt");
+    scenario["await_file"] = json!(".kiln/release");
+    let mut second = works("b.txt");
+    second["await_file"] = json!(".kiln/release");
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{"a":scenario,"b":second}}),
+    );
+    let mut child = repo
+        .command(&["run", &id, "--fixture", "scenario.json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("scheduler ownership", || {
+        repo.inspect(&id)["status"] == "running"
+    });
+    let server = repo.serve_with_args(
+        &[],
+        &[
+            "--backlog-config",
+            "kiln.json",
+            "--github-repo",
+            "example/project",
+            "--planning-fixture",
+            "plan.json",
+            "--run-fixture",
+            "scenario.json",
+        ],
+    );
+    let page = server.page(&id);
+    assert!(page.contains("Pause run"));
+    assert!(page.contains("Cancel run"));
+    let origin = format!(
+        "http://localhost:{}",
+        server.address.rsplit(':').next().unwrap()
+    );
+    let (status, body) = server.post(&format!("/runs/{id}/control/pause"), Some(&origin), "");
+    assert_eq!(status, 200, "{body}");
+    fs::write(repo.path.join(".kiln/release"), "settle").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(repo.inspect(&id)["status"], "paused");
+    assert!(server.page(&id).contains("Resume run"));
+    let (status, body) = server.post(&format!("/runs/{id}/control/resume"), Some(&origin), "");
+    assert_eq!(status, 200, "{body}");
+    wait_until("web resume completion", || {
+        repo.inspect(&id)["status"] == "awaiting_validation"
+    });
+
+    let cancelled_id = repo.planned(&[("a", "one.md", &[]), ("b", "two.md", &[])]);
+    let mut scenario = works("a.txt");
+    scenario["await_file"] = json!(".kiln/cancel-release");
+    let mut second = works("b.txt");
+    second["await_file"] = json!(".kiln/cancel-release");
+    repo.write(
+        "cancel-scenario.json",
+        json!({"tickets":{"a":scenario,"b":second}}),
+    );
+    let mut child = repo
+        .command(&["run", &cancelled_id, "--fixture", "cancel-scenario.json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("second scheduler ownership", || {
+        repo.inspect(&cancelled_id)["status"] == "running"
+    });
+    let (status, body) = server.post(
+        &format!("/runs/{cancelled_id}/control/cancel"),
+        Some(&origin),
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(!child.wait().unwrap().success());
+    assert_eq!(repo.inspect(&cancelled_id)["status"], "cancelled");
 }
 /// `one.md` covers its first criterion; `one.md#ac-1,two.md#ac-2` lists criteria.
 fn covers(spec: &str) -> Vec<String> {

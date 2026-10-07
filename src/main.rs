@@ -261,6 +261,28 @@ enum Commands {
     Serve {
         #[arg(long, default_value = "127.0.0.1:3000")]
         bind: std::net::SocketAddr,
+        /// Enable the local start-backlog action with this repository config.
+        #[arg(long, requires = "github_repo")]
+        backlog_config: Option<PathBuf>,
+        /// GitHub repository whose complete open issue graph the UI will run.
+        #[arg(long, requires = "backlog_config")]
+        github_repo: Option<String>,
+        #[arg(long, requires = "backlog_config")]
+        issue_fixture: Option<PathBuf>,
+        #[arg(long, requires = "backlog_config", conflicts_with_all = ["codex", "claude"])]
+        planning_fixture: Option<PathBuf>,
+        #[arg(long, requires = "backlog_config", conflicts_with_all = ["codex", "claude"])]
+        run_fixture: Option<PathBuf>,
+        #[arg(long, requires = "backlog_config", conflicts_with = "claude")]
+        codex: Option<PathBuf>,
+        #[arg(long, requires = "backlog_config", conflicts_with = "codex")]
+        claude: Option<PathBuf>,
+        #[arg(long, requires = "backlog_config", conflicts_with = "gh")]
+        publication_fixture: Option<PathBuf>,
+        #[arg(long, requires = "backlog_config")]
+        gh: Option<PathBuf>,
+        #[arg(long, requires = "backlog_config", conflicts_with_all = ["codex", "claude"])]
+        repair_fixture: Option<PathBuf>,
     },
 }
 /// Real provider selected by `--codex PATH` or `--claude PATH` (mutually exclusive).
@@ -1146,7 +1168,45 @@ fn run() -> Result<()> {
             value
         }
         Commands::Inspect { id: None } => serde_json::to_value(engine.list()?)?,
-        Commands::Serve { bind } => return kiln::web::serve(engine, bind),
+        Commands::Serve {
+            bind,
+            backlog_config,
+            github_repo,
+            issue_fixture,
+            planning_fixture,
+            run_fixture,
+            codex,
+            claude,
+            publication_fixture,
+            gh,
+            repair_fixture,
+        } => {
+            if backlog_config.is_some() {
+                if planning_fixture.is_none() && codex.is_none() && claude.is_none() {
+                    anyhow::bail!(
+                        "web backlog start requires --planning-fixture, --codex, or --claude"
+                    );
+                }
+                if run_fixture.is_none() && codex.is_none() && claude.is_none() {
+                    anyhow::bail!("web backlog start requires --run-fixture, --codex, or --claude");
+                }
+            }
+            let backlog = backlog_config
+                .zip(github_repo)
+                .map(|(config, github_repo)| kiln::web::BacklogLaunch {
+                    config,
+                    github_repo,
+                    issue_fixture,
+                    planning_fixture,
+                    run_fixture,
+                    codex,
+                    claude,
+                    publication_fixture,
+                    gh,
+                    repair_fixture,
+                });
+            return kiln::web::serve_with_backlog(engine, bind, backlog);
+        }
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())

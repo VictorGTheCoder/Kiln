@@ -85,3 +85,25 @@ kiln start-issue \
 ```
 
 `--issue-fixture` contains `{"issues":[...]}` with open issue records, discussion, labels, assignee, state, and blockers. `--planning-fixture` uses the normal deterministic planning schema, and `--run-fixture` uses the scheduler scenario schema. The project still needs a Git remote and publication configuration for the final delivery. Fixture outputs exercise workflow contracts; they do not measure model quality.
+
+## Local web controls
+
+To start whole-graph runs from the local monitor, configure the server at launch:
+
+```sh
+kiln --repo /path/to/project serve \
+  --backlog-config kiln.json \
+  --github-repo owner/name \
+  --codex /path/to/codex
+```
+
+The page offers one action for all open issues; issue selection and approval of
+generated criteria are not required. Optional issue, planning, run, publication,
+and repair fixtures can be supplied as `serve` flags for deterministic local
+scenarios. The server passes these fixed settings to the same `start-backlog` and
+`resume` CLI workflows, so scheduling, recovery, delivery validation, CI polling,
+and draft PR publication use the same durable state and gates. Run pages show the
+recorded issue dispositions and delivery evidence and expose pause, resume, and
+cancel controls. Mutating requests require a loopback Host and matching same-origin
+Origin; the HTTP request cannot provide command, provider, configuration, or fixture
+paths. The server remains loopback-only and never writes to GitHub issues.
