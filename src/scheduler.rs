@@ -68,6 +68,8 @@ enum Halt {
     ReplanningExhausted(String),
     /// A run-wide limit stopped further work; the ticket stays resumable.
     Limit(String),
+    /// Explicit cancellation is terminal; a pause lets current work settle.
+    Control(String),
 }
 impl std::fmt::Display for Halt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -75,6 +77,7 @@ impl std::fmt::Display for Halt {
             Halt::CorrectionsExhausted(reason)
             | Halt::ReplanningExhausted(reason)
             | Halt::Limit(reason) => write!(f, "{reason}"),
+            Halt::Control(reason) => write!(f, "{reason}"),
         }
     }
 }
@@ -90,6 +93,8 @@ struct Gate<'a> {
     exhausted: Mutex<Option<LimitExhaustion>>,
     command_cancellation: crate::sandbox::CommandCancellation,
     providers: &'a dyn TicketProviders,
+    pause_requested: AtomicBool,
+    cancelled: AtomicBool,
 }
 impl Gate<'_> {
     fn exhausted(&self) -> Option<LimitExhaustion> {
@@ -155,6 +160,9 @@ enum Event {
 impl Engine {
     /// Run every accepted ticket to integration or blockage. Returns the final run.
     pub fn run_tickets(&self, id: &str, providers: &dyn TicketProviders) -> Result<Run> {
+        if self.inspect(id)?.status == "cancelled" {
+            bail!("run '{id}' was cancelled and cannot be started again");
+        }
         let _owner = self.own_run(id)?;
         self.schedule(id, providers, false)
     }
@@ -227,6 +235,8 @@ impl Engine {
             exhausted: Mutex::new(None),
             command_cancellation: crate::sandbox::CommandCancellation::default(),
             providers,
+            pause_requested: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
         };
         let deadline = gate.limits.duration().map(|d| gate.started + d);
         let integration = Mutex::new(());
@@ -237,8 +247,13 @@ impl Engine {
                 // Dispatch the ready frontier in plan order up to the cap, unless a
                 // run-wide limit is exhausted: then nothing further starts.
                 let mut dispatched = false;
+                self.poll_control(id, &gate)?;
                 let exhausted = self.check_limits(id, &gate)?.is_some();
-                while !exhausted && state.active.len() < state.implementation_concurrency {
+                while !exhausted
+                    && !gate.pause_requested.load(Ordering::SeqCst)
+                    && !gate.cancelled.load(Ordering::SeqCst)
+                    && state.active.len() < state.implementation_concurrency
+                {
                     let Some(next) = state.tickets.iter_mut().find(|t| {
                         t.state == "waiting" && t.waiting_on.is_empty() && t.blocker.is_none()
                     }) else {
@@ -274,6 +289,14 @@ impl Engine {
                                 Some(limit) => Halt::Limit(gate.exhaust(limit.exhaustion())).into(),
                                 None => e,
                             });
+                        let result = if result.is_err() && gate.cancelled.load(Ordering::SeqCst) {
+                            Err(
+                                Halt::Control("run cancelled; active work was stopped".into())
+                                    .into(),
+                            )
+                        } else {
+                            result
+                        };
                         let result = match (result, gate.exhausted()) {
                             (Err(_), Some(exhaustion))
                                 if gate.limits.limit_policy == crate::limits::STOP =>
@@ -285,7 +308,12 @@ impl Engine {
                         // Settle the outcome of revised work; a run-limit stop stays open.
                         let settled = match &result {
                             Ok(()) => Some("integrated"),
-                            Err(e) if matches!(e.downcast_ref::<Halt>(), Some(Halt::Limit(_))) => {
+                            Err(e)
+                                if matches!(
+                                    e.downcast_ref::<Halt>(),
+                                    Some(Halt::Limit(_) | Halt::Control(_))
+                                ) =>
+                            {
                                 None
                             }
                             Err(_) => Some("blocked"),
@@ -299,6 +327,7 @@ impl Engine {
                                 Some(Halt::CorrectionsExhausted(_)) => Some(CORRECTION_CYCLES),
                                 Some(Halt::ReplanningExhausted(_)) => Some(REPLANNING),
                                 Some(Halt::Limit(_)) => Some(RUN_LIMIT),
+                                Some(Halt::Control(_)) => Some("run_control"),
                                 None => None,
                             };
                             (format!("{e:#}"), kind)
@@ -312,15 +341,23 @@ impl Engine {
                 if workers == 0 {
                     break;
                 }
-                let wait = deadline
-                    .filter(|_| gate.exhausted().is_none())
-                    .map(|d| d.saturating_duration_since(Instant::now()));
+                let poll_interval = Duration::from_millis(100);
+                let wait = Some(
+                    deadline
+                        .filter(|_| gate.exhausted().is_none())
+                        .map(|d| {
+                            d.saturating_duration_since(Instant::now())
+                                .min(poll_interval)
+                        })
+                        .unwrap_or(poll_interval),
+                );
                 let event = match wait {
                     None => receiver.recv().context("scheduler worker channel closed")?,
                     Some(left) => match receiver.recv_timeout(left) {
                         Ok(event) => event,
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            // Duration elapsed mid-session: re-evaluated on next loop.
+                            // Poll control requests and run budgets while workers are active.
+                            self.poll_control(id, &gate)?;
                             self.check_limits(id, &gate)?;
                             continue;
                         }
@@ -344,7 +381,7 @@ impl Engine {
                         match result {
                             Ok(()) => t.state = "integrated".into(),
                             // Stopped by a run-wide limit: resumable, not blocked.
-                            Err((_, Some(RUN_LIMIT))) => t.state = "stopped".into(),
+                            Err((_, Some(RUN_LIMIT | "run_control"))) => t.state = "stopped".into(),
                             Err((reason, exhaustion)) => {
                                 t.state = "blocked".into();
                                 t.blocker = Some(reason);
@@ -359,16 +396,27 @@ impl Engine {
             Ok(())
         })?;
         let exhausted = gate.exhausted();
+        let paused = gate.pause_requested.load(Ordering::SeqCst);
+        let cancelled = gate.cancelled.load(Ordering::SeqCst);
         for t in &mut state.tickets {
             // After run-wide exhaustion, unstarted tickets stay resumable.
-            if t.state == "waiting" && t.blocker.is_none() && exhausted.is_none() {
+            if t.state == "waiting"
+                && t.blocker.is_none()
+                && exhausted.is_none()
+                && !paused
+                && !cancelled
+            {
                 t.blocker = Some(format!(
                     "prerequisites {:?} were never integrated",
                     t.waiting_on
                 ));
             }
         }
-        state.status = if exhausted.is_some() {
+        state.status = if cancelled {
+            "cancelled"
+        } else if paused {
+            "paused"
+        } else if exhausted.is_some() {
             // Never success: completed work and resumable state are preserved.
             "limit_exhausted"
         } else if state.tickets.iter().all(|t| t.state == "integrated") {
@@ -385,6 +433,7 @@ impl Engine {
             }
             run.status = state.status.clone();
             run.scheduler = Some(state.clone());
+            self.clear_control(id)?;
             Ok(run.clone())
         })
     }
@@ -411,6 +460,19 @@ impl Engine {
             .limits
             .evaluate(&usage, gate.started.elapsed())
             .map(|e| gate.exhaust(e)))
+    }
+    fn poll_control(&self, id: &str, gate: &Gate) -> Result<()> {
+        match self.requested_control(id)?.as_deref() {
+            Some("pause") => gate.pause_requested.store(true, Ordering::SeqCst),
+            Some("cancel") => {
+                if !gate.cancelled.swap(true, Ordering::SeqCst) {
+                    gate.command_cancellation.cancel();
+                    gate.providers.stop_active();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
     /// Pipeline checkpoint: fail with a resumable stop once limits are exhausted.
     fn checkpoint(&self, id: &str, gate: &Gate) -> Result<()> {
