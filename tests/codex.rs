@@ -332,6 +332,32 @@ fn stop_before_invocation_does_not_start_provider() {
 }
 
 #[test]
+fn usage_limit_failure_is_reported_as_a_provider_limit() {
+    for event in [
+        r#"{"type":"error","message":"You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again at 10:05 AM."}"#,
+        r#"{"type":"turn.failed","error":{"message":"You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again at 10:05 AM."}}"#,
+    ] {
+        let (dir, adapter, policy) = fake(&format!("cat <<'EVENT'\n{event}\nEVENT"), 3);
+        let error = adapter.invoke(dir.path(), &policy, "test").unwrap_err();
+        let limit = kiln::limits::ProviderLimit::in_error(&error)
+            .unwrap_or_else(|| panic!("not classified as a provider limit: {error:#}"));
+        assert_eq!(limit.provider, "codex");
+        assert_eq!(limit.reset_at.as_deref(), Some("10:05 AM"));
+        assert!(limit.message.starts_with("You've hit your usage limit"));
+    }
+    // Other provider errors are not limits, even when the transcript mentions one.
+    let (dir, adapter, policy) = fake(
+        "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"added rate limit middleware\"}}'\necho '{\"type\":\"error\",\"message\":\"authentication unavailable\"}'",
+        3,
+    );
+    let error = adapter.invoke(dir.path(), &policy, "test").unwrap_err();
+    assert!(
+        kiln::limits::ProviderLimit::in_error(&error).is_none(),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn cli_rejects_successful_provider_without_a_git_change() {
     use serde_json::{json, Value};
     use std::process::Command;

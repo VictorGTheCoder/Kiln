@@ -95,6 +95,10 @@ impl ReviewAgent for FixtureCorrectionAgent {
         result
     }
 }
+/// Outcome of a correction attempt cut short by a provider usage limit; it is
+/// evidence only and is not charged against the ticket's correction cycles.
+pub const PROVIDER_LIMIT: &str = "provider_limit";
+
 impl Engine {
     /// Reusable scheduler entry. Never integrates; consumers must use review_gate.
     pub fn correct_ticket(
@@ -120,10 +124,11 @@ impl Engine {
         reviewer.prepare_redaction()?;
         let mut run = self.inspect(id)?;
         let limit = crate::limits::RunLimits::from_config(&run.config)?.correction_cycles;
+        // Attempts cut short by a provider usage limit are not charged.
         let used = run
             .corrections
             .iter()
-            .filter(|c| c.ticket_id == ticket_id)
+            .filter(|c| c.ticket_id == ticket_id && c.outcome != PROVIDER_LIMIT)
             .count() as u64;
         let mut index = run
             .sessions
@@ -133,10 +138,7 @@ impl Engine {
             })
             .context("correction requires attempted implementation")?;
         if run.sessions[index].status == "implemented"
-            && !run
-                .reviews
-                .iter()
-                .any(|r| r.session_id == run.sessions[index].id)
+            && !crate::review::reviewed(&run, &run.sessions[index].id)
         {
             run = self.review_ticket(id, ticket_id, reviewer)?;
         }
@@ -217,7 +219,12 @@ impl Engine {
                 })
                 .collect();
             // Session-scoped identity: concurrent tickets correct from independent snapshots.
-            let cycle_id = format!("{}-correction-{}", before.id, number + 1);
+            let attempt = run
+                .corrections
+                .iter()
+                .filter(|c| c.ticket_id == ticket_id)
+                .count();
+            let cycle_id = format!("{}-correction-{}", before.id, attempt + 1);
             let request = CorrectionRequest {
                 context_id: cycle_id.clone(),
                 ticket,
@@ -303,25 +310,44 @@ impl Engine {
                 after.status = "implemented".into();
                 Ok(())
             })();
+            let mut cut_short = None;
             if let Err(e) = attempt {
+                cut_short = crate::limits::ProviderLimit::in_error(&e).cloned();
                 after.failure = Some(format!("{e:#}"));
             }
             fs::write(
                 &context_path,
                 redact(&serde_json::to_string_pretty(&request)?),
             )?;
+            after.provider_limit = cut_short;
             after = serde_json::from_str(&redact(&serde_json::to_string(&after)?))?;
+            let mut provider_limit = after.provider_limit.clone();
             let no_progress = after.diff == before.diff;
-            run.sessions[index] = after.clone();
-            run = self.save_ticket(&run, ticket_id)?;
-            let review = if after.verification_passed {
-                run = self.review_ticket(id, ticket_id, reviewer)?;
+            // A correction cut short by a provider limit leaves the session as it was.
+            if provider_limit.is_none() {
+                run.sessions[index] = after.clone();
+                run = self.save_ticket(&run, ticket_id)?;
+            }
+            let review = if after.verification_passed && provider_limit.is_none() {
+                match self.review_ticket(id, ticket_id, reviewer) {
+                    Ok(reviewed) => run = reviewed,
+                    Err(e) => match crate::limits::ProviderLimit::in_error(&e) {
+                        Some(l) => {
+                            provider_limit = Some(l.clone());
+                            run = self.inspect(id)?;
+                        }
+                        None => return Err(e),
+                    },
+                }
                 run.reviews.last().cloned()
             } else {
                 None
             };
-            let approved = self.review_gate(&run, &run.sessions[index])?;
-            let outcome = if approved {
+            let approved =
+                provider_limit.is_none() && self.review_gate(&run, &run.sessions[index])?;
+            let outcome = if provider_limit.is_some() {
+                PROVIDER_LIMIT
+            } else if approved {
                 "approved"
             } else if no_progress {
                 "no-progress"
@@ -345,6 +371,10 @@ impl Engine {
             );
             run.corrections.push(serde_json::from_str(&safe)?);
             run = self.save_ticket(&run, ticket_id)?;
+            if let Some(provider_limit) = provider_limit {
+                // Recorded first; the caller stops the run on the typed limit.
+                return Err(provider_limit.into());
+            }
             if approved || no_progress {
                 return Ok(run);
             }

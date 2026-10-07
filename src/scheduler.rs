@@ -258,6 +258,12 @@ impl Engine {
                             gate.command_cancellation.clone(),
                             || self.ticket_pipeline(id, &ticket, gate, integration, &sender),
                         );
+                        // An exhausted provider account limit is run-wide, never a ticket failure.
+                        let result =
+                            result.map_err(|e| match crate::limits::ProviderLimit::in_error(&e) {
+                                Some(limit) => Halt::Limit(gate.exhaust(limit.exhaustion())).into(),
+                                None => e,
+                            });
                         let result = match (result, gate.exhausted()) {
                             (Err(_), Some(exhaustion))
                                 if gate.limits.limit_policy == crate::limits::STOP =>
@@ -474,9 +480,7 @@ impl Engine {
             };
             self.checkpoint(id, gate)?;
             let mut session = latest_session(&run, ticket)?;
-            if session.status == "implemented"
-                && !run.reviews.iter().any(|r| r.session_id == session.id)
-            {
+            if session.status == "implemented" && !crate::review::reviewed(&run, &session.id) {
                 self.checkpoint(id, gate)?;
                 let reviewer = providers.reviewer(ticket)?;
                 run = self.review_ticket(id, ticket, reviewer.as_ref())?;
@@ -691,6 +695,9 @@ struct ScenarioTicket {
 #[derive(Deserialize)]
 struct ScenarioReplanning {
     ticket: crate::planning::Ticket,
+    /// Provider failure text, classified through the shared provider-limit seam.
+    #[serde(default)]
+    provider_failure: Option<String>,
     verification: crate::planning::Verification,
     implementation: serde_json::Value,
     review: serde_json::Value,
@@ -814,6 +821,9 @@ struct ScenarioReplanner<'a> {
 }
 impl crate::replanning::ReplanningAgent for ScenarioReplanner<'_> {
     fn replan(&self, _: &crate::replanning::ReplanRequest) -> Result<crate::planning::Ticket> {
+        if let Some(failure) = &self.spec.provider_failure {
+            return Err(crate::limits::provider_failure("fixture", failure));
+        }
         self.scenario
             .replanned
             .lock()

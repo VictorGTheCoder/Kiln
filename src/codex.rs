@@ -212,6 +212,7 @@ impl CodexAdapter {
             cost: None,
         };
         let mut failure = None;
+        let mut limit: Option<crate::limits::ProviderLimit> = None;
         let start = Instant::now();
         let mut status = None;
         let mut completed = false;
@@ -233,6 +234,7 @@ impl CodexAdapter {
                                     result.usage = event.get("usage").cloned();
                                 }
                                 "error" | "turn.failed" => {
+                                    limit = limit.or_else(|| usage_limit(&event));
                                     failure = Some(format!("Codex provider failure: {event}"))
                                 }
                                 "item.completed" if event["item"]["type"] == "error" => {
@@ -308,6 +310,7 @@ impl CodexAdapter {
                                 result.message = event["item"]["text"].as_str().unwrap_or("").into()
                             }
                             "error" | "turn.failed" => {
+                                limit = limit.or_else(|| usage_limit(&event));
                                 failure = Some(format!("Codex provider failure: {event}"))
                             }
                             _ => (),
@@ -328,7 +331,12 @@ impl CodexAdapter {
         let stderr = self.redact_output(&redact(&errors.join().unwrap_or_default()));
         result.log.push_str(&stderr);
         if let Some(error) = failure {
-            bail!("{}; {}", self.redact_output(&error), result.log);
+            let detail = format!("{}; {}", self.redact_output(&error), result.log);
+            if let Some(mut limit) = limit {
+                limit.message = self.redact_output(&limit.message);
+                return Err(anyhow::Error::new(limit).context(detail));
+            }
+            bail!("{detail}");
         }
         if !status.unwrap().success() {
             bail!("Codex exited unsuccessfully: {}", result.log);
@@ -338,6 +346,18 @@ impl CodexAdapter {
         }
         Ok(result)
     }
+}
+/// Feed only the provider's own error message to the shared limit classifier.
+fn usage_limit(event: &Value) -> Option<crate::limits::ProviderLimit> {
+    let message = [
+        &event["message"],
+        &event["error"]["message"],
+        &event["error"],
+    ]
+    .into_iter()
+    .find_map(Value::as_str)
+    .map_or_else(|| event.to_string(), str::to_owned);
+    crate::limits::ProviderLimit::detect("codex", &message)
 }
 fn collect_strings(value: &Value, result: &mut Vec<String>) {
     match value {

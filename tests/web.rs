@@ -417,6 +417,32 @@ fn run_wide_limit_stop_reason_is_shown() {
 }
 
 #[test]
+fn provider_usage_limit_is_shown_distinctly_from_ticket_failures() {
+    let repo = Repo::new(json!({}));
+    let id = repo.planned(&[("a", "one.md", &[]), ("b", "two.md", &["a"])]);
+    let mut a = works("a.txt");
+    a["implementation"]["provider_failure"] =
+        json!("You've hit your usage limit. Upgrade to Pro or try again at 10:05 AM.");
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{"a":a,"b":works("b.txt")}}),
+    );
+    assert!(!repo
+        .cli(&["run", &id, "--fixture", "scenario.json"])
+        .status
+        .success());
+    let page = repo.serve(&[]).page(&id);
+    let section = &page[page.find("Limits and usage").unwrap()..];
+    assert!(section.contains("data-provider-limit"), "{section}");
+    assert!(section.contains("Stop reason: provider_usage limit exhausted"));
+    assert!(section.contains("Provider fixture"));
+    assert!(section.contains("resets: 10:05 AM"));
+    let row = ticket_row(&page, "a");
+    assert!(row.contains("stopped"), "{row}");
+    assert!(!row.contains("Blocker"), "{row}");
+}
+
+#[test]
 fn global_validation_outcomes_and_evidence_per_criterion_are_distinguishable() {
     const FLOW: [&str; 3] = [
         "sh",
@@ -653,7 +679,7 @@ fn approved_spec_replans_and_work_input_versions_are_visible() {
     assert!(page.contains("Ticket input version"));
     assert!(page.contains("Input version 0"));
     assert!(page.contains("Spec replan history"));
-    assert!(page.contains(&replan["spec_replans"][0]["id"].as_str().unwrap()));
+    assert!(page.contains(replan["spec_replans"][0]["id"].as_str().unwrap()));
     assert!(page.contains("Recorded by spec replan"));
     assert!(page.contains("Previous input version 0 → 1"));
     assert!(page.contains("<th>Affected tickets</th>"));

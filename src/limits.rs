@@ -82,35 +82,35 @@ impl RunLimits {
     pub fn evaluate(&self, usage: &UsageAccount, elapsed: Duration) -> Option<LimitExhaustion> {
         if let Some(limit) = self.duration_limit_seconds {
             if elapsed >= Duration::from_secs(limit) {
-                return Some(LimitExhaustion {
-                    limit: "duration".into(),
-                    reason: format!(
+                return Some(LimitExhaustion::new(
+                    "duration",
+                    format!(
                         "duration_limit_seconds {limit} reached after {:.1}s",
                         elapsed.as_secs_f64()
                     ),
-                });
+                ));
             }
         }
         if let Some(limit) = self.usage_token_limit {
             if usage.tokens >= limit {
-                return Some(LimitExhaustion {
-                    limit: "usage_tokens".into(),
-                    reason: format!(
+                return Some(LimitExhaustion::new(
+                    "usage_tokens",
+                    format!(
                         "usage_token_limit {limit} reached: {} provider tokens observed",
                         usage.tokens
                     ),
-                });
+                ));
             }
         }
         if let (Some(limit), Some(cost)) = (self.cost_limit_usd, usage.measured_cost_usd) {
             if cost >= limit {
-                return Some(LimitExhaustion {
-                    limit: "cost".into(),
-                    reason: format!(
+                return Some(LimitExhaustion::new(
+                    "cost",
+                    format!(
                         "cost_limit_usd {limit} reached: {cost} USD measured ({} cost data)",
                         usage.cost_data
                     ),
-                });
+                ));
             }
         }
         None
@@ -170,8 +170,9 @@ pub fn account(run: &Run) -> UsageAccount {
         match observation.get("usage").filter(|u| u.is_object()) {
             Some(u) => {
                 let n = |k: &str| u.get(k).and_then(Value::as_u64);
-                usage.tokens += n("total_tokens")
-                    .unwrap_or_else(|| n("input_tokens").unwrap_or(0) + n("output_tokens").unwrap_or(0));
+                usage.tokens += n("total_tokens").unwrap_or_else(|| {
+                    n("input_tokens").unwrap_or(0) + n("output_tokens").unwrap_or(0)
+                });
             }
             None => usage.contexts_without_usage += 1,
         }
@@ -226,7 +227,142 @@ impl LimitState {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimitExhaustion {
-    /// duration | usage_tokens | cost
+    /// duration | usage_tokens | cost | provider_usage
     pub limit: String,
     pub reason: String,
+    /// Provider whose account usage or rate limit was reached (`provider_usage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Reset time reported by the provider, verbatim, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+}
+impl LimitExhaustion {
+    pub fn new(limit: &str, reason: String) -> Self {
+        Self {
+            limit: limit.into(),
+            reason,
+            provider: None,
+            reset_at: None,
+        }
+    }
+}
+
+/// Run-wide limit name of an exhausted provider account usage or rate limit.
+pub const PROVIDER_USAGE: &str = "provider_usage";
+
+/// A provider session failed because the provider account's usage or rate limit
+/// was reached. This is a run-wide resource exhaustion, never a ticket failure:
+/// the run stops resumably and `kiln resume` retries the interrupted step.
+///
+/// Provider-agnostic seam: adapters (Codex, Claude Code, fixtures) feed the
+/// provider's failure text to [`provider_failure`] and return the resulting error
+/// from their agent methods; the engine recognises it through the error chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderLimit {
+    pub provider: String,
+    /// Provider failure message (bounded excerpt).
+    pub message: String,
+    /// Reset time reported by the provider, verbatim, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+}
+impl std::fmt::Display for ProviderLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} usage limit reached: {}", self.provider, self.message)?;
+        if let Some(reset) = &self.reset_at {
+            write!(f, " (resets: {reset})")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for ProviderLimit {}
+impl ProviderLimit {
+    /// Classify provider failure text. Feed only the provider's own failure
+    /// message, not agent transcripts: work about rate limiting must not match.
+    pub fn detect(provider: &str, text: &str) -> Option<Self> {
+        const SIGNS: [&str; 11] = [
+            "usage limit",
+            "rate limit",
+            "rate-limit",
+            "rate_limit",
+            "ratelimit",
+            "too many requests",
+            "quota exceeded",
+            "insufficient_quota",
+            "hit your limit",
+            "5-hour limit",
+            "weekly limit",
+        ];
+        let lower = text.to_lowercase();
+        if !SIGNS.iter().any(|s| lower.contains(s)) {
+            return None;
+        }
+        let message: String = text.trim().chars().take(500).collect();
+        Some(Self {
+            provider: provider.into(),
+            message,
+            reset_at: reset_time(text),
+        })
+    }
+    /// The provider limit carried by an error chain, if any.
+    pub fn in_error(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|e| e.downcast_ref::<Self>())
+    }
+    pub fn exhaustion(&self) -> LimitExhaustion {
+        LimitExhaustion {
+            limit: PROVIDER_USAGE.into(),
+            reason: self.to_string(),
+            provider: Some(self.provider.clone()),
+            reset_at: self.reset_at.clone(),
+        }
+    }
+}
+
+/// Error for a failed provider session: a typed [`ProviderLimit`] when the text
+/// reports an exhausted usage or rate limit, otherwise a plain failure.
+pub fn provider_failure(provider: &str, message: &str) -> anyhow::Error {
+    match ProviderLimit::detect(provider, message) {
+        Some(limit) => limit.into(),
+        None => anyhow::anyhow!("{message}"),
+    }
+}
+
+/// Reset time as reported ("try again at 10:05 AM", "resets 3pm", "|1717000000").
+fn reset_time(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    for marker in [
+        "try again at ",
+        "try again in ",
+        "try again after ",
+        "resets at ",
+        "reset at ",
+        "resets in ",
+        "resets ",
+        "retry after ",
+    ] {
+        if let Some(start) = lower.find(marker).map(|i| i + marker.len()) {
+            let rest = &text[start..];
+            let mut end = rest.len();
+            for (i, c) in rest.char_indices() {
+                let sentence_end = c == '.'
+                    && rest[i + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(|n| n.is_whitespace() || n == '"');
+                if sentence_end || matches!(c, '"' | '\n' | ';' | '}' | '\\' | '|') {
+                    end = i;
+                    break;
+                }
+            }
+            let reset = rest[..end].trim();
+            if !reset.is_empty() {
+                return Some(reset.chars().take(80).collect());
+            }
+        }
+    }
+    // Claude Code style: "usage limit reached|<unix seconds>".
+    let (_, after) = text.split_once("limit reached|")?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then(|| format!("unix {digits}"))
 }

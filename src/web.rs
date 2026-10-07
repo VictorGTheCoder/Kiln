@@ -588,6 +588,15 @@ fn limits(run: &Run) -> String {
                 esc(&exhausted.limit),
                 esc(&exhausted.reason)
             );
+            if let Some(provider) = &exhausted.provider {
+                let _ = write!(
+                    html,
+                    "<p class=\"notice\" data-provider-limit>Provider {} account usage limit reached; resets: {}. This is not a ticket failure: completed work is preserved and <code>kiln resume {}</code> retries the interrupted step.</p>",
+                    esc(provider),
+                    esc(exhausted.reset_at.as_deref().unwrap_or("not reported")),
+                    esc(&run.id)
+                );
+            }
         }
         None => html.push_str("<p>No run-wide limit was exhausted.</p>"),
     }
@@ -770,6 +779,9 @@ fn tickets(run: &Run) -> String {
             if let Some(exhaustion) = &s.exhaustion {
                 reasons.push(format!("Exhausted: {}", esc(exhaustion)));
             }
+            if s.state == "stopped" {
+                reasons.push("Stopped by an exhausted run-wide limit; resumable".to_owned());
+            }
         }
         let state = schedule.map_or("not scheduled", |s| s.state.as_str());
         let _ = write!(
@@ -796,7 +808,9 @@ fn badge(value: &str) -> String {
         "verified" | "integrated" | "approved" | "passed" | "published" | "synchronized" => "good",
         "failed" | "blocked" | "rejected" | "conflicted" | "exhausted" | "no-progress"
         | "limit_exhausted" | "conflict" => "bad",
-        "unable-to-verify" | "interrupted" | "unavailable" => "unknown",
+        "unable-to-verify" | "interrupted" | "unavailable" | "stopped" | "provider_limit" => {
+            "unknown"
+        }
         _ => "",
     };
     format!(
