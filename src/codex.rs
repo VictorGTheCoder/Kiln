@@ -80,6 +80,9 @@ impl Provider for CodexConfig {
     fn credentials(&self) -> &Path {
         &self.auth
     }
+    fn secret_fields() -> &'static [&'static str] {
+        &["access_token", "refresh_token", "id_token"]
+    }
     fn timeout_seconds(&self) -> u64 {
         self.timeout_seconds
     }

@@ -68,9 +68,15 @@ fn scenario(failure: Option<&str>) {
     }
     if failure == Some("secret-outcome") {
         use std::io::{BufRead, BufReader, Read, Write};
+        let state_file = repo.join(format!(".kiln/runs/{id}.json"));
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_file).unwrap()).unwrap();
+        state["sessions"][0]["failure"] = json!(secret);
+        fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+        fs::write(repo.join("kiln.json"), serde_json::to_vec(&json!({"build":["git","status","--porcelain"],"test":["git","diff","--check"],"startup":["git","--version"],"acceptance_criteria":["works"],"isolation":{"network":"none","runtime":"system","secrets":{"KILN_TEST_SECRET":["agent"]},"commands":[["git","status","--porcelain"],["git","rev-parse","--verify","absent-ref"],["git","diff","--check"],["git","--version"]]}})).unwrap()).unwrap();
         let mut server = Command::new(env!("CARGO_BIN_EXE_kiln"))
             .args(["serve", "--bind", "127.0.0.1:0"])
             .current_dir(repo)
+            .env("KILN_TEST_SECRET", secret)
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -94,7 +100,14 @@ fn scenario(failure: Option<&str>) {
         .unwrap();
         write!(
             stream,
-            "GET /api/runs/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            "GET /api/runs/{id} HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            address
+                .trim()
+                .strip_prefix("Kiln web view: http://")
+                .unwrap()
+                .rsplit(':')
+                .next()
+                .unwrap()
         )
         .unwrap();
         let mut response = String::new();

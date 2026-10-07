@@ -48,12 +48,13 @@ impl ProjectConfig {
             let candidate = if Path::new(program).components().count() > 1 {
                 vec![repository.join(program)]
             } else {
-                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                    .map(|p| repository.join(p).join(program))
+                [Path::new("/usr/bin"), Path::new("/bin")]
+                    .iter()
+                    .map(|p| p.join(program))
                     .collect()
             };
             if !candidate.iter().any(|p| executable(p)) {
-                bail!("{name} executable '{program}' is unavailable; install it or correct the configured command");
+                bail!("{name} executable '{program}' is unavailable in the sandbox (PATH is /usr/bin:/bin); install it in a mounted system path or configure a repository-relative executable");
             }
         }
         for argv in [&config.build, &config.test, &config.startup] {

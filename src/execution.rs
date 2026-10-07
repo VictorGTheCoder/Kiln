@@ -235,7 +235,7 @@ impl Engine {
             fs::create_dir_all(worktree.parent().unwrap())?;
             {
                 // Shared Git administrative state: serialize worktree creation.
-                let _git = self.lock_run(id, "git")?;
+                let _git = self.lock_git_admin()?;
                 git(
                     &self.repository,
                     &[
@@ -366,7 +366,12 @@ impl Engine {
         .and_then(|run| match session.provider_limit {
             // Recorded first; the caller stops the run on the typed limit.
             Some(limit) => Err(limit.into()),
-            None => Ok(run),
+            None => {
+                if session.status == "integrated" {
+                    self.remove_worktree(&worktree)?;
+                }
+                Ok(run)
+            }
         })
     }
 }

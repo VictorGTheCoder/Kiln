@@ -58,6 +58,7 @@ impl Engine {
         provider: Option<(&dyn CorrectionAgent, &dyn ReviewAgent)>,
     ) -> Result<Run> {
         let _lock = self.lock_integration(id)?;
+        self.prune_worktrees()?;
         if let Some((a, r)) = provider {
             a.prepare_redaction()?;
             r.prepare_redaction()?;
@@ -100,16 +101,19 @@ impl Engine {
         run.integrations.push(attempt.clone());
         run = self.save_ticket(&run, ticket_id)?;
         let result = (|| -> Result<()> {
-            git(
-                &self.repository,
-                &[
-                    "worktree",
-                    "add",
-                    "--detach",
-                    path.to_str().context("worktree UTF-8")?,
-                    &base,
-                ],
-            )?;
+            {
+                let _git_admin = self.lock_git_admin()?;
+                git(
+                    &self.repository,
+                    &[
+                        "worktree",
+                        "add",
+                        "--detach",
+                        path.to_str().context("worktree UTF-8")?,
+                        &base,
+                    ],
+                )?;
+            }
             let merged = Command::new("git")
                 .args([
                     "-c",
@@ -228,6 +232,11 @@ impl Engine {
                 failure = r.redact_output(&a.redact_output(&failure));
             }
             attempt.failure = Some(failure);
+        }
+        if path.exists() {
+            if attempt.status == "integrated" {
+                self.remove_worktree(&path)?;
+            }
         }
         record(&mut run, &attempt);
         run = self.save_ticket(&run, ticket_id)?;

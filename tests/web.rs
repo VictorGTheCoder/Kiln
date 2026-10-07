@@ -149,7 +149,8 @@ impl Server {
             .unwrap();
         write!(
             stream,
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            self.address.rsplit(':').next().unwrap()
         )
         .unwrap();
         let mut response = String::new();
@@ -157,6 +158,21 @@ impl Server {
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
         (status, body.to_owned())
+    }
+    fn get_host(&self, path: &str, host: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(&self.address).unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        (
+            head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            body.to_owned(),
+        )
     }
     fn page(&self, id: &str) -> String {
         let (status, body) = self.get(&format!("/runs/{id}"));
@@ -557,9 +573,47 @@ fn configured_secret_values_never_reach_the_interface() {
         assert_eq!(status, 200, "{path}: {body}");
         assert!(!body.contains(SECRET), "{path} exposes the secret");
     }
+    let (status, body) = server.get_host(&format!("/api/runs/{id}"), "evil.example:80");
+    assert_eq!(status, 400);
+    assert_eq!(body, "Invalid Host header");
     let page = server.page(&id);
     assert!(page.contains("leaked-[REDACTED].md"));
     assert!(page.contains("<html lang=\"en\">"));
+}
+
+#[test]
+fn escaped_html_secret_is_redacted_from_run_page_and_json() {
+    const SECRET: &str = "token&<value>\"'";
+    let repo = Repo::new(
+        json!({"isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]],"secrets":{"KILN_WEB_TOKEN":["build"]}}}),
+    );
+    let out = repo
+        .command(&["prepare", "--config", "kiln.json", "--spec", "one.md"])
+        .env("KILN_WEB_TOKEN", SECRET)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let id = serde_json::from_slice::<Value>(&out.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let file = repo.path.join(format!(".kiln/runs/{id}.json"));
+    let mut state: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    state["specs"][0]["path"] = json!(format!("leaked-{SECRET}.md"));
+    fs::write(&file, state.to_string()).unwrap();
+    let server = repo.serve(&[("KILN_WEB_TOKEN", SECRET)]);
+    let page = server.page(&id);
+    assert!(!page.contains(SECRET));
+    assert!(!page.contains("token&amp;&lt;value&gt;&quot;&#39;"));
+    assert!(page.contains("leaked-[REDACTED].md"));
+    let (status, json) = server.get(&format!("/api/runs/{id}"));
+    assert_eq!(status, 200);
+    assert!(!json.contains(SECRET));
+    assert!(json.contains("[REDACTED]"));
 }
 
 #[test]

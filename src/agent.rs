@@ -64,6 +64,16 @@ pub trait Provider: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     fn private_credentials(&self, credentials: &Value) -> Value {
         credentials.clone()
     }
+    fn secret_fields() -> &'static [&'static str] {
+        &[
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "accessToken",
+            "refreshToken",
+            "idToken",
+        ]
+    }
     /// Further scoped read-only runtime files next to the executable.
     fn extra_mounts(&self, _executable: &Path) -> Vec<Mount> {
         Vec::new()
@@ -124,7 +134,7 @@ impl<P: Provider> Adapter<P> {
     /// Eagerly load scoped authentication redactors before durable input recording.
     pub fn prepare_redaction(&self) -> Result<()> {
         let (_, value) = self.read_credentials()?;
-        collect_strings(&value, &mut self.credentials.lock().unwrap());
+        collect_secrets::<P>(&value, &mut self.credentials.lock().unwrap());
         Ok(())
     }
     /// Clonable cancellation handle; stopping kills the sandbox and descendants.
@@ -184,7 +194,7 @@ impl<P: Provider> Adapter<P> {
             .with_context(|| format!("configured {name} installation is unavailable"))?;
         let (_, credentials_json) = self.read_credentials()?;
         let mut credentials = Vec::new();
-        collect_strings(&credentials_json, &mut credentials);
+        collect_secrets::<P>(&credentials_json, &mut credentials);
         self.credentials.lock().unwrap().extend(credentials.clone());
         let redact = |input: &str| redact_with(&policy.redact(input), credentials.iter());
         let private = tempfile::tempdir()?;
@@ -215,6 +225,16 @@ impl<P: Provider> Adapter<P> {
         let mut command =
             Sandbox::supervised_command(policy, worktree, "agent", &self.config.argv(), &mounts)?;
         use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::ioctl(libc::STDIN_FILENO, libc::TIOCNOTTY) == -1
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOTTY)
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         command
             .process_group(0)
             .stdin(Stdio::piped())
@@ -317,7 +337,7 @@ impl<P: Provider> Adapter<P> {
         // Refreshed credentials in the private copy are redacted too.
         if let Ok(copy) = std::fs::read(&copy) {
             if let Ok(copy) = serde_json::from_slice::<Value>(&copy) {
-                collect_strings(&copy, &mut self.credentials.lock().unwrap());
+                collect_secrets::<P>(&copy, &mut self.credentials.lock().unwrap());
             }
         }
         result.message = self.redact_output(&result.message);
@@ -384,17 +404,21 @@ fn unfence(message: &str) -> &str {
     }
 }
 
-fn collect_strings(value: &Value, result: &mut Vec<String>) {
+fn collect_secrets<P: Provider>(value: &Value, result: &mut Vec<String>) {
     match value {
-        Value::String(s) => result.push(s.clone()),
         Value::Object(o) => {
-            for v in o.values() {
-                collect_strings(v, result)
+            for (key, v) in o {
+                if P::secret_fields().contains(&key.as_str()) {
+                    if let Some(secret) = v.as_str().filter(|s| !s.is_empty()) {
+                        result.push(secret.to_owned());
+                    }
+                }
+                collect_secrets::<P>(v, result)
             }
         }
         Value::Array(a) => {
             for v in a {
-                collect_strings(v, result)
+                collect_secrets::<P>(v, result)
             }
         }
         _ => {}

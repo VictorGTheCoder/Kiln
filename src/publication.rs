@@ -521,8 +521,18 @@ impl Engine {
             merge_authorized: settings.merge,
             deploy_authorized: settings.deploy,
         };
-        run.publication = Some(publication.clone());
-        self.save(&run)?;
+        let _ = self.transact(id, |latest| {
+            let current_tip = git(&self.repository, &["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])?;
+            if latest.input_version() != report.input_version
+                || latest.validation_reports.last().map(|r| r.id.as_str()) != Some(report.id.as_str())
+                || latest.integration_branch.as_deref() != Some(branch.as_str())
+                || latest.validation_reports.last().is_none_or(|r| r.outcome != VERIFIED || r.integration_branch.as_deref() != Some(branch.as_str()) || r.integrated_commit.as_deref() != Some(current_tip.as_str()))
+            {
+                bail!("verified delivery changed before publication started; validate the current revision before publishing");
+            }
+            latest.publication = Some(publication.clone());
+            Ok(latest.clone())
+        })?;
 
         let remote_ref = format!("refs/heads/{branch}");
         let remote_tip = git(
@@ -543,8 +553,15 @@ impl Engine {
             .context("push integration branch")?;
         }
         publication.status = "pushed".into();
-        run.publication = Some(publication.clone());
-        self.save(&run)?;
+        run = self.transact(id, |latest| {
+            if latest.input_version() != report.input_version
+                || latest.validation_reports.last().map(|r| r.id.as_str()) != Some(report.id.as_str())
+            {
+                bail!("latest validation changed during publication; refusing to record a stale publication");
+            }
+            latest.publication = Some(publication.clone());
+            Ok(latest.clone())
+        })?;
 
         let draft = PullRequestDraft {
             title: format!("Kiln verified delivery: run {}", run.id),
@@ -575,8 +592,16 @@ impl Engine {
         }
         publication.pull_request = Some(pull_request);
         publication.status = "published".into();
-        run.publication = Some(publication);
-        self.save(&run)?;
-        Ok(run)
+        self.transact(id, |latest| {
+            let current_tip = git(&self.repository, &["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])?;
+            if latest.input_version() != report.input_version
+                || latest.validation_reports.last().map(|r| r.id.as_str()) != Some(report.id.as_str())
+                || latest.validation_reports.last().is_none_or(|r| r.outcome != VERIFIED || r.integrated_commit.as_deref() != Some(current_tip.as_str()))
+            {
+                bail!("verified delivery changed during publication; refusing to record a stale publication");
+            }
+            latest.publication = Some(publication);
+            Ok(latest.clone())
+        })
     }
 }

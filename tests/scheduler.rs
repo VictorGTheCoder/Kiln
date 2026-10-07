@@ -392,7 +392,11 @@ fn active_sessions_waiting_prerequisites_and_blockers_are_visible_while_running(
     let mut stream = std::net::TcpStream::connect(&address).unwrap();
     std::io::Write::write_all(
         &mut stream,
-        format!("GET /api/runs/{id} HTTP/1.0\r\n\r\n").as_bytes(),
+        format!(
+            "GET /api/runs/{id} HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            address.rsplit(':').next().unwrap()
+        )
+        .as_bytes(),
     )
     .unwrap();
     let mut body = String::new();

@@ -445,7 +445,7 @@ impl Engine {
             )
             .context("retained work is no longer part of the integration branch")?;
             {
-                let _git = self.lock_run(id, "git")?;
+                let _git = self.lock_git_admin()?;
                 git(
                     &self.repository,
                     &[
@@ -466,16 +466,7 @@ impl Engine {
             Ok(())
         })();
         if worktree.exists() {
-            let _git = self.lock_run(id, "git")?;
-            let _ = git(
-                &self.repository,
-                &[
-                    "worktree",
-                    "remove",
-                    "--force",
-                    worktree.to_str().unwrap_or_default(),
-                ],
-            );
+            let _ = self.remove_worktree(&worktree);
         }
         match result {
             Ok(()) => revalidation.outcome = "revalidated".into(),

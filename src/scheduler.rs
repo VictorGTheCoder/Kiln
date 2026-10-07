@@ -254,10 +254,20 @@ impl Engine {
                     let integration = &integration;
                     let gate = &gate;
                     scope.spawn(move || {
-                        let result = crate::sandbox::with_command_cancellation(
-                            gate.command_cancellation.clone(),
-                            || self.ticket_pipeline(id, &ticket, gate, integration, &sender),
-                        );
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            crate::sandbox::with_command_cancellation(
+                                gate.command_cancellation.clone(),
+                                || self.ticket_pipeline(id, &ticket, gate, integration, &sender),
+                            )
+                        }))
+                        .unwrap_or_else(|payload| {
+                            let message = payload
+                                .downcast_ref::<String>()
+                                .cloned()
+                                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                                .unwrap_or_else(|| "non-string panic payload".into());
+                            Err(anyhow::anyhow!("ticket worker crashed: {message}"))
+                        });
                         // An exhausted provider account limit is run-wide, never a ticket failure.
                         let result =
                             result.map_err(|e| match crate::limits::ProviderLimit::in_error(&e) {
@@ -921,12 +931,11 @@ impl<P: crate::agent::Provider> AgentProviders<P> {
     }
     fn adapter(&self) -> crate::agent::Adapter<P> {
         let adapter = crate::agent::Adapter::new(self.config.clone());
+        let mut stops = self.stops.lock().unwrap();
         if self.stopped.load(Ordering::SeqCst) {
             adapter.stop();
         }
-        if let Ok(mut stops) = self.stops.lock() {
-            stops.push(adapter.stop_handle());
-        }
+        stops.push(adapter.stop_handle());
         adapter
     }
 }
@@ -950,8 +959,8 @@ impl<P: crate::agent::Provider> TicketProviders for AgentProviders<P> {
         }))
     }
     fn stop_active(&self) {
-        self.stopped.store(true, Ordering::SeqCst);
         if let Ok(stops) = self.stops.lock() {
+            self.stopped.store(true, Ordering::SeqCst);
             for stop in stops.iter() {
                 stop.store(true, Ordering::SeqCst);
             }

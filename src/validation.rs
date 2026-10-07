@@ -390,16 +390,19 @@ impl Engine {
             Some(commit) => {
                 let path = self.repository.join(".kiln/worktrees").join(&report_id);
                 report.worktree = Some(path.to_string_lossy().into());
-                git(
-                    &self.repository,
-                    &[
-                        "worktree",
-                        "add",
-                        "--detach",
-                        path.to_str().context("worktree UTF-8")?,
-                        &commit,
-                    ],
-                )?;
+                {
+                    let _git_admin = self.lock_git_admin()?;
+                    git(
+                        &self.repository,
+                        &[
+                            "worktree",
+                            "add",
+                            "--detach",
+                            path.to_str().context("worktree UTF-8")?,
+                            &commit,
+                        ],
+                    )?;
+                }
                 let policy = &run.config.isolation;
                 let timeout = settings.timeout();
                 for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
@@ -443,6 +446,10 @@ impl Engine {
                         startup.check.stderr = policy.redact(&stderr);
                     }
                 }
+                if let Err(error) = self.remove_worktree(&path) {
+                    report.failure = Some(format!("worktree cleanup failed: {error:#}"));
+                    report.outcome = UNABLE.into();
+                }
             }
         }
         for requirement in requirements {
@@ -483,6 +490,7 @@ impl Engine {
         }
         .into();
         report.checks = global.into_iter().map(|e| e.check).collect();
+        self.prune_worktrees()?;
         self.transact(id, |latest| {
             let current_tip = latest.integration_branch.as_ref().and_then(|branch| {
                 git(

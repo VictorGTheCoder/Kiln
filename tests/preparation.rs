@@ -48,7 +48,8 @@ fn local_web_view_exposes_the_same_durable_run_as_inspect() {
             .unwrap();
         write!(
             stream,
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+            address.rsplit(':').next().unwrap()
         )
         .unwrap();
         let mut response = String::new();

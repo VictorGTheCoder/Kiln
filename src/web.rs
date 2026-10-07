@@ -15,10 +15,28 @@ pub fn serve(engine: Engine, bind: SocketAddr) -> Result<()> {
     }
     let server =
         Server::http(bind).map_err(|e| anyhow::anyhow!("cannot start local web view: {e}"))?;
+    let bound = server.server_addr().to_ip().unwrap_or(bind);
     println!("Kiln web view: http://{}", server.server_addr());
     std::io::stdout().flush()?;
     for request in server.incoming_requests() {
-        let (status, content_type, body) = if request.method() != &Method::Get {
+        let expected_hosts = [
+            format!("localhost:{}", bound.port()),
+            format!("127.0.0.1:{}", bound.port()),
+            format!("[::1]:{}", bound.port()),
+        ];
+        let valid_host = request.headers().iter().any(|header| {
+            header.field.equiv("Host")
+                && expected_hosts
+                    .iter()
+                    .any(|host| header.value.as_str().eq_ignore_ascii_case(host))
+        });
+        let (status, content_type, body) = if !valid_host {
+            (
+                400,
+                "text/plain; charset=utf-8",
+                "Invalid Host header".to_owned(),
+            )
+        } else if request.method() != &Method::Get {
             (
                 405,
                 "text/plain; charset=utf-8",
@@ -51,10 +69,17 @@ fn render(engine: &Engine, path: &str) -> Result<(&'static str, String)> {
     if let Some(id) = path.strip_prefix("/api/runs/") {
         let run = engine.inspect(id)?;
         let json = serde_json::to_string_pretty(&run)?;
-        return Ok(("application/json", run.config.isolation.redact(&json)));
+        return Ok(("application/json", redact_for_web(&run, &json)));
     }
     if path == "/api/runs" {
-        return Ok(("application/json", serde_json::to_string(&engine.list()?)?));
+        let mut values = Vec::new();
+        for id in engine.list()? {
+            if let Ok(run) = engine.inspect(&id) {
+                let json = serde_json::to_string(&run)?;
+                values.push(redact_for_web(&run, &json));
+            }
+        }
+        return Ok(("application/json", format!("[{}]", values.join(","))));
     }
     let (title, refresh, content) = if path == "/" {
         let mut content = "<h1>Kiln workflow runs</h1><ul>".to_owned();
@@ -77,7 +102,7 @@ fn render(engine: &Engine, path: &str) -> Result<(&'static str, String)> {
         let live = liveness(engine, &run.id);
         // Recorded state is already redacted; redact again in case a secret was
         // registered after the state was written.
-        let content = run.config.isolation.redact(&run_page(&run, live));
+        let content = redact_for_web(&run, &run_page(&run, live));
         (
             format!("Kiln run {}", run.id),
             run.status == "running",
@@ -98,6 +123,18 @@ fn render(engine: &Engine, path: &str) -> Result<(&'static str, String)> {
             esc(&title)
         ),
     ))
+}
+fn redact_for_web(run: &Run, text: &str) -> String {
+    let mut result = run.config.isolation.redact(text);
+    for name in run.config.isolation.secrets.keys() {
+        if let Ok(secret) = std::env::var(name) {
+            if !secret.is_empty() {
+                result = result.replace(&secret, "[REDACTED]");
+                result = result.replace(&esc(&secret), "[REDACTED]");
+            }
+        }
+    }
+    result
 }
 const STYLE: &str = "body{font:15px/1.45 system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 16px;color:#1f1f1f;background:#fff}h1{font-size:1.6em}h2{margin-top:2em;border-bottom:1px solid #ddd;padding-bottom:4px}table{border-collapse:collapse;width:100%}th,td{text-align:left;vertical-align:top;padding:6px 8px;border-bottom:1px solid #eee;overflow-wrap:anywhere}code,pre{font:13px ui-monospace,monospace}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f4f4;padding:12px;max-height:20em;overflow:auto}a{color:#174a8b}.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.85em;font-weight:600;background:#eceff3;color:#333}.good{background:#dff3e4;color:#14532d}.good::before{content:'\\2713  '}.bad{background:#fde2e1;color:#7f1d1d}.bad::before{content:'\\2717  '}.unknown{background:#fff3c4;color:#713f12;border:1px dashed #a16207}.unknown::before{content:'?  '}.notice{padding:8px 12px;border-left:4px solid #a16207;background:#fffbea}.muted{color:#666}";
 

@@ -67,6 +67,9 @@ impl Provider for ClaudeConfig {
     fn credentials(&self) -> &Path {
         &self.credentials
     }
+    fn secret_fields() -> &'static [&'static str] {
+        &["accessToken", "refreshToken", "idToken"]
+    }
     fn timeout_seconds(&self) -> u64 {
         self.timeout_seconds
     }

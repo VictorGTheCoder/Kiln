@@ -51,6 +51,7 @@ pub(crate) fn command_cancellation_active() -> bool {
 }
 
 fn output(mut command: Command, cancellation: Option<CommandCancellation>) -> Result<Output> {
+    command.stdin(Stdio::null());
     let Some(cancellation) = cancellation else {
         return Ok(command.output()?);
     };

@@ -330,7 +330,6 @@ pub fn provider_failure(provider: &str, message: &str) -> anyhow::Error {
 
 /// Reset time as reported ("try again at 10:05 AM", "resets 3pm", "|1717000000").
 fn reset_time(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
     for marker in [
         "try again at ",
         "try again in ",
@@ -341,7 +340,18 @@ fn reset_time(text: &str) -> Option<String> {
         "resets ",
         "retry after ",
     ] {
-        if let Some(start) = lower.find(marker).map(|i| i + marker.len()) {
+        if let Some(start) = text
+            .match_indices(marker)
+            .next()
+            .map(|(i, _)| i + marker.len())
+            .or_else(|| {
+                text.char_indices().find_map(|(i, _)| {
+                    text.get(i..i + marker.len())
+                        .filter(|candidate| candidate.eq_ignore_ascii_case(marker))
+                        .map(|_| i + marker.len())
+                })
+            })
+        {
             let rest = &text[start..];
             let mut end = rest.len();
             for (i, c) in rest.char_indices() {
@@ -365,4 +375,26 @@ fn reset_time(text: &str) -> Option<String> {
     let (_, after) = text.split_once("limit reached|")?;
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
     (!digits.is_empty()).then(|| format!("unix {digits}"))
+}
+
+#[cfg(test)]
+mod unicode_reset_tests {
+    use super::reset_time;
+    #[test]
+    fn reset_marker_offsets_remain_valid_around_unicode() {
+        for text in [
+            "K İ provider resets at 10:05 AM.",
+            "provider resets at K10:05 AM.",
+            "provider RESETS AT 3pm (İ).",
+            "İ provider try again at 10:05 AM",
+        ] {
+            let parsed = reset_time(text).unwrap();
+            assert!(
+                parsed.contains("10:05 AM")
+                    || parsed.contains("K10:05 AM")
+                    || parsed.contains("3pm"),
+                "{text}: {parsed}"
+            );
+        }
+    }
 }

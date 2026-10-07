@@ -590,7 +590,20 @@ fn run() -> Result<()> {
             })?;
             report.summary(&run.id)
         }
-        Commands::Inspect { id: Some(id) } => serde_json::to_value(engine.inspect(&id)?)?,
+        Commands::Inspect { id: Some(id) } => {
+            let run = engine.inspect(&id)?;
+            let mut value = serde_json::to_value(&run)?;
+            for name in run.config.isolation.secrets.keys() {
+                if let Ok(secret) = std::env::var(name) {
+                    if !secret.is_empty() {
+                        value = serde_json::from_str(
+                            &serde_json::to_string(&value)?.replace(&secret, "[REDACTED]"),
+                        )?;
+                    }
+                }
+            }
+            value
+        }
         Commands::Inspect { id: None } => serde_json::to_value(engine.list()?)?,
         Commands::Serve { bind } => return kiln::web::serve(engine, bind),
     };

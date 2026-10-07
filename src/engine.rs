@@ -1,4 +1,4 @@
-use crate::{FrozenSpec, ProjectConfig, Run};
+use crate::{execution::git, FrozenSpec, ProjectConfig, Run};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::{
@@ -191,6 +191,42 @@ impl Engine {
         file.write_all(id.as_bytes())?;
         file.sync_all()?;
         Ok(RunLock(file))
+    }
+    /// Serialize worktree administration with branch/worktree creation.
+    pub(crate) fn lock_git_admin(&self) -> Result<RunLock> {
+        fs::create_dir_all(self.repository.join(".kiln"))?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.repository.join(".kiln/git-admin.lock"))?;
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(RunLock(file))
+    }
+    pub(crate) fn prune_worktrees(&self) -> Result<()> {
+        let _lock = self.lock_git_admin()?;
+        git(&self.repository, &["worktree", "prune"])?;
+        Ok(())
+    }
+    pub(crate) fn remove_worktree(&self, path: &std::path::Path) -> Result<()> {
+        let _lock = self.lock_git_admin()?;
+        if path.exists() {
+            git(
+                &self.repository,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    path.to_str().context("worktree UTF-8")?,
+                ],
+            )?;
+        }
+        git(&self.repository, &["worktree", "prune"])?;
+        Ok(())
     }
     /// Clear this run's abandoned diagnostic marker only after acquiring the same
     /// process lock used by integration. The persistent lock inode is never removed.
