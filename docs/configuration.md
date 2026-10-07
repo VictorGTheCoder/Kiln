@@ -52,7 +52,10 @@ decisions, publication and issue synchronization. Verified, failed and
 unable-to-verify outcomes carry distinct colors, symbols and text. A run
 recorded as running reloads every few seconds; when no scheduler process holds
 its ownership lock it is shown as interrupted with the resume command. All
-recorded text is HTML-escaped and configured secret values are redacted.
+recorded text is HTML-escaped and configured secret values are redacted. The page
+shows the current input version, each session and validation report's input
+version, and the history of approved spec replans with affected work and
+invalidated validation reports.
 `/api/runs` and `/api/runs/<id>` return the same JSON as CLI inspection. The
 server accepts loopback addresses only and reads state for every request.
 

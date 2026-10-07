@@ -139,7 +139,11 @@ fn run_page(run: &Run, live: Option<bool>) -> String {
         None => "<p class=\"muted\">Process liveness is unknown on this system.</p>".to_owned(),
     });
 
-    html.push_str("<h2>Frozen specs</h2><table><tr><th>Path</th><th>Content SHA-256</th><th>Source revision</th></tr>");
+    let _ = write!(
+        html,
+        "<h2>Frozen specs</h2><p data-input-version>Current input version: <strong>{}</strong> (0 = frozen specs; verified revisions increment the version).</p><table><tr><th>Path</th><th>Content SHA-256</th><th>Source revision</th></tr>",
+        run.input_version()
+    );
     for spec in &run.specs {
         let _ = write!(
             html,
@@ -152,18 +156,82 @@ fn run_page(run: &Run, live: Option<bool>) -> String {
     }
     html.push_str("</table>");
     if !run.spec_revisions.is_empty() {
-        html.push_str("<p>Spec revisions made by decisions during the run (the latest verified revision of a spec is in effect):</p><table><tr><th>Revision</th><th>Path</th><th>Status</th><th>Content SHA-256</th><th>Decision</th></tr>");
+        html.push_str("<p>Verified revisions are part of the current input version; frozen inputs remain recorded above.</p><table><tr><th>Revision</th><th>Path</th><th>Status</th><th>Content SHA-256</th><th>Recorded by</th></tr>");
         for r in &run.spec_revisions {
+            let source = if let Some(replan_id) = &r.replan_id {
+                format!("Recorded by spec replan <code>{}</code>", esc(replan_id))
+            } else if !r.decision_id.is_empty() {
+                format!("Decision <code>{}</code>", esc(&r.decision_id))
+            } else {
+                "No decision or replan recorded".into()
+            };
             let _ = write!(
                 html,
-                "<tr><td>Revision {}</td><td><code>{}</code><details><summary>Revised content</summary><pre>{}</pre></details></td><td>{}</td><td><code>{}</code><br><span class=\"muted\">replaces <code>{}</code></span></td><td><code>{}</code></td></tr>",
+                "<tr><td>Revision {}</td><td><code>{}</code><details><summary>Revised content</summary><pre>{}</pre></details></td><td>{}</td><td><code>{}</code><br><span class=\"muted\">replaces <code>{}</code></span></td><td>{}</td></tr>",
                 r.version,
                 esc(&r.path),
                 esc(&r.content),
                 badge(&r.status),
                 esc(&r.content_sha256),
                 esc(&r.base_sha256),
-                esc(&r.decision_id)
+                source
+            );
+        }
+        html.push_str("</table>");
+    }
+    if !run.spec_replans.is_empty() {
+        html.push_str("<h2>Spec replan history</h2><table><tr><th>Replan</th><th>Outcome</th><th>Input version</th><th>Changed requirements</th><th>Affected tickets</th><th>Dependent tickets</th><th>Invalidated validation</th><th>Revalidations</th></tr>");
+        for replan in &run.spec_replans {
+            let changed = replan
+                .changed_requirements
+                .iter()
+                .map(|item| esc(item))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let affected = replan
+                .affected_tickets
+                .iter()
+                .map(|item| esc(item))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let dependents = replan
+                .dependent_tickets
+                .iter()
+                .map(|item| esc(item))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let invalidated = replan
+                .invalidated_validation_reports
+                .iter()
+                .map(|item| esc(item))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let revalidations = replan
+                .revalidations
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{}: {} (input version {})",
+                        esc(&item.ticket_id),
+                        esc(&item.outcome),
+                        item.input_version
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("<br>");
+            let _ = write!(
+                html,
+                "<tr data-spec-replan=\"{}\"><td><code>{}</code></td><td>{}</td><td>Previous input version {} → {}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                esc(&replan.id),
+                esc(&replan.id),
+                badge(&replan.outcome),
+                replan.previous_input_version,
+                replan.input_version,
+                if changed.is_empty() { "none" } else { &changed },
+                if affected.is_empty() { "none" } else { &affected },
+                if dependents.is_empty() { "none" } else { &dependents },
+                if invalidated.is_empty() { "none" } else { &invalidated },
+                if revalidations.is_empty() { "none" } else { &revalidations }
             );
         }
         html.push_str("</table>");
@@ -213,10 +281,11 @@ fn validation(run: &Run) -> String {
         let latest = index + 1 == run.validation_reports.len();
         let _ = write!(
             html,
-            "<h3>{} report <code>{}</code> {}</h3><p>Integrated commit <code>{}</code></p>",
+            "<h3>{} report <code>{}</code> {}</h3><p>Input version {} · Integrated commit <code>{}</code></p>",
             if latest { "Latest" } else { "Earlier" },
             esc(&report.id),
             badge(&report.outcome),
+            report.input_version,
             esc(report
                 .integrated_commit
                 .as_deref()
@@ -353,7 +422,7 @@ fn sessions(run: &Run) -> String {
         html.push_str("<p class=\"muted\">No implementation sessions have been recorded.</p>");
         return html;
     }
-    html.push_str("<table><tr><th>Ticket</th><th>Session</th><th>Status</th><th>Details</th></tr>");
+    html.push_str("<table><tr><th>Ticket</th><th>Session</th><th>Status</th><th>Ticket input version</th><th>Details</th></tr>");
     for s in &run.sessions {
         let mut details = format!("Branch <code>{}</code>", esc(&s.branch));
         if let Some(commit) = &s.commit {
@@ -368,10 +437,11 @@ fn sessions(run: &Run) -> String {
         details.push_str(&checks(&s.checks));
         let _ = write!(
             html,
-            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{details}</td></tr>",
+            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>Input version {}</td><td>{details}</td></tr>",
             esc(&s.ticket_id),
             esc(&s.id),
-            badge(&s.status)
+            badge(&s.status),
+            s.input_version
         );
     }
     html.push_str("</table>");

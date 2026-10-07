@@ -107,6 +107,10 @@ impl Repo {
     fn inspect(&self, id: &str) -> Value {
         self.ok(&["inspect", id])
     }
+    fn replan(&self, id: &str, spec: &str, fixture: Value) -> Value {
+        self.write("replan.json", fixture);
+        self.ok(&["replan", id, "--spec", spec, "--fixture", "replan.json"])
+    }
     /// Start `kiln serve` on an ephemeral loopback port.
     fn serve(&self, env: &[(&str, &str)]) -> Server {
         let mut command = self.command(&["serve", "--bind", "127.0.0.1:0"]);
@@ -605,4 +609,53 @@ fn replanning_decisions_and_spec_revisions_explain_the_effective_work() {
     assert!(decisions.contains("PO-1"));
     // Superseded sessions are labelled as such in the session history.
     assert!(page.contains("state-superseded"));
+}
+
+#[test]
+fn approved_spec_replans_and_work_input_versions_are_visible() {
+    let repo = Repo::new(json!({}));
+    let id = repo.planned(&[("a", "one.md", &[]), ("b", "two.md", &[])]);
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{"a":works("a.txt"),"b":works("b.txt")}}),
+    );
+    let out = repo.cli(&["run", &id, "--fixture", "scenario.json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    fs::write(
+        repo.path.join("one.md"),
+        "# One\n## Acceptance criteria\n- Works in French\n",
+    )
+    .unwrap();
+    let replan = repo.replan(
+        &id,
+        "one.md",
+        json!({
+            "tickets":[{"id":"a","title":"Ticket a","description":"Work in French","acceptance_criteria":["works"],"covers":["one.md#ac-1"],"blocked_by":[]}],
+            "verification":{"outcome":"verified","findings":[]}
+        }),
+    );
+    assert_eq!(replan["spec_replans"][0]["input_version"], 1);
+    let first_session = replan["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["ticket_id"] == "a")
+        .unwrap();
+    assert_eq!(first_session["input_version"], 0);
+
+    let page = repo.serve(&[]).page(&id);
+    assert!(page.contains("Current input version: <strong>1</strong>"));
+    assert!(page.contains("Ticket input version"));
+    assert!(page.contains("Input version 0"));
+    assert!(page.contains("Spec replan history"));
+    assert!(page.contains(&replan["spec_replans"][0]["id"].as_str().unwrap()));
+    assert!(page.contains("Recorded by spec replan"));
+    assert!(page.contains("Previous input version 0 → 1"));
+    assert!(page.contains("<th>Affected tickets</th>"));
+    assert!(page.contains("<td>a</td>"));
 }
