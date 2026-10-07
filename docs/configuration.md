@@ -41,7 +41,21 @@ with an actionable English error, without creating a prepared run. Spec paths
 must identify nonempty UTF-8 Markdown files inside the repository; duplicate
 paths are rejected. Providing a spec signifies it was already approved.
 
-The web root lists runs; `/runs/<id>` displays recorded state.
+The web root lists runs with their status; `/runs/<id>` is a read-only monitoring
+page rendered from the recorded run: frozen specs and verified spec revisions,
+ticket dependencies with why waiting or blocked work cannot start, active
+sessions, limits with usage, cost (shown as unavailable, never zero, when no
+provider reported it) and stop reasons, implementation sessions, Standards and
+Spec review findings, correction history, integration outcomes, replanning and
+decisions, global validation evidence per acceptance criterion, recovery
+decisions, publication and issue synchronization. Verified, failed and
+unable-to-verify outcomes carry distinct colors, symbols and text. A run
+recorded as running reloads every few seconds; when no scheduler process holds
+its ownership lock it is shown as interrupted with the resume command. All
+recorded text is HTML-escaped and configured secret values are redacted. The page
+shows the current input version, each session and validation report's input
+version, and the history of approved spec replans with affected work and
+invalidated validation reports.
 `/api/runs` and `/api/runs/<id>` return the same JSON as CLI inspection. The
 server accepts loopback addresses only and reads state for every request.
 
