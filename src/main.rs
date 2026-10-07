@@ -39,6 +39,25 @@ enum Commands {
         #[arg(long)]
         gh: Option<PathBuf>,
     },
+    /// Freeze, plan, independently verify, and schedule the complete open issue graph.
+    StartBacklog {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        github_repo: String,
+        #[arg(long)]
+        issue_fixture: Option<PathBuf>,
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
+        planning_fixture: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["claude", "planning_fixture"])]
+        codex: Option<PathBuf>,
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        run_fixture: Option<PathBuf>,
+        #[arg(long)]
+        plan_only: bool,
+    },
     /// Read selected GitHub issues and independently verify against frozen specs.
     Import {
         id: String,
@@ -401,6 +420,18 @@ fn run() -> Result<()> {
                         .as_ref()
                         .map(|p| p.status.clone())
                         .unwrap_or_else(|| stored.status.clone());
+                    let selected = format!(
+                        "github:{}#{}",
+                        backlog.github_repository, backlog.selected_issue
+                    );
+                    if let Some(disposition) = backlog
+                        .dispositions
+                        .iter_mut()
+                        .find(|disposition| disposition.issue == selected)
+                    {
+                        disposition.status = "completed".into();
+                        disposition.reason = "Implementation passed validation and was delivered in a draft pull request.".into();
+                    }
                     backlog.evidence.push(format!(
                         "Final outcome: {}; publication status: {}.",
                         stored.status,
@@ -414,6 +445,100 @@ fn run() -> Result<()> {
                 run = stored.clone();
                 Ok(())
             })?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            return Ok(());
+        }
+        Commands::StartBacklog {
+            config,
+            github_repo,
+            issue_fixture,
+            planning_fixture,
+            codex,
+            claude,
+            run_fixture,
+            plan_only,
+        } => {
+            let source: Box<dyn kiln::import::IssueSource> = match issue_fixture {
+                Some(path) => Box::new(kiln::import::FixtureIssues::load(
+                    &engine.repository.join(path),
+                )?),
+                None => Box::new(kiln::import::GitHubIssues),
+            };
+            let mut run = if let Some(path) = &planning_fixture {
+                let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+                engine.prepare_backlog_graph(&config, &github_repo, source.as_ref(), &agent)?
+            } else {
+                let project_config = kiln::ProjectConfig::load(
+                    &engine.repository.join(&config),
+                    &engine.repository,
+                )?;
+                with_planner!(
+                    Provider::select(codex.clone(), claude.clone()),
+                    engine,
+                    project_config,
+                    |agent| {
+                        engine.prepare_backlog_graph(
+                            &config,
+                            &github_repo,
+                            source.as_ref(),
+                            &agent,
+                        )?
+                    }
+                )
+            };
+            let id = run.id.clone();
+            run = if let Some(path) = &planning_fixture {
+                let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+                let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+                engine.plan(&id, &agent)?
+            } else {
+                let config = engine.inspect(&id)?.config;
+                with_planner!(
+                    Provider::select(codex.clone(), claude.clone()),
+                    engine,
+                    config,
+                    |agent| {
+                        let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+                        engine.plan(&id, &agent)?
+                    }
+                )
+            };
+            engine.record_backlog_plan(&id, &mut run)?;
+            if !run.plan.as_ref().is_some_and(|plan| plan.executable) {
+                println!("{}", serde_json::to_string_pretty(&run)?);
+                anyhow::bail!("backlog graph plan rejected; inspect durable per-issue findings");
+            }
+            if plan_only {
+                println!("{}", serde_json::to_string_pretty(&run)?);
+                return Ok(());
+            }
+            let providers: Box<dyn kiln::scheduler::TicketProviders> = match run_fixture {
+                Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
+                    &engine.repository.join(path),
+                    &engine.repository,
+                )?),
+                None => {
+                    let config = engine.inspect(&id)?.config;
+                    let repository = engine.repository.clone();
+                    let isolation = config.isolation.clone();
+                    match Provider::select(codex, claude) {
+                        Provider::Codex(path) => Box::new(
+                            kiln::scheduler::CodexProviders::new(
+                                kiln::codex::CodexConfig::from_project(&config, path)?,
+                            )
+                            .with_replanning(repository, isolation),
+                        ),
+                        Provider::Claude(path) => Box::new(
+                            kiln::scheduler::ClaudeProviders::new(
+                                kiln::claude::ClaudeConfig::from_project(&config, path)?,
+                            )
+                            .with_replanning(repository, isolation),
+                        ),
+                    }
+                }
+            };
+            let mut run = engine.run_tickets(&id, providers.as_ref())?;
+            engine.record_backlog_results(&id, &mut run)?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             return Ok(());
         }

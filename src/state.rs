@@ -63,9 +63,17 @@ pub struct Run {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacklogRun {
     pub github_repository: String,
+    /// single-issue compatibility mode or whole-snapshot dependency-graph mode.
+    #[serde(default = "single_backlog_mode")]
+    pub mode: String,
     pub selected_issue: u64,
     pub snapshot_unix_ms: u128,
     pub issue_snapshot: Vec<crate::import::ImportedIssue>,
+    /// A durable classification for every issue captured at run start. This is
+    /// separate from the executable plan: containers and issues outside the
+    /// selected one-issue workflow still receive an explicit disposition.
+    #[serde(default)]
+    pub dispositions: Vec<BacklogIssueDisposition>,
     #[serde(default)]
     pub inferred_requirements: Vec<String>,
     #[serde(default)]
@@ -74,6 +82,32 @@ pub struct BacklogRun {
     pub evidence: Vec<String>,
     pub skill_version: String,
     pub outcome: String,
+}
+fn single_backlog_mode() -> String {
+    "single-issue".into()
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogIssueDisposition {
+    pub issue: String,
+    /// actionable | container
+    #[serde(default = "actionable_issue_kind")]
+    pub kind: String,
+    /// Whether this issue was selected by the command that created the run.
+    #[serde(default)]
+    pub selected: bool,
+    /// Whether this actionable issue has enough criteria and actionable
+    /// prerequisites to produce an executable plan ticket.
+    #[serde(default)]
+    pub plan_candidate: bool,
+    /// eligible | blocked | skipped | completed | failed | unable-to-verify
+    pub status: String,
+    pub dependencies: Vec<String>,
+    pub reason: String,
+    #[serde(default)]
+    pub inferred_criteria: Vec<String>,
+}
+fn actionable_issue_kind() -> String {
+    "actionable".into()
 }
 /// A spec revision produced by a decision: an explicit, versioned run artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]

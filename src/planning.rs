@@ -82,6 +82,8 @@ pub struct FixtureAgent {
     verification: Verification,
     #[serde(default)]
     inferred_requirements: Vec<String>,
+    #[serde(default)]
+    inference_by_issue: BTreeMap<String, Vec<String>>,
 }
 impl FixtureAgent {
     pub fn load(path: &Path) -> Result<Self> {
@@ -98,7 +100,21 @@ impl PlanningAgent for FixtureAgent {
     }
 }
 impl AcceptanceCriteriaInferenceAgent for FixtureAgent {
-    fn infer(&self, _: &AcceptanceCriteriaInferenceRequest) -> Result<Vec<String>> {
+    fn infer(&self, request: &AcceptanceCriteriaInferenceRequest) -> Result<Vec<String>> {
+        let identity = format!("{}", request.issue.number);
+        let canonical = request
+            .issue
+            .url
+            .strip_prefix("https://github.com/")
+            .and_then(|url| url.split_once("/issues/"))
+            .map(|(repository, number)| format!("github:{repository}#{number}"));
+        if let Some(criteria) = self.inference_by_issue.get(&identity).or_else(|| {
+            canonical
+                .as_ref()
+                .and_then(|key| self.inference_by_issue.get(key))
+        }) {
+            return Ok(criteria.clone());
+        }
         if self.inferred_requirements.is_empty() {
             bail!("planning fixture has no inferred_requirements for an issue without explicit acceptance bullets");
         }
