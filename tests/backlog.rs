@@ -133,6 +133,11 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
     assert_eq!(run["publication"]["pull_request"]["draft"], true);
     assert!(run["backlog"]["skill_version"].as_str().is_some());
     assert_eq!(run["backlog"]["outcome"], "published");
+    assert_eq!(
+        run["backlog"]["dispositions"][0]["issue"],
+        "github:example/project#7"
+    );
+    assert_eq!(run["backlog"]["dispositions"][0]["status"], "completed");
     let implementation_context = fs::read_to_string(p.repo.join(".kiln/contexts").join(format!(
         "{}.json",
         run["corrections"][0]["before"]["context_id"].as_str().unwrap()
@@ -156,6 +161,43 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
         serde_json::from_slice::<Value>(&fs::read(p.repo.join("issues.json")).unwrap()).unwrap(),
         issue
     );
+}
+
+#[test]
+fn frozen_backlog_gives_every_open_issue_a_disposition_and_retains_open_edges() {
+    use kiln::{backlog::classify_snapshot, import::ImportedIssue};
+    let issue = |number, labels: &[&str], blocked_by: &[&str]| ImportedIssue {
+        number,
+        url: format!("https://github.com/example/project/issues/{number}"),
+        title: format!("Issue {number}"),
+        body: String::new(),
+        labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+        assignee: None,
+        comments: Vec::new(),
+        state: "OPEN".into(),
+        blocked_by: blocked_by.iter().map(|blocker| (*blocker).into()).collect(),
+        dependency_source: "native-and-body".into(),
+    };
+    let snapshot = vec![
+        issue(1, &[], &[]),
+        issue(2, &["epic"], &[]),
+        issue(3, &[], &["github:example/project#1"]),
+        issue(4, &[], &["github:other/repo#8"]),
+    ];
+
+    let dispositions = classify_snapshot("example/project", &snapshot, 1);
+
+    assert_eq!(dispositions.len(), snapshot.len());
+    assert_eq!(dispositions[0].status, "eligible");
+    assert_eq!(dispositions[1].status, "container");
+    assert_eq!(dispositions[2].status, "blocked");
+    assert_eq!(dispositions[2].dependencies, ["github:example/project#1"]);
+    assert_eq!(dispositions[3].status, "unable-to-verify");
+    assert_eq!(dispositions[3].dependencies, ["github:other/repo#8"]);
+    assert!(!dispositions[3].selected);
+    assert!(dispositions
+        .iter()
+        .all(|disposition| !disposition.reason.is_empty()));
 }
 
 #[test]

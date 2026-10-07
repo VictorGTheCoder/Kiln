@@ -397,6 +397,18 @@ fn run() -> Result<()> {
                         .as_ref()
                         .map(|p| p.status.clone())
                         .unwrap_or_else(|| stored.status.clone());
+                    let selected = format!(
+                        "github:{}#{}",
+                        backlog.github_repository, backlog.selected_issue
+                    );
+                    if let Some(disposition) = backlog
+                        .dispositions
+                        .iter_mut()
+                        .find(|disposition| disposition.issue == selected)
+                    {
+                        disposition.status = "completed".into();
+                        disposition.reason = "Implementation passed validation and was delivered in a draft pull request.".into();
+                    }
                     backlog.evidence.push(format!(
                         "Final outcome: {}; publication status: {}.",
                         stored.status,

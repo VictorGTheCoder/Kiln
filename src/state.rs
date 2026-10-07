@@ -66,6 +66,11 @@ pub struct BacklogRun {
     pub selected_issue: u64,
     pub snapshot_unix_ms: u128,
     pub issue_snapshot: Vec<crate::import::ImportedIssue>,
+    /// A durable classification for every issue captured at run start. This is
+    /// separate from the executable plan: containers and issues outside the
+    /// selected one-issue workflow still receive an explicit disposition.
+    #[serde(default)]
+    pub dispositions: Vec<BacklogIssueDisposition>,
     #[serde(default)]
     pub inferred_requirements: Vec<String>,
     #[serde(default)]
@@ -74,6 +79,19 @@ pub struct BacklogRun {
     pub evidence: Vec<String>,
     pub skill_version: String,
     pub outcome: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogIssueDisposition {
+    pub issue: String,
+    /// Whether this issue was selected by the command that created the run.
+    #[serde(default)]
+    pub selected: bool,
+    /// eligible | blocked | container | skipped | completed | failed | unable-to-verify
+    pub status: String,
+    pub dependencies: Vec<String>,
+    pub reason: String,
+    #[serde(default)]
+    pub inferred_criteria: Vec<String>,
 }
 /// A spec revision produced by a decision: an explicit, versioned run artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
