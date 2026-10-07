@@ -406,6 +406,44 @@ corrections receive it. A `rejected` revision stays visible and leaves the
 accepted plan unchanged. The CLI exits unsuccessfully unless the decision is
 `resolved`.
 
+## Replanning after approved spec changes
+
+Editing an approved spec file never changes a run: `specs` stay frozen and
+`kiln run` keeps using the current input version. Apply the edit explicitly:
+
+```sh
+kiln replan <run-id> --spec one.md [--spec two.md] --fixture replan.json   # or --codex <path>
+```
+
+Each named spec must be a frozen input of the run. Changed specs become new
+`spec_revisions` (with `replan_id`); the highest verified revision version is the
+run's input version (0 = frozen specs). Requirements whose criterion changed, was
+added or was removed are `changed_requirements`; tickets covering them are
+`affected_tickets`. A fresh session returns revised (same id) or new tickets, and
+the whole plan is independently reverified against the revised specs in a separate
+context. Fixture shape: `{"tickets":[...], "verification":{"outcome","findings"}}`.
+
+Only a `replanned` outcome takes effect (`kiln replan` exits unsuccessfully
+otherwise, and a `rejected` revision stays visible without changing anything):
+
+- Affected tickets' sessions (running, implemented or integrated) and integrations
+  become `superseded` and are re-executed against the new input version. A session
+  that finishes after the replan stays `superseded`, so stale results are never
+  integrated. Sessions record their `input_version`.
+- Descendants of affected tickets (`dependent_tickets`) keep their integrated work,
+  but are not treated as integrated until their evidence is revalidated: once
+  their prerequisites are re-integrated, the scheduler checks the retained commit is
+  still on the integration branch and reruns the configured build and test checks
+  on the combined result (`revalidations`). They are never re-implemented.
+- Other integrated work is `retained` with its session, commit and input version.
+- Earlier validation reports are listed in `invalidated_validation_reports`;
+  `kiln publish` refuses a report whose `input_version` is not the current one.
+- `previous_plan`, `spec_revisions` and `decisions` keep old and new decisions
+  inspectable.
+
+Replanning requires an executable plan and refuses while a scheduler process
+owns the run.
+
 ## Resume
 
 `kiln resume RUN --fixture scenario.json` (or `--codex`) reopens an interrupted or

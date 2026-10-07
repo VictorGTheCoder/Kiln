@@ -467,3 +467,18 @@ fn github_contract_reconciles_listed_pull_request_with_update() {
     assert!(!calls.contains("POST"), "no duplicate PR: {calls}");
     assert!(calls.contains("api --method PATCH repos/acme/widgets/pulls/9 --input -"));
 }
+
+#[test]
+fn validation_of_an_older_input_version_cannot_be_published_after_replanning() {
+    let (p, id, _) = verified(default_policy());
+    fs::write(p.repo.join("one.md"), "# Sender\n## Acceptance criteria\n- Messages are sent as protocol v3\n").unwrap();
+    p.write("replan.json", json!({"tickets":[
+        {"id":"a","title":"Send protocol v3","description":"Send v3","acceptance_criteria":["one sends v3"],"covers":["one.md#ac-1"],"blocked_by":[]}
+    ],"verification":{"outcome":"verified","findings":[]}}));
+    let run = p.ok(&["replan", &id, "--spec", "one.md", "--fixture", "replan.json"]);
+    assert_eq!(run["spec_replans"][0]["invalidated_validation_reports"][0], run["validation_reports"][0]["id"]);
+    let out = p.publish(&id);
+    assert!(!out.status.success(), "stale validation evidence must not publish");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("input version"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(p.remote_ref(&format!("kiln/{id}/integration")).is_none());
+}

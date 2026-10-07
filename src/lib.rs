@@ -21,6 +21,7 @@ pub mod correction;
 
 pub mod decision;
 pub mod replanning;
+pub mod spec_replanning;
 
 pub mod integration;
 
