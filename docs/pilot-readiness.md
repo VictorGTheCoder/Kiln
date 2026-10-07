@@ -21,7 +21,7 @@ Status: **blocked from scored runs**. This record captures preparation under iss
 - **Wall-clock limit:** 45 minutes per attempt. The clock starts when the provider begins work and ends at delivery or stop. Any extension requires a recorded deviation and applies consistently to affected attempts.
 - **Change permissions:** only reversible development, checks, commits, and pull request delivery in an authorized isolated copy. No merging, deployment, production changes, purchases, or external messages.
 - **Spec preparation:** Kiln receives an approved spec with the same functional requirements supplied to the other systems. Record original request and spec-preparation minutes; the current pilot measures Kiln's spec-driven workflow, not automatic prompt interpretation.
-- **Decision rule:** continue only if Kiln reduces active developer time per accepted change by at least 30% against the better competitor, has no lower no-repair acceptance rate, and does not have higher measured variable cost per accepted change. If cost is unavailable, report it as unavailable and make no cost-advantage claim. This is a small-sample product screen, not a statistical superiority claim.
+- **Decision rule:** continue only if Kiln uses at least 30% less active developer time per accepted change than the better competitor, has no lower no-repair acceptance rate, and has no higher measured variable cost per accepted change. Any measured cost increase, however small, is material and fails this rule. If cost data is unavailable, mark it unavailable and make no cost-advantage claim; the cost criterion remains unverified. This is a conservative small-sample product screen, not a statistical superiority claim.
 
 ## Provider order
 
@@ -48,7 +48,7 @@ Record actual start/end timestamps and deviations. Do not expose earlier provide
 | Freeze exact base commits and checks | All tasks use `bb4806e17b842f19a83de2113f1ec9677a1be6aa`; per-task checks are recorded in their packets. | **Complete** |
 | Confirm provider access and compatible environments | Codex is available through this environment. The owner is unfamiliar with Devin and GitHub Copilot; no access to either comparator is established. | **Unavailable for this pilot unless access is later supplied; no scored runs** |
 | Authorize usage allowances | No purchase or dollar allowance is assumed. Provider-native caps and stop behavior are unknown until account access is checked. | **Unresolved; no scored runs** |
-| Freeze decision threshold | At least 30% lower active time than the better competitor, no lower no-repair acceptance, and no higher measured variable cost. | **Complete** |
+| Freeze decision threshold | At least 30% less active time than the better competitor, no lower no-repair acceptance, and no higher measured variable cost; any measured cost increase fails the rule. Unavailable cost leaves the cost criterion unverified and supports no cost-advantage claim. | **Complete** |
 | Freeze three task packets | T1, T2, and T3 packets preserve source requests, shared instructions, acceptance criteria, checks, evaluator procedures, and the Kiln workflow contract. | **Complete** |
 
 Scored attempts must not start until these prerequisites are resolved and recorded. Access failures or unavailable measurements should be reported, not replaced with assumptions.

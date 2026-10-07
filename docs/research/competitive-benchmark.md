@@ -40,7 +40,7 @@ GitHub documents that cloud-agent access requires a paid Copilot plan and reposi
 
 The approved pilot specification (#35) narrows the study to three real tasks and eighteen initial attempts: a reproducible bug (T1), an incremental feature (T2), and a task with a follow-up revision (T3). Run two fresh attempts per task for each of Kiln, Devin, and Copilot. First run one matched bug trial across all three systems as an explicit setup rehearsal; retain its outcomes and label it as the first scored attempt only if the frozen procedure remains valid. The six-task research draft and its 36-row scorecard are superseded for this pilot.
 
-Freeze repository identity and authorization, exact base commits, actual task prompts, acceptance criteria, independent checks, permissions, provider order, timeout, and available provider usage controls before scored attempts. The proposed wall-clock limit is 45 minutes per attempt. Spending ceilings must be selected from actual account controls and an authorized allowance; none is assumed. The final decision threshold is also pending confirmation before launch. See the [readiness record](../pilot-readiness.md).
+Freeze repository identity and authorization, exact base commits, actual task prompts, acceptance criteria, independent checks, permissions, provider order, timeout, and available provider usage controls before scored attempts. The proposed wall-clock limit is 45 minutes per attempt. Spending ceilings must be selected from actual account controls and an authorized allowance; none is assumed. The decision threshold is frozen in the [readiness record](../pilot-readiness.md).
 
 ### Task selection
 
@@ -78,7 +78,7 @@ Use the [CSV scorecard](benchmark-scorecard.csv), reconciled to exactly eighteen
 
 ### Decision rule
 
-Proposed pilot threshold: Kiln reduces active developer time by at least 30% against the better competitor, with no lower no-repair acceptance rate and no material increase in cost per accepted change. This is a product decision threshold, not a scientifically established constant. Agree it before running the evaluation. Report small sample counts and raw paired results; the pilot screens for a promising advantage and does not establish universal superiority.
+Continue only if Kiln uses at least 30% less active developer time per accepted change than the better competitor, has no lower no-repair acceptance rate, and has no higher measured variable cost per accepted change. Any measured cost increase, however small, is material and fails this rule. If cost data is unavailable, mark it unavailable and make no cost-advantage claim; the cost criterion remains unverified. This is a conservative product decision threshold, not a scientifically established constant. Report small sample counts and raw paired results; this is a small-sample product screen for a promising advantage, not evidence of universal superiority.
 
 If the advantage appears only in one task category, narrow the product to that category. If no advantage appears, prefer adapting an existing foundation or focusing Kiln on a demonstrated workflow gap before building the hosted product.
 
