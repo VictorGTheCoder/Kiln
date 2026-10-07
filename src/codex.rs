@@ -103,8 +103,12 @@ impl CodexAdapter {
         prompt: &str,
     ) -> Result<(T, Observation)> {
         let observation = self.invoke(worktree, policy, prompt)?;
-        let value = serde_json::from_str(&observation.message)
-            .context("Codex final response must be the requested JSON value")?;
+        let value = serde_json::from_str(&observation.message).with_context(|| {
+            format!(
+                "Codex final response must be the requested JSON value; observed response: {:?}",
+                observation.message
+            )
+        })?;
         Ok((value, observation))
     }
     pub fn invoke(

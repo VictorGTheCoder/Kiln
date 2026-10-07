@@ -130,6 +130,17 @@ fn scenario(outcome: &str, axis: &str) {
             let redacted_run = engine.review_ticket(id, "a", &provider).unwrap();
             let recorded = serde_json::to_string(redacted_run.reviews.last().unwrap()).unwrap();
             assert!(!recorded.contains(PROVIDER_TOKEN));
+            if fail {
+                for axis in [
+                    &redacted_run.reviews.last().unwrap().standards,
+                    &redacted_run.reviews.last().unwrap().spec,
+                ] {
+                    let failure = axis.failure.as_deref().unwrap();
+                    assert!(failure.contains("provider failed with [REDACTED]"));
+                    assert!(failure.contains("missing observed review evidence"));
+                    assert!(axis.result.log.contains("provider failed with [REDACTED]"));
+                }
+            }
             assert!(
                 !fs::read_to_string(repo.join(".kiln/runs").join(format!("{id}.json")))
                     .unwrap()
