@@ -1,6 +1,6 @@
 # Implementation tickets
 
-The developer approved these 19 tickets and their blocking edges. GitHub issues are the implementation tracker; this index provides navigation. Each issue carries the ready-for-agent label, acceptance criteria, spec coverage, and native blocking dependencies. Implementation has not started.
+The developer approved these 19 tickets and their blocking edges. GitHub issues are the implementation tracker and record the current completion state; this index provides navigation. Each issue carries acceptance criteria, spec coverage, and blocking dependencies.
 
 Work the runnable frontier: a ticket can start only after its blockers complete. The [product specification](spec.md) remains the source of requirements.
 
