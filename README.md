@@ -2,9 +2,11 @@
 
 Kiln is a Rust orchestrator for spec-driven software development. Give it approved Markdown specs and it coordinates coding agents through planning, implementation, review, correction, integration, and validation, with a GitHub pull request as the final deliverable.
 
+The coding agent does not own the run. Kiln does.
+
 Agent sessions stay focused on individual jobs. Kiln keeps the dependency graph, decides what can run in parallel, records what happened, checks the result, and preserves enough state to recover when a longer run is interrupted.
 
-Codex is the first supported coding agent. The provider boundary is separate from the orchestration engine so other agents can be added later.
+Kiln currently supports Codex and Claude Code as coding agents. The provider boundary stays separate from the orchestration engine so additional agents can be added without changing the workflow.
 
 ## How it works
 
@@ -166,13 +168,13 @@ The execution environment does not silently fall back to unrestricted host execu
 
 See [configuration and CLI usage](docs/configuration.md) for the full security model and its limitations.
 
-## Codex
+## Coding agents
 
-Codex is the first real provider implemented by Kiln.
+Kiln currently supports Codex and Claude Code as real coding-agent providers.
 
-Planning, implementation, and review use fresh Codex contexts rather than carrying a single conversation through the whole run. Kiln remains responsible for Git operations, state transitions, validation, and deciding what happens next.
+Planning, implementation, and review use fresh agent contexts rather than carrying a single conversation through the whole run. Kiln remains responsible for Git operations, state transitions, validation, and deciding what happens next.
 
-The provider interface is designed so support for other coding agents can be added without handing control of the workflow to the provider.
+The provider interface keeps agent-specific integration separate from orchestration, so additional coding agents can be added without handing control of the workflow to the provider.
 
 ## GitHub integration
 
@@ -193,6 +195,7 @@ Merging and deployment are separate project policies. Opening a pull request doe
 - [Validation](docs/validation.md)
 - [Publication](docs/publication.md)
 - [Codex smoke testing](docs/codex-smoke.md)
+- [Claude Code smoke testing](docs/claude-smoke.md)
 
 ## Project status
 
@@ -200,4 +203,4 @@ Kiln is under active development.
 
 The Rust engine currently covers the core workflow from frozen specs through planning, isolated implementation, independent review, corrections, dependency-aware integration, validation, recovery, and GitHub publication.
 
-Deterministic adapters are used to test the workflow without depending on a live provider account. Real Codex integration is supported separately so deterministic engine tests are not presented as evidence of model quality.
+Deterministic adapters are used to test the workflow without depending on a live provider account. Real Codex and Claude Code integrations are supported separately so deterministic engine tests are not presented as evidence of model quality.
