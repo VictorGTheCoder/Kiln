@@ -23,7 +23,10 @@ enum Commands {
         #[arg(long)]
         fixture: Option<PathBuf>,
         #[arg(long)]
-        verification_fixture: PathBuf,
+        #[arg(long, required_unless_present = "codex", conflicts_with = "codex")]
+        verification_fixture: Option<PathBuf>,
+        #[arg(long, conflicts_with = "verification_fixture")]
+        codex: Option<PathBuf>,
     },
     /// Validate configuration and freeze approved Markdown specs. No commands are executed.
     Prepare {
@@ -157,6 +160,7 @@ fn run() -> Result<()> {
             issue,
             fixture,
             verification_fixture,
+            codex,
         } => {
             let source: Box<dyn kiln::import::IssueSource> = match fixture {
                 Some(path) => Box::new(kiln::import::FixtureIssues::load(
@@ -164,10 +168,28 @@ fn run() -> Result<()> {
                 )?),
                 None => Box::new(kiln::import::GitHubIssues),
             };
-            let verifier =
-                kiln::planning::FixtureAgent::load(&engine.repository.join(verification_fixture))?;
-            let run =
-                engine.import_issues(&id, &github_repo, &issue, source.as_ref(), &verifier)?;
+            let verifier: Box<dyn kiln::planning::PlanningAgent> =
+                if let Some(path) = verification_fixture {
+                    Box::new(kiln::planning::FixtureAgent::load(
+                        &engine.repository.join(path),
+                    )?)
+                } else {
+                    let config = engine.inspect(&id)?.config;
+                    Box::new(kiln::codex::CodexPlanningAgent {
+                        adapter: kiln::codex::CodexAdapter::new(
+                            kiln::codex::CodexConfig::from_project(&config, codex)?,
+                        ),
+                        repository: engine.repository.clone(),
+                        isolation: config.isolation,
+                    })
+                };
+            let run = engine.import_issues(
+                &id,
+                &github_repo,
+                &issue,
+                source.as_ref(),
+                verifier.as_ref(),
+            )?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             if !run.plan.as_ref().is_some_and(|p| p.executable) {
                 anyhow::bail!("import rejected; inspect recorded findings");
