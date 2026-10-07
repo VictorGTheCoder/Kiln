@@ -211,6 +211,7 @@ impl Engine {
         github_repository: &str,
         source: &dyn IssueSource,
         inference_agent: &dyn crate::planning::AcceptanceCriteriaInferenceAgent,
+        completed_issues: &BTreeSet<String>,
     ) -> Result<Run> {
         if !crate::publication::valid_repository(github_repository) {
             bail!("GitHub repository must be owner/name");
@@ -238,8 +239,16 @@ impl Engine {
                 bail!("issue URL does not match selected repository identity");
             }
         }
+        if let Some(run) = self.reusable_backlog_run_for_snapshot(github_repository, &snapshot)? {
+            return Ok(run);
+        }
         let mut dispositions = classify_snapshot(github_repository, &snapshot, 0);
         for (issue, disposition) in snapshot.iter().zip(dispositions.iter_mut()) {
+            if completed_issues.contains(&disposition.issue) {
+                disposition.status = "completed".into();
+                disposition.reason = "Issue was already completed by a previous backlog run and remains open in this snapshot; preserving its completed work.".into();
+                continue;
+            }
             let terminal_label = issue.labels.iter().find(|label| {
                 matches!(
                     label.trim().to_ascii_lowercase().as_str(),
@@ -290,6 +299,11 @@ impl Engine {
                 matches!(disposition.status.as_str(), "eligible" | "blocked")
                     && !disposition.inferred_criteria.is_empty();
         }
+        let completed_dispositions: BTreeSet<_> = dispositions
+            .iter()
+            .filter(|disposition| disposition.status == "completed")
+            .map(|disposition| disposition.issue.clone())
+            .collect();
         loop {
             let non_candidates: BTreeSet<_> = dispositions
                 .iter()
@@ -308,9 +322,12 @@ impl Engine {
                 {
                     disposition.plan_candidate = false;
                     disposition.status = "blocked".into();
-                    disposition.reason = format!(
-                        "Cannot proceed because prerequisite {blocker} is not actionable or verifiable in this snapshot."
-                    );
+                    let blocker_is_completed = completed_dispositions.contains(blocker);
+                    disposition.reason = if blocker_is_completed {
+                        format!("Waiting for prerequisite {blocker}, whose verified work remains on an unmerged pull request; this issue stays blocked until that prerequisite is delivered.")
+                    } else {
+                        format!("Cannot proceed because prerequisite {blocker} is not actionable or verifiable in this snapshot.")
+                    };
                     changed = true;
                 }
             }
@@ -388,7 +405,7 @@ impl Engine {
             backlog: Some(BacklogRun {
                 github_repository: github_repository.into(), mode: "issue-graph".into(), selected_issue: 0, snapshot_unix_ms: now.as_millis(), issue_snapshot: snapshot.clone(), dispositions,
                 inferred_requirements,
-                decisions: vec!["The complete open-issue snapshot was frozen once; issues created afterward are excluded from this run.".into(), "Epic and tracking issues are containers; actionable open issues are planned independently.".into(), "Issue tracker records remain read-only.".into()],
+            decisions: vec!["The complete open-issue snapshot was frozen once; issues created afterward are excluded from this run.".into(), "Issues completed by an earlier backlog run remain in the frozen snapshot for audit but are excluded from planning and execution.".into(), "Epic and tracking issues are containers; actionable open issues are planned independently.".into(), "Issue tracker records remain read-only.".into()],
                 evidence: vec![format!("Snapshotted {} open issues for {github_repository} at {} ms since epoch.", snapshot.len(), now.as_millis())], skill_version: SKILL_VERSION.into(), outcome: "prepared".into(),
             }),
             delivery_groups: Vec::new(),

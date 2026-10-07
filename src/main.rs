@@ -482,6 +482,7 @@ fn run() -> Result<()> {
             repair_fixture,
             plan_only,
         } => {
+            let completed_issues = engine.completed_backlog_issues(&github_repo)?;
             let source: Box<dyn kiln::import::IssueSource> = match issue_fixture {
                 Some(path) => Box::new(kiln::import::FixtureIssues::load(
                     &engine.repository.join(path),
@@ -490,7 +491,13 @@ fn run() -> Result<()> {
             };
             let mut run = if let Some(path) = &planning_fixture {
                 let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
-                engine.prepare_backlog_graph(&config, &github_repo, source.as_ref(), &agent)?
+                engine.prepare_backlog_graph(
+                    &config,
+                    &github_repo,
+                    source.as_ref(),
+                    &agent,
+                    &completed_issues,
+                )?
             } else {
                 let project_config = kiln::ProjectConfig::load(
                     &engine.repository.join(&config),
@@ -506,10 +513,37 @@ fn run() -> Result<()> {
                             &github_repo,
                             source.as_ref(),
                             &agent,
+                            &completed_issues,
                         )?
                     }
                 )
             };
+            if run.plan.is_some()
+                && run
+                    .backlog
+                    .as_ref()
+                    .is_some_and(|backlog| backlog.mode == "issue-graph")
+            {
+                println!("{}", serde_json::to_string_pretty(&run)?);
+                return Ok(());
+            }
+            if run.backlog.as_ref().is_some_and(|backlog| {
+                backlog.mode == "issue-graph"
+                    && backlog.dispositions.iter().any(|d| d.status == "completed")
+                    && backlog
+                        .dispositions
+                        .iter()
+                        .all(|d| matches!(d.status.as_str(), "completed" | "skipped"))
+            }) {
+                if let Some(backlog) = &mut run.backlog {
+                    backlog.outcome = "completed".into();
+                    backlog.decisions.push("No new actionable open issues were present; planning, execution, and delivery were skipped.".into());
+                }
+                run.status = "completed".into();
+                engine.save(&run)?;
+                println!("{}", serde_json::to_string_pretty(&run)?);
+                return Ok(());
+            }
             let id = run.id.clone();
             run = if let Some(path) = &planning_fixture {
                 let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;

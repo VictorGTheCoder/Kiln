@@ -811,6 +811,157 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
 }
 
 #[test]
+fn repeated_start_backlog_skips_completed_open_issues_and_delivers_only_new_issues() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let remote = temp.path().join("remote.git");
+    fs::create_dir_all(&repo).unwrap();
+    let project = Project {
+        _temp: temp,
+        repo,
+        remote,
+    };
+    project.git_at(
+        &project.repo.parent().unwrap().to_path_buf(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    project.git(&["init", "-q", "-b", "main"]);
+    project.git(&["config", "user.name", "Kiln Test"]);
+    project.git(&["config", "user.email", "kiln@example.test"]);
+    project.git(&["config", "commit.gpgsign", "false"]);
+    project.git(&["remote", "add", "origin", project.remote.to_str().unwrap()]);
+    project.write(".gitignore", json!(".kiln/\n"));
+    project.git(&["add", "."]);
+    project.git(&["commit", "-qm", "initial"]);
+    project.git(&["push", "-q", "origin", "main"]);
+    let criterion = |text: &str| format!("## Acceptance criteria\n- {text}\n");
+    project.write("kiln.json", json!({
+        "build":["git","diff","--check"], "test":["git","diff","--check"], "startup":["git","--version"],
+        "acceptance_criteria":["Completed backlog issues are not scheduled twice"],
+        "isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]},
+        "validation":{"workflows":[
+            {"criterion":"github-example-project-1.md#ac-1","command":["git","diff","--check"]},
+            {"criterion":"github-example-project-2.md#ac-1","command":["git","diff","--check"]}
+        ]},
+        "publication":{"github_repository":"example/project","target_branch":"main","remote":"origin"}
+    }));
+    let issue = |number: u64, title: &str, body: String| {
+        json!({
+            "number":number,"url":format!("https://github.com/example/project/issues/{number}"),"title":title,
+            "body":body,"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"
+        })
+    };
+    project.write(
+        "issues.json",
+        json!({"issues":[issue(1,"First",criterion("Implement first"))]}),
+    );
+    let ticket = |number: u64, text: &str| {
+        json!({
+            "id":format!("github:example/project#{number}"),"title":format!("Issue {number}"),
+            "description":"Implement the issue", "acceptance_criteria":[text],
+            "covers":[format!("github-example-project-{number}.md#ac-1")],"blocked_by":[]
+        })
+    };
+    project.write("planning.json", json!({
+        "tickets":[ticket(1,"Implement first")],"verification":{"outcome":"verified","findings":[]}
+    }));
+    project.write("scenario.json", json!({"tickets":{
+        "github:example/project#1":{"implementation":{"files":{"first.txt":"done\n"},"outcome":"completed"},
+            "review":{"standards":{"outcome":"approved","evidence":"Reviewed"},"spec":{"outcome":"approved","evidence":"Matches issue"}}}
+    }}));
+    project.write("github.json", json!({"pull_requests":[]}));
+    project.write("repair.json", json!({"corrections":[],"reviews":[]}));
+    let start = [
+        "start-backlog",
+        "--config",
+        "kiln.json",
+        "--github-repo",
+        "example/project",
+        "--issue-fixture",
+        "issues.json",
+        "--planning-fixture",
+        "planning.json",
+        "--run-fixture",
+        "scenario.json",
+        "--publication-fixture",
+        "github.json",
+        "--repair-fixture",
+        "repair.json",
+    ];
+    let first = project.ok(&start);
+    assert_eq!(first["backlog"]["dispositions"][0]["status"], "completed");
+    assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
+    let published: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("github.json")).unwrap()).unwrap();
+    assert_eq!(published["pull_requests"].as_array().unwrap().len(), 1);
+    let repeated = project.ok(&start);
+    assert_eq!(repeated["id"], first["id"]);
+    assert_eq!(
+        repeated["delivery_groups"][0]["pull_request"]["number"],
+        first["delivery_groups"][0]["pull_request"]["number"]
+    );
+    let published: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("github.json")).unwrap()).unwrap();
+    assert_eq!(published["pull_requests"].as_array().unwrap().len(), 1);
+
+    let mut dependent = issue(3, "Dependent", criterion("Wait for first"));
+    dependent["blocked_by"] = json!(["github:example/project#1"]);
+    project.write("issues.json", json!({"issues":[
+        issue(1,"First",criterion("Implement first")),issue(2,"Second",criterion("Implement second")),dependent
+    ]}));
+    project.write("planning.json", json!({
+        "tickets":[ticket(2,"Implement second")],"verification":{"outcome":"verified","findings":[]}
+    }));
+    project.write("scenario.json", json!({"tickets":{
+        "github:example/project#2":{"implementation":{"files":{"second.txt":"done\n"},"outcome":"completed"},
+            "review":{"standards":{"outcome":"approved","evidence":"Reviewed"},"spec":{"outcome":"approved","evidence":"Matches issue"}}}
+    }}));
+    let second = project.ok(&start);
+    assert_eq!(second["backlog"]["dispositions"][0]["status"], "completed");
+    assert!(second["backlog"]["dispositions"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("previous backlog run"));
+    assert_eq!(second["backlog"]["dispositions"][2]["status"], "blocked");
+    assert!(second["backlog"]["dispositions"][2]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("unmerged pull request"));
+    assert_eq!(second["plan"]["tickets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        second["plan"]["tickets"][0]["id"],
+        "github:example/project#2"
+    );
+    assert_eq!(second["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        second["sessions"][0]["ticket_id"],
+        "github:example/project#2"
+    );
+    let published: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("github.json")).unwrap()).unwrap();
+    assert_eq!(published["pull_requests"].as_array().unwrap().len(), 2);
+
+    let resumed = project.ok(&[
+        "resume",
+        second["id"].as_str().unwrap(),
+        "--fixture",
+        "scenario.json",
+        "--publication-fixture",
+        "github.json",
+        "--repair-fixture",
+        "repair.json",
+    ]);
+    assert_eq!(resumed["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        resumed["delivery_groups"][0]["pull_request"]["number"],
+        second["delivery_groups"][0]["pull_request"]["number"]
+    );
+    let published: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("github.json")).unwrap()).unwrap();
+    assert_eq!(published["pull_requests"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn one_issue_start_refuses_closed_or_blocked_issues_before_creating_a_run() {
     for state in ["CLOSED", "BLOCKED"] {
         let temp = tempfile::tempdir().unwrap();
