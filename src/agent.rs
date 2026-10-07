@@ -145,13 +145,23 @@ impl<P: Provider> Adapter<P> {
         prompt: &str,
     ) -> Result<(T, Observation)> {
         let observation = self.invoke(worktree, policy, prompt)?;
-        let value = serde_json::from_str(unfence(&observation.message)).with_context(|| {
-            format!(
-                "{} final response must be the requested JSON value; observed response: {:?}",
-                P::NAME,
-                observation.message
-            )
-        })?;
+        let response = unfence(&observation.message);
+        let value = serde_json::from_str::<Value>(response)
+            .and_then(|value| match value {
+                // Some Codex turns serialize the requested JSON object as a
+                // JSON string. Decode that one additional layer before the
+                // requested response type is validated.
+                Value::String(encoded) => serde_json::from_str(&encoded),
+                value => Ok(value),
+            })
+            .and_then(serde_json::from_value::<T>)
+            .with_context(|| {
+                format!(
+                    "{} final response must be the requested JSON value; observed response: {:?}",
+                    P::NAME,
+                    observation.message
+                )
+            })?;
         Ok((value, observation))
     }
     pub fn invoke(
@@ -422,6 +432,9 @@ impl<P: Provider> crate::review::ReviewAgent for Adapter<P> {
         let prompt = format!("{}\nReturn only one JSON object with exactly these field types: outcome is a string (approved, rejected, unable-to-verify); findings is an array of objects with code (string), message (string), evidence (string), and required (boolean); evidence MUST be a nonempty string describing concrete observed behavior and naming relevant files; log MUST be a string; acceptance_checks is an optional array of authorized argv arrays (arrays of strings) derived from acceptance criteria, or empty. Evidence, log, finding message, and finding evidence are strings, never arrays or objects. Findings contain only actionable defects. Do not put positive confirmations in findings. Do not claim passing evidence for checks you did not observe.\n{}",request.instructions,serde_json::to_string_pretty(request)?);
         let (mut review, result): (crate::review::ReviewResult, Observation) =
             self.structured_at(&request.worktree, &request.isolation, &prompt)?;
+        if review.evidence.trim().is_empty() && !review.log.trim().is_empty() {
+            review.evidence = review.log.clone();
+        }
         review.log = serde_json::to_string(&result)?;
         Ok(review)
     }

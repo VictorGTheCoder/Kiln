@@ -93,6 +93,7 @@ fn implementation_context_is_redacted_before_provider_runs_or_fails() {
                 installation: "/unused".into(),
                 auth: repo.join("auth.json"),
                 model: None,
+                reasoning_effort: None,
                 timeout_seconds: 1,
             }),
             repository: repo.into(),

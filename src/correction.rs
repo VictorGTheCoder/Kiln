@@ -151,7 +151,9 @@ impl Engine {
             .rev()
             .find(|c| c.ticket_id == ticket_id)
             .is_some_and(|c| match c.outcome.as_str() {
-                "exhausted" => true,
+                // An explicit increase to the run's correction budget reopens
+                // an exhausted ticket when it grants another cycle.
+                "exhausted" => used >= limit,
                 // A stall is final unless a later review of this session brings new required findings.
                 "no-progress" => !c.review.as_ref().is_some_and(|stalled| {
                     run.reviews

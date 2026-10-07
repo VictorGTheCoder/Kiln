@@ -19,6 +19,8 @@ pub struct CodexConfig {
     pub auth: PathBuf,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     #[serde(default = "timeout")]
     pub timeout_seconds: u64,
 }
@@ -48,6 +50,9 @@ impl CodexConfig {
         .collect();
         if let Some(model) = &self.model {
             argv.extend(["--model".into(), model.clone()]);
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            argv.extend(["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]);
         }
         argv.push("-".into());
         argv

@@ -16,6 +16,7 @@ fn subprocess_events_report_usage_and_redact_credentials() {
         installation: cli,
         auth,
         model: None,
+        reasoning_effort: None,
         timeout_seconds: 5,
     };
     let mut policy = IsolationPolicy {
@@ -45,6 +46,7 @@ fn fake(script: &str, seconds: u64) -> (tempfile::TempDir, CodexAdapter, Isolati
         installation: cli,
         auth,
         model: None,
+        reasoning_effort: None,
         timeout_seconds: seconds,
     };
     let policy = IsolationPolicy {
@@ -86,6 +88,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens
         installation: cli,
         auth,
         model: None,
+        reasoning_effort: None,
         timeout_seconds: 5,
     };
     let isolation = IsolationPolicy {
@@ -197,6 +200,7 @@ printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":9,"output_toke
         installation: cli,
         auth,
         model: None,
+        reasoning_effort: None,
         timeout_seconds: 5,
     };
     let isolation = IsolationPolicy {

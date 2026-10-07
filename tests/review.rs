@@ -124,6 +124,7 @@ fn scenario(outcome: &str, axis: &str) {
                     installation: "/unavailable-codex".into(),
                     auth: auth.clone(),
                     model: None,
+                    reasoning_effort: None,
                     timeout_seconds: 1,
                 }),
             };

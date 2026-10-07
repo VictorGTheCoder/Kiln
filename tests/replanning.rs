@@ -21,7 +21,11 @@ impl Repo {
         repo.git(&["init", "-q"]);
         repo.git(&["config", "user.name", "Test"]);
         repo.git(&["config", "user.email", "test@example.com"]);
-        fs::write(repo.path.join("one.md"), "# One\n## Acceptance criteria\n- Works\n").unwrap();
+        fs::write(
+            repo.path.join("one.md"),
+            "# One\n## Acceptance criteria\n- Works\n",
+        )
+        .unwrap();
         fs::write(repo.path.join(".gitignore"), ".kiln/\n").unwrap();
         let mut config = json!({"build":["git","diff","--check"],"test":["git","diff","--check"],"startup":["git","--version"],"acceptance_criteria":["works"],"isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]}});
         for (k, v) in extra.as_object().unwrap() {
@@ -33,8 +37,16 @@ impl Repo {
         repo
     }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("git").args(args).current_dir(&self.path).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&self.path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
     fn cli(&self, args: &[&str]) -> Output {
@@ -47,7 +59,11 @@ impl Repo {
     /// `tickets` are (id, blocked_by).
     fn planned(&self, tickets: &[(&str, &[&str])]) -> String {
         let prepared = self.cli(&["prepare", "--config", "kiln.json", "--spec", "one.md"]);
-        assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
+        assert!(
+            prepared.status.success(),
+            "{}",
+            String::from_utf8_lossy(&prepared.stderr)
+        );
         let prepared: Value = serde_json::from_slice(&prepared.stdout).unwrap();
         let id = prepared["id"].as_str().unwrap().to_owned();
         let plan_tickets: Vec<Value> = tickets
@@ -56,11 +72,16 @@ impl Repo {
             .collect();
         fs::write(
             self.path.join("plan.json"),
-            json!({"tickets":plan_tickets,"verification":{"outcome":"verified","findings":[]}}).to_string(),
+            json!({"tickets":plan_tickets,"verification":{"outcome":"verified","findings":[]}})
+                .to_string(),
         )
         .unwrap();
         let planned = self.cli(&["plan", &id, "--fixture", "plan.json"]);
-        assert!(planned.status.success(), "{}", String::from_utf8_lossy(&planned.stderr));
+        assert!(
+            planned.status.success(),
+            "{}",
+            String::from_utf8_lossy(&planned.stderr)
+        );
         id
     }
     fn run(&self, id: &str, scenario: Value) -> (Output, Value) {
@@ -72,7 +93,11 @@ impl Repo {
     }
     fn inspect(&self, id: &str) -> Value {
         let out = self.cli(&["inspect", id]);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         serde_json::from_slice(&out.stdout).unwrap()
     }
 }
@@ -94,16 +119,28 @@ fn never_corrected(cycles: usize) -> Value {
     let corrections: Vec<Value> = (0..cycles)
         .map(|n| json!({"files":{"bad.txt":format!("attempt {n}")},"outcome":"completed"}))
         .collect();
-    let reviews: Vec<Value> = (0..cycles).map(|_| json!({"standards":approved(),"spec":rejected()})).collect();
+    let reviews: Vec<Value> = (0..cycles)
+        .map(|_| json!({"standards":approved(),"spec":rejected()}))
+        .collect();
     json!({"implementation":{"files":{"bad.txt":"wrong"},"outcome":"completed"},
            "review":{"standards":approved(),"spec":rejected()},
            "corrections":{"corrections":corrections,"reviews":reviews}})
 }
 fn ticket<'a>(run: &'a Value, id: &str) -> &'a Value {
-    run["scheduler"]["tickets"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()
+    run["scheduler"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap()
 }
 fn count(run: &Value, field: &str, ticket: &str) -> usize {
-    run[field].as_array().unwrap().iter().filter(|s| s["ticket_id"] == ticket).count()
+    run[field]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["ticket_id"] == ticket)
+        .count()
 }
 
 /// One replanning attempt for `id`: the revised ticket, its independent verification,
@@ -120,45 +157,91 @@ fn exhausting_then(replan: Value) -> Value {
     t
 }
 fn replans<'a>(run: &'a Value, ticket: &str) -> Vec<&'a Value> {
-    run["replans"].as_array().unwrap().iter().filter(|r| r["ticket_id"] == ticket).collect()
+    run["replans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["ticket_id"] == ticket)
+        .collect()
 }
 
 #[test]
 fn exhausted_corrections_receive_one_successful_replanning_attempt() {
     let repo = Repo::new(json!({}));
     let id = repo.planned(&[("a", &[]), ("c", &["a"])]);
-    let (out, run) = repo.run(&id, json!({"tickets":{
+    let (out, run) = repo.run(
+        &id,
+        json!({"tickets":{
         "a":exhausting_then(replanning("a","verified","good.txt",approved())),
-        "c":works("c.txt", json!(null))}}));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        "c":works("c.txt", json!(null))}}),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run["status"], "awaiting_validation");
     assert_eq!(run["scheduler"]["limits"]["replanning_attempts"], 1);
-    assert_eq!(count(&run, "corrections", "a"), 3, "replanning follows the exhausted correction cycles");
+    assert_eq!(
+        count(&run, "corrections", "a"),
+        3,
+        "replanning follows the exhausted correction cycles"
+    );
     let r = replans(&run, "a");
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["attempt"], 1);
     assert_eq!(r[0]["outcome"], "replanned");
     assert_eq!(r[0]["result"], "integrated");
     assert_eq!(r[0]["previous"]["description"], "Deliver");
-    assert!(!r[0]["failures"].as_array().unwrap().is_empty(), "the replanning context carries the unresolved findings");
-    assert_ne!(r[0]["context_id"], r[0]["verification"]["verification_context"]);
-    let plan_ticket = run["plan"]["tickets"].as_array().unwrap().iter().find(|t| t["id"] == "a").unwrap();
-    assert_eq!(plan_ticket["description"], "Deliver by a smaller revised approach");
-    let sessions: Vec<&str> = run["sessions"].as_array().unwrap().iter().filter(|s| s["ticket_id"] == "a").map(|s| s["status"].as_str().unwrap()).collect();
+    assert!(
+        !r[0]["failures"].as_array().unwrap().is_empty(),
+        "the replanning context carries the unresolved findings"
+    );
+    assert_ne!(
+        r[0]["context_id"],
+        r[0]["verification"]["verification_context"]
+    );
+    let plan_ticket = run["plan"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "a")
+        .unwrap();
+    assert_eq!(
+        plan_ticket["description"],
+        "Deliver by a smaller revised approach"
+    );
+    let sessions: Vec<&str> = run["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["ticket_id"] == "a")
+        .map(|s| s["status"].as_str().unwrap())
+        .collect();
     assert_eq!(sessions, ["superseded", "integrated"]);
     assert_eq!(ticket(&run, "a")["state"], "integrated");
-    assert_eq!(ticket(&run, "c")["state"], "integrated", "the replanned ticket releases its descendants");
+    assert_eq!(
+        ticket(&run, "c")["state"],
+        "integrated",
+        "the replanned ticket releases its descendants"
+    );
 }
 
 #[test]
 fn persistent_failure_after_replanning_blocks_only_descendants_without_retrying_forever() {
     let repo = Repo::new(json!({}));
     let id = repo.planned(&[("a", &[]), ("b", &[]), ("c", &["a"])]);
-    let (out, run) = repo.run(&id, json!({"tickets":{
+    let (out, run) = repo.run(
+        &id,
+        json!({"tickets":{
         "a":exhausting_then(replanning("a","verified","still-bad.txt",rejected())),
         "b":works("b.txt", json!(null)),
-        "c":works("c.txt", json!(null))}}));
-    assert!(!out.status.success(), "persistent failure must not report success");
+        "c":works("c.txt", json!(null))}}),
+    );
+    assert!(
+        !out.status.success(),
+        "persistent failure must not report success"
+    );
     assert_eq!(run["status"], "blocked");
     let a = ticket(&run, "a");
     assert_eq!(a["state"], "blocked");
@@ -174,8 +257,18 @@ fn persistent_failure_after_replanning_blocks_only_descendants_without_retrying_
     assert_eq!(count(&run, "sessions", "c"), 0, "descendants never start");
     let c = ticket(&run, "c");
     assert_eq!(c["state"], "waiting");
-    assert!(c["blocker"].as_str().unwrap().contains("prerequisite a is blocked"), "{c}");
-    assert_eq!(ticket(&run, "b")["state"], "integrated", "independent work continues");
+    assert!(
+        c["blocker"]
+            .as_str()
+            .unwrap()
+            .contains("prerequisite a is blocked"),
+        "{c}"
+    );
+    assert_eq!(
+        ticket(&run, "b")["state"],
+        "integrated",
+        "independent work continues"
+    );
     assert_eq!(repo.inspect(&id)["replans"], run["replans"]);
 }
 
@@ -183,23 +276,45 @@ fn persistent_failure_after_replanning_blocks_only_descendants_without_retrying_
 fn a_replanned_ticket_failing_independent_verification_is_blocked_before_new_work() {
     let repo = Repo::new(json!({}));
     let id = repo.planned(&[("a", &[])]);
-    let (out, run) = repo.run(&id, json!({"tickets":{"a":exhausting_then(replanning("a","failed","never.txt",approved()))}}));
+    let (out, run) = repo.run(
+        &id,
+        json!({"tickets":{"a":exhausting_then(replanning("a","failed","never.txt",approved()))}}),
+    );
     assert!(!out.status.success());
     let r = replans(&run, "a");
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["outcome"], "rejected");
-    assert!(r[0]["findings"].as_array().unwrap().iter().any(|f| f["code"] == "verification_not_verified"));
-    assert_eq!(count(&run, "sessions", "a"), 1, "no revised work starts from an unverified replan");
+    assert!(r[0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["code"] == "verification_not_verified"));
+    assert_eq!(
+        count(&run, "sessions", "a"),
+        1,
+        "no revised work starts from an unverified replan"
+    );
     assert_eq!(ticket(&run, "a")["exhaustion"], "replanning");
-    let plan_ticket = run["plan"]["tickets"].as_array().unwrap().iter().find(|t| t["id"] == "a").unwrap();
-    assert_eq!(plan_ticket["description"], "Deliver", "the accepted plan is unchanged");
+    let plan_ticket = run["plan"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "a")
+        .unwrap();
+    assert_eq!(
+        plan_ticket["description"], "Deliver",
+        "the accepted plan is unchanged"
+    );
 }
 
 #[test]
 fn replanning_is_configurable_and_can_be_disabled() {
     let repo = Repo::new(json!({"replanning_attempts": 0}));
     let id = repo.planned(&[("a", &[])]);
-    let (out, run) = repo.run(&id, json!({"tickets":{"a":exhausting_then(replanning("a","verified","good.txt",approved()))}}));
+    let (out, run) = repo.run(
+        &id,
+        json!({"tickets":{"a":exhausting_then(replanning("a","verified","good.txt",approved()))}}),
+    );
     assert!(!out.status.success());
     assert_eq!(run["scheduler"]["limits"]["replanning_attempts"], 0);
     assert!(run["replans"].as_array().unwrap().is_empty());
@@ -207,7 +322,10 @@ fn replanning_is_configurable_and_can_be_disabled() {
 
     let repo = Repo::new(json!({"replanning_attempts": "once"}));
     let prepared = repo.cli(&["prepare", "--config", "kiln.json", "--spec", "one.md"]);
-    assert!(!prepared.status.success(), "invalid replanning limits are rejected before launch");
+    assert!(
+        !prepared.status.success(),
+        "invalid replanning limits are rejected before launch"
+    );
     assert!(String::from_utf8_lossy(&prepared.stderr).contains("replanning_attempts"));
 }
 
@@ -215,15 +333,22 @@ fn replanning_is_configurable_and_can_be_disabled() {
 fn replanning_waits_for_remaining_run_limits() {
     let repo = Repo::new(json!({"usage_token_limit": 500}));
     let id = repo.planned(&[("a", &[])]);
-    let mut a = exhausting_then(replanning("a","verified","good.txt",approved()));
+    let mut a = exhausting_then(replanning("a", "verified", "good.txt", approved()));
     // The last correction consumes the remaining usage allowance.
     a["corrections"]["corrections"][2]["log"] = json!(usage(700, json!(null)).to_string());
     let (out, run) = repo.run(&id, json!({"tickets":{"a":a}}));
     assert!(!out.status.success());
     assert_eq!(run["status"], "limit_exhausted");
     assert_eq!(count(&run, "corrections", "a"), 3);
-    assert!(run["replans"].as_array().unwrap().is_empty(), "no replanning without remaining resources");
-    assert_eq!(ticket(&run, "a")["state"], "stopped", "the ticket stays resumable");
+    assert!(
+        run["replans"].as_array().unwrap().is_empty(),
+        "no replanning without remaining resources"
+    );
+    assert_eq!(
+        ticket(&run, "a")["state"],
+        "stopped",
+        "the ticket stays resumable"
+    );
 }
 
 #[test]
@@ -231,11 +356,15 @@ fn provider_usage_limit_during_replanning_spends_no_attempt_and_resume_replans()
     let repo = Repo::new(json!({}));
     let id = repo.planned(&[("a", &[])]);
     let mut limited = replanning("a", "verified", "good.txt", approved());
-    limited["provider_failure"] = json!("You've hit your usage limit. Upgrade to Pro or try again at 10:05 AM.");
+    limited["provider_failure"] =
+        json!("You've hit your usage limit. Upgrade to Pro or try again at 10:05 AM.");
     let (out, run) = repo.run(&id, json!({"tickets":{"a":exhausting_then(limited)}}));
     assert!(!out.status.success());
     assert_eq!(run["status"], "limit_exhausted");
-    assert_eq!(run["scheduler"]["limits"]["exhausted"]["limit"], "provider_usage");
+    assert_eq!(
+        run["scheduler"]["limits"]["exhausted"]["limit"],
+        "provider_usage"
+    );
     assert_eq!(ticket(&run, "a")["state"], "stopped");
     assert!(ticket(&run, "a")["exhaustion"].is_null());
     let r = replans(&run, "a");
@@ -244,14 +373,23 @@ fn provider_usage_limit_during_replanning_spends_no_attempt_and_resume_replans()
 
     fs::write(
         repo.path.join("scenario.json"),
-        json!({"tickets":{"a":exhausting_then(replanning("a","verified","good.txt",approved()))}}).to_string(),
+        json!({"tickets":{"a":exhausting_then(replanning("a","verified","good.txt",approved()))}})
+            .to_string(),
     )
     .unwrap();
     let resumed = repo.cli(&["resume", &id, "--fixture", "scenario.json"]);
-    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
     let run: Value = serde_json::from_slice(&resumed.stdout).unwrap();
     assert_eq!(run["status"], "awaiting_validation");
-    assert_eq!(count(&run, "corrections", "a"), 3, "completed correction cycles are not repeated");
+    assert_eq!(
+        count(&run, "corrections", "a"),
+        3,
+        "completed correction cycles are not repeated"
+    );
     let r = replans(&run, "a");
     assert_eq!(r.len(), 2);
     assert_eq!(r[1]["outcome"], "replanned");

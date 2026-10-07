@@ -41,7 +41,7 @@ pub struct ReviewResult {
     pub outcome: String,
     #[serde(default)]
     pub findings: Vec<ReviewFinding>,
-    #[serde(deserialize_with = "text")]
+    #[serde(default, deserialize_with = "text")]
     pub evidence: String,
     #[serde(default, deserialize_with = "text")]
     pub log: String,
@@ -232,6 +232,11 @@ impl Engine {
             Path::new(&session.worktree),
             &["diff", "--binary", &session.base_commit, &commit],
         )?;
+        let mut implementation_checks = session.checks.clone();
+        for previous in run.reviews.iter().filter(|r| r.session_id == session.id) {
+            implementation_checks.extend(previous.standards.checks.clone());
+            implementation_checks.extend(previous.spec.checks.clone());
+        }
         let specs = run
             .effective_specs()
             .into_iter()
@@ -271,14 +276,14 @@ impl Engine {
                 context_id: context_id.clone(),
                 axis: axis.into(),
                 author_context_id: session.context_id.clone(),
-                instructions: format!("Independently review {axis} at the exact supplied commit. Inspect the diff, changed files, and relevant documentation; report concrete observed behavior with file and line references. Report only actionable defects as findings. Do not edit files, modify Git metadata, or integrate. If you run project checks, wait for dependency installation to finish and run build, test, and typecheck commands serially; never launch wrappers that install dependencies concurrently in the same worktree. Kiln reruns configured checks itself. If unable to verify, return unable-to-verify with a concrete explanation. Approval cannot substitute for executable evidence."),
+                instructions: format!("Independently review {axis} at the exact supplied commit. Inspect the diff, changed files, and relevant documentation; report concrete observed behavior with file and line references. Report only actionable defects as findings. Do not edit files, modify Git metadata, or integrate. Kiln reruns build and test itself, but the implementation check list may not cover every verification command required by the spec. When required executable evidence is missing, select the exact authorized command from isolation.commands in acceptance_checks so Kiln runs it and records its result before your verdict; in particular, include a configured typecheck command when a criterion requires TypeScript validation and no typecheck result is listed in implementation_checks. If you run project checks, wait for dependency installation to finish and run build, test, and typecheck commands serially; never launch wrappers that install dependencies concurrently in the same worktree. If unable to verify, return unable-to-verify with a concrete explanation. Approval cannot substitute for executable evidence."),
                 isolation: run.config.isolation.clone(),
                 ticket: ticket.clone(),
                 specs: specs.clone(),
                 repository_standards: standards(&repo, &session.base_commit)?,
                 commit: commit.clone(),
                 diff: diff.clone(),
-                implementation_checks: session.checks.clone(),
+                implementation_checks: implementation_checks.clone(),
                 worktree: repo.clone(),
             };
             fs::create_dir_all(self.repository.join(".kiln/contexts"))?;

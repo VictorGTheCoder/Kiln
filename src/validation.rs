@@ -280,7 +280,12 @@ fn start(
             }
         }
         if let Some(probe_argv) = &settings.startup_probe {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            // Probes are readiness polls, not a single command allowed to
+            // consume the entire startup window. Bound each attempt so a
+            // refused connection can be retried until the application starts.
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(5));
             let result = execute(
                 policy,
                 worktree,

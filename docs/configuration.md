@@ -247,17 +247,19 @@ returning a Run; persistence redaction alone cannot sanitize an in-memory CLI re
 "codex": {
   "installation": "/opt/codex/0.160.1/codex",
   "auth": "/private/codex/auth.json",
+  "model": "gpt-6-luna",
+  "reasoning_effort": "high",
   "timeout_seconds": 1800
 }
 ```
 
-An optional `model` selects the project's chosen model. No model override is otherwise supplied. The CLI installation path takes precedence. Authorize the exact `CodexConfig::argv()` in `isolation.commands` (the executable inside the namespace is `/codex/codex`):
+An optional `model` selects the project's chosen model. An optional `reasoning_effort` sets the Codex CLI `model_reasoning_effort` override; choose a value supported by the selected model. No override is otherwise supplied. The CLI installation path takes precedence. Authorize the exact `CodexConfig::argv()` in `isolation.commands` (the executable inside the namespace is `/codex/codex`):
 
 ```json
 ["/codex/codex", "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--color", "never", "--sandbox", "danger-full-access", "-c", "approval_policy=\"never\"", "-c", "features.code_mode=false", "-"]
 ```
 
-If configuring a model, insert `"--model", "your-model"` immediately before the final `"-"`. Prompts travel through stdin so authorized argv remains stable. `network=allow-all` is required explicitly for cloud model access; `none` fails before launching. Authentication errors and missing capabilities fail explicitly. A sibling `codex-code-mode-host`, when present, is mounted as a scoped read-only runtime binary because recent installations require it even when the code_mode feature flag is disabled.
+If configuring a model, insert `"--model", "your-model"` before the final `"-"`. If configuring reasoning effort, also insert `"-c", "model_reasoning_effort=\\\"high\\\""` before the final `"-"`. Prompts travel through stdin so authorized argv remains stable. `network=allow-all` is required explicitly for cloud model access; `none` fails before launching. Authentication errors and missing capabilities fail explicitly. A sibling `codex-code-mode-host`, when present, is mounted as a scoped read-only runtime binary because recent installations require it even when the code_mode feature flag is disabled.
 
 Only the executable, optional companion and a private ephemeral copy of auth.json are mounted. No host home or full Codex configuration is exposed. The auth copy is writable for refresh, protected with private directory/file permissions, and removed when the session finishes. Auth string fields and configured secret values are redacted before event data is returned or persisted. This protects observable artifacts; it does not prevent a deliberately hostile process from encoding or transmitting credentials it is authorized to use with unrestricted network access.
 

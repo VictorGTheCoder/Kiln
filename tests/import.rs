@@ -144,6 +144,7 @@ fn import_can_independently_verify_github_tickets_with_codex() {
         installation: codex.clone(),
         auth: auth.clone(),
         model: None,
+        reasoning_effort: None,
         timeout_seconds: 5,
     };
     let mut commands = vec![vec!["git".into()]];
