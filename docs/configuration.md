@@ -265,6 +265,37 @@ The adapter observes JSONL thread identity, completed messages, actionable provi
 
 Planning generation and verification use separate fresh Codex invocations in disposable clones. `CodexPlanningAgent::structured<T>` also supports independently validated structured review responses. `CodexAdapter::invoke` is the shared launch/observation/error boundary and `stop_handle`/`stop` cancel an invocation. Timeout or cancellation terminates the sandbox process group; the PID namespace also contains descendants. There is no host execution fallback.
 
+Launching, isolation, observation, redaction, cancellation and every agent seam live in the provider-neutral `agent` module (`Adapter<P>`, `PlanningContexts<P>`, `scheduler::AgentProviders<P>`); a `Provider` supplies only its argv, credential layout and event vocabulary. `CodexAdapter`, `CodexPlanningAgent` and `CodexProviders` are aliases of those types.
+
+## Claude Code provider
+
+Every command that accepts `--codex PATH` also accepts `--claude PATH` (`import`, `plan`, `implement`, `review`, `correct`, `decide`, `replan`, `integrate`, `run`, `resume`); the two are mutually exclusive and both exclude the fixture options. Claude Code then implements, reviews, corrects, verifies plans and imports, decides, replans and revises specs, with the same engine-owned state and transitions. Configure a `claude` section:
+
+```json
+"claude": {
+  "installation": "/home/me/.local/share/claude/versions/2.1.292",
+  "credentials": "/home/me/.claude/.credentials.json",
+  "model": "sonnet",
+  "timeout_seconds": 1800
+}
+```
+
+`model` is optional; without it Claude Code's default model applies. The CLI path takes precedence over `installation` (a symlink such as `~/.local/bin/claude` is resolved to its pinned native binary). Authorize the exact `ClaudeConfig::argv()` in `isolation.commands`; the executable inside the namespace is `/claude/claude`:
+
+```json
+["/claude/claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--permission-mode", "bypassPermissions", "--strict-mcp-config"]
+```
+
+With a model, append `"--model", "your-model"`. The prompt travels on stdin. `bypassPermissions` is safe only because the external bwrap sandbox is the boundary; `--strict-mcp-config` keeps repository MCP servers out; `--no-session-persistence` leaves no resumable transcript. `network=allow-all` is required, as for Codex.
+
+Only the executable and a private copy of the credentials are mounted, at `/home/kiln/.claude/.credentials.json` in a 0700 directory with a 0600 file that is removed with the session. The copy keeps only the `claudeAiOauth` login: unrelated stored tokens (for example `mcpOAuth`) never enter the session. Every credential string, including refreshed values found in the copy after the session, is redacted from messages, logs, stderr, failures, run state and contexts.
+
+The adapter reads `stream-json` events: `system/init` gives the session identity; the final `result` event gives the response text, `usage` and `total_cost_usd`. A `result` with `is_error: true` or an `error*` subtype fails with `Claude Code provider failure: <event>` carrying the provider event intact (redacted), so usage-limit and authentication messages stay classifiable; exit status 0 never hides it. Malformed events, a missing `result`, and responses that are not the requested JSON value fail exactly as for Codex, so structured reviews and verifications become visible unable-to-verify outcomes with redacted evidence. A single surrounding Markdown code fence around a structured response is accepted for both providers.
+
+Token usage is recorded as reported (`input_tokens`, `output_tokens`, plus cache fields); limits count input plus output. `total_cost_usd` is an API-price estimate computed by the CLI, never the subscription's cost: it is recorded as `cost_estimate` while `cost` stays null, so `limits` reports it as `estimated` and never enforces a monetary ceiling against it. Stop and timeout tear down the session process group exactly like Codex.
+
+A smoke check against the real CLI is recorded in `docs/claude-smoke.md`. Known limitations: the credential copy is discarded after each session, so if Claude Code refreshes and rotates the OAuth tokens inside the sandbox, the configured file can go stale (re-login with `claude` or point `credentials` at a dedicated login); cache-read tokens are not counted against `usage_token_limit`.
+
 ## Independent review gate
 
 ```sh
@@ -375,7 +406,11 @@ After the reset, `kiln resume` (or `kiln run`) retries the interrupted step only
 completed implementation, review, correction cycles and integrations are not
 repeated.
 
-Detection is provider-agnostic. Adapters pass only the provider's own failure
+Detection is provider-agnostic. The shared `agent::Adapter::invoke` classifies
+the failure message (`message`, `error.message`, `error` or `result` field) of
+any event a `Provider` reports as `Signal::Failure`, so Codex (`provider:
+"codex"`) and Claude Code (`provider: "claude"`) are both covered without
+provider-specific code. Other adapters pass only the provider's own failure
 message (never the agent transcript) to `kiln::limits::provider_failure(provider,
 message)` and return the resulting error; it carries a typed
 `kiln::limits::ProviderLimit` when the text reports an exhausted usage or rate
