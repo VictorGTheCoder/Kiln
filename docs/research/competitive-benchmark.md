@@ -46,11 +46,11 @@ Freeze repository identity and authorization, exact base commits, actual task pr
 
 | ID | Required category | Actual task |
 | --- | --- | --- |
-| T1 | Reproducible bug | Pending repository inspection and developer confirmation. |
-| T2 | Incremental feature | Pending repository inspection and developer confirmation. |
-| T3 | Follow-up revision | Pending repository inspection and developer confirmation. |
+| T1 | Reproducible bug | Candidate from TFT Improvement System issue #28: preserve the distinct instances of duplicate champions when presenting a board transition. |
+| T2 | Incremental feature | Candidate from issue #28: connect the existing NextBoard analysis to real evidence so the user-facing feature can return useful results. The issue also permits hiding/removing the path if that feature is not intended to be active, so the desired outcome must be frozen. |
+| T3 | Follow-up revision | A separate initial task and its exact follow-up request are still needed. |
 
-These are category slots, not task proposals. Do not invent needs, seed artificial defects, or treat historical issues as current developer requests. Each slot must be replaced with the exact real need, base commit, copyable original prompt, shared provider instructions, acceptance checks, and evaluator procedure after the target repository is selected and authorized.
+T1 and T2 are sourced from the owner's open issue [#28 in TFT Improvement System](https://github.com/VictorGTheCoder/tft-improvement-system/issues/28); they remain candidates until the expected product behavior and evaluator cases are frozen. Do not invent needs, seed artificial defects, or treat historical issues as current developer requests. Each task needs the exact copyable original prompt, shared provider instructions, acceptance checks, approved Kiln spec, and evaluator procedure.
 
 Useful supplementary Rust tasks already exist as historical Kiln issues: [#33](https://github.com/VictorGTheCoder/kiln/issues/33) (HTML-escaped secret redaction), [#27](https://github.com/VictorGTheCoder/kiln/issues/27) (publication concurrent state preservation), and [#30](https://github.com/VictorGTheCoder/kiln/issues/30) (credential-field selection). They are closed. Replay requires identifying pre-fix commits, excluding future solution history, and independently confirming the starting failure. They are not launch-ready benchmark targets.
 

@@ -1,6 +1,14 @@
 # Competitive pilot readiness
 
-Status: **blocked from scored runs**. This record captures preparation under issues [#35](https://github.com/VictorGTheCoder/Kiln/issues/35) and [#36](https://github.com/VictorGTheCoder/Kiln/issues/36). No evaluation repository has been selected, no task packet is frozen, and no provider trial has started.
+Status: **blocked from scored runs**. This record captures preparation under issues [#35](https://github.com/VictorGTheCoder/Kiln/issues/35) and [#36](https://github.com/VictorGTheCoder/Kiln/issues/36). The repository and base commit are selected; task packets are not frozen, and no provider trial has started.
+
+## Selected repository
+
+- **Repository:** [VictorGTheCoder/tft-improvement-system](https://github.com/VictorGTheCoder/tft-improvement-system), a private TypeScript application for post-game TFT learning and decision review.
+- **Authorization:** the owner authorized use of this repository for the pilot in the conversation. Evaluation copies must be isolated from each other and from existing PR implementations.
+- **Frozen base commit:** `bb4806e17b842f19a83de2113f1ec9677a1be6aa` (`master`, inspected from a clean read-only clone on 2026-10-07).
+- **Repository checks:** root `npm test` runs `node test-core.js`, Overwolf capture checks, and site validation. `ui-v2` has its own Vite build and engine integration check; the exact commands for each packet still need to be fixed after selecting its code path.
+- **Existing source of real needs:** open issue [#28](https://github.com/VictorGTheCoder/tft-improvement-system/issues/28) names an unconnected NextBoard analysis path and loss of duplicate champion instances in presentation. These are candidate task sources, not frozen packets yet.
 
 ## Frozen study shape
 
@@ -31,16 +39,25 @@ Record actual start/end timestamps and deviations. Do not expose earlier provide
 
 | Prerequisite | Current evidence | State |
 | --- | --- | --- |
-| Select one real TypeScript repository | GitHub account has multiple possible TypeScript repositories (including `paperclip`, `retractify`, `tft-improvement-system`, `ImmoCheck`, `CV-FAST`, `SaaS-Boilerplate`, and `Calendar`). None has been selected or inspected for this pilot. | **Owner decision required** |
-| Authorize isolated evaluation copies | No authorization recorded. Repository ownership or visibility alone is not treated as evaluation-copy permission. | **Owner confirmation required** |
-| Name three actual developer needs | No need has been supplied or verified against a selected repository. T1/T2/T3 are category slots only. | **Owner input and repository inspection required** |
-| Freeze exact base commits and checks | Depends on selected repository and tasks. | **Pending** |
+| Select one real TypeScript repository | Owner selected `tft-improvement-system`; it contains a substantial TypeScript application. | **Complete** |
+| Authorize isolated evaluation copies | Owner said the TFT repo may be used for the pilot. Keep copies isolated and do not merge or deploy. | **Complete for pilot scope** |
+| Name three actual developer needs | Issue #28 provides two concrete needs: duplicate-champion presentation and the disconnected NextBoard path. A distinct third need and the final task/category mapping remain unidentified. | **Partially complete** |
+| Freeze exact base commits and checks | Base commit is frozen as `bb4806e17b842f19a83de2113f1ec9677a1be6aa`. Per-task checks depend on finalized task scopes. | **Partially complete** |
 | Confirm provider access and compatible environments | GitHub CLI access is available. Devin and Copilot access, account controls, and compatible execution environments are unverified. Local Codex availability alone does not prove the Kiln workflow is ready on the target. | **Owner confirmation and preflight required** |
 | Authorize usage allowances | No paid purchase or dollar allowance is assumed. Native caps and stop behavior depend on the accounts selected. | **Owner confirmation required** |
 | Freeze decision threshold | Current 30% threshold is only proposed. | **Owner decision required** |
-| Freeze three task packets | Original prompts, equivalent provider instructions, approved Kiln specs, acceptance criteria, required checks, evaluator steps, and evidence targets need the repository/task facts above. | **Pending** |
+| Freeze three task packets | Original prompts, equivalent provider instructions, approved Kiln specs, acceptance criteria, required checks, evaluator steps, and evidence targets need final task scopes. | **Pending** |
 
 Scored attempts must not start until these prerequisites are resolved and recorded. Access failures or unavailable measurements should be reported, not replaced with assumptions.
+
+## Repository inspection findings
+
+Issue #28 identifies two candidate needs, and the checked-out source confirms both concerns:
+
+- `ui-v2/src/lib/spot-analysis.ts` defines `earlyEvidence18_1 = null` and passes it to `analyzeNextBoards()`. The existing UI therefore receives `no-data` for that path. Issue #28 asks to reconnect real evidence if the feature is meant to be active, or remove/mask the inactive path. The packet must choose one observable outcome after the owner confirms the intended behavior.
+- The same file builds `Map<championId, UnitState>` for current board and bench units. Multiple copies of one champion overwrite each other, so transitions can display the wrong instance or lose its star/item details. This is a reproducible bug candidate; the packet still needs a frozen fixture and evaluator steps.
+
+The repository also has an open PR #26 containing a completed implementation for a separate Playbook 18.2 content audit. It is not selected as a benchmark task because its existing solution would create avoidable contamination.
 
 ## Attempt measurement rules
 
