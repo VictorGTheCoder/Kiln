@@ -13,11 +13,17 @@ kiln --repo /path/to/project start-backlog \
 
 Epic and tracking labels identify containers. Their open actionable issues remain independent plan candidates. Native GitHub dependencies and supported `Blocked by` issue-body references become plan edges. If acceptance criteria are absent, Kiln infers run-scoped criteria; ambiguous issues and issues with unsupported blockers stay in the durable run with a concrete `unable-to-verify` reason. Dependents of issues without an executable plan remain blocked. The scheduler continues unrelated eligible work and the run records completed, blocked, skipped, failed, and unable-to-verify issue outcomes.
 
-The deterministic graph scenario uses `--issue-fixture`, `--planning-fixture`, and `--run-fixture`. Add `--plan-only` to freeze and independently verify a graph without starting implementation.
+The deterministic graph scenario uses `--issue-fixture`, `--planning-fixture`, and `--run-fixture`. Add `--plan-only` to freeze and independently verify a graph without starting implementation or delivery.
 
 After scheduling, Kiln records dependency-connected delivery groups. Every edge
 keeps its prerequisite in the same group, so independent groups can be delivered
-without duplicating shared prerequisite work. `kiln publish RUN` rebuilds a branch
+without duplicating shared prerequisite work. A normal `start-backlog` run schedules
+the graph, then validates and publishes every eligible group and waits for required
+CI in the same command. Supply `--publication-fixture github.json` and
+`--repair-fixture repair.json` for deterministic CLI runs (or `--gh PATH` for a
+specific GitHub CLI). If verified groups exist without publication settings, Kiln
+persists a `delivery-blocked` reason and exits non-zero. `kiln publish RUN` remains
+available to retry or reconcile delivery manually. It rebuilds a branch
 for each fully integrated group, runs the configured build/test checks and the
 configured `validation.workflows` for every covered criterion, then opens or
 reconciles one draft PR for that group. Groups that are blocked, failed, or missing
@@ -39,7 +45,12 @@ Pass `--repair-fixture repair.json` for deterministic runs; its shape is
 Every repair creates a new group head and must pass fresh independent Standards and
 Spec review, configured local validation for all group criteria, and required CI
 for that exact commit. Failed or interrupted attempts stay in the run and the PR
-remains draft. Kiln does not merge, deploy, or write issue content or state.
+remains draft. `pause` and `cancel` work during required-check polling or repair;
+the latest CI evidence and group stage remain durable. `resume RUN --fixture
+scenario.json --publication-fixture github.json --repair-fixture repair.json`
+reconciles scheduler state and resumes delivery on the existing group branch and
+PR, without repeating completed ticket work. Kiln does not merge, deploy, or write
+issue content or state.
 
 `kiln start-issue` takes one open, independent GitHub issue through Kiln's existing workflow from a single CLI invocation:
 

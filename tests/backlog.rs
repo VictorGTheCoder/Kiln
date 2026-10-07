@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     path::PathBuf,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 struct Project {
@@ -312,6 +312,81 @@ fn start_backlog_freezes_and_independently_verifies_the_whole_issue_graph() {
 }
 
 #[test]
+fn start_backlog_persists_delivery_block_when_publication_is_not_configured() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let remote = temp.path().join("remote.git");
+    fs::create_dir_all(&repo).unwrap();
+    let project = Project {
+        _temp: temp,
+        repo,
+        remote,
+    };
+    project.git_at(
+        &project.repo.parent().unwrap().to_path_buf(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    project.git(&["init", "-q", "-b", "main"]);
+    project.git(&["config", "user.name", "Kiln Test"]);
+    project.git(&["config", "user.email", "kiln@example.test"]);
+    project.git(&["config", "commit.gpgsign", "false"]);
+    project.git(&["remote", "add", "origin", project.remote.to_str().unwrap()]);
+    project.write("README.md", json!("initial"));
+    project.git(&["add", "."]);
+    project.git(&["commit", "-qm", "initial"]);
+    project.git(&["push", "-q", "origin", "main"]);
+    project.write("kiln.json", json!({
+        "build":["git","diff","--check"], "test":["git","diff","--check"], "startup":["git","--version"],
+        "acceptance_criteria":["The issue is delivered after verification"],
+        "isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]}
+    }));
+    project.write("issues.json", json!({"issues":[{
+        "number":1,"url":"https://github.com/example/project/issues/1","title":"Feature",
+        "body":"## Acceptance criteria\n- Implement feature\n","labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"
+    }]}));
+    project.write("planning.json", json!({
+        "tickets":[{"id":"github:example/project#1","title":"Feature","description":"Implement feature",
+            "acceptance_criteria":["Implement feature"],"covers":["github-example-project-1.md#ac-1"],"blocked_by":[]}],
+        "verification":{"outcome":"verified","findings":[]}
+    }));
+    project.write("scenario.json", json!({"tickets":{
+        "github:example/project#1":{
+            "implementation":{"files":{"feature.txt":"done\n"},"outcome":"completed"},
+            "review":{"standards":{"outcome":"approved","evidence":"Reviewed"},"spec":{"outcome":"approved","evidence":"Matches spec"}}
+        }
+    }}));
+    let output = project.cli(&[
+        "start-backlog",
+        "--config",
+        "kiln.json",
+        "--github-repo",
+        "example/project",
+        "--issue-fixture",
+        "issues.json",
+        "--planning-fixture",
+        "planning.json",
+        "--run-fixture",
+        "scenario.json",
+    ]);
+    assert!(
+        !output.status.success(),
+        "unexpected success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("publication is not configured"));
+    let run: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(run["delivery_groups"][0]["status"], "delivery-blocked");
+    assert!(run["delivery_groups"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("publication is not configured"));
+    let stored = project.cli(&["report", run["id"].as_str().unwrap()]);
+    assert!(stored.status.success());
+    let stored: Value = serde_json::from_slice(&stored.stdout).unwrap();
+    assert_eq!(stored["delivery_groups"][0]["status"], "delivery-blocked");
+}
+
+#[test]
 fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -342,7 +417,7 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         "acceptance_criteria":["Open issue work is scheduled according to dependency edges"],
         "isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]},
         "validation":{"workflows":[{"criterion":"github-example-project-3.md#ac-1","command":["git","diff","--check"]}]},
-        "publication":{"github_repository":"example/project","target_branch":"main","remote":"origin","required_checks_timeout_seconds":1,"required_checks_poll_seconds":1}
+        "publication":{"github_repository":"example/project","target_branch":"main","remote":"origin","required_checks_timeout_seconds":30,"required_checks_poll_seconds":1}
     }));
     project.write("issues.json", json!({"issues":[
         {"number":1,"url":"https://github.com/example/project/issues/1","title":"Fails","body":acceptance("Fail this implementation"),"labels":[],"comments":[],"assignee":null,"blocked_by":[],"state":"OPEN"},
@@ -366,8 +441,20 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         "github:example/project#2":{"implementation":{"files":{"should-not-exist.txt":"bad"},"outcome":"completed"},"review":{"standards":approved,"spec":approved}},
         "github:example/project#3":{"implementation":{"files":{"independent.txt":"done"},"outcome":"completed"},"review":{"standards":approved,"spec":approved}}
     }}));
+    project.write(
+        "start-github.json",
+        json!({
+            "pull_requests":[],"required_check_names":["linux"],"check_runs":[],
+            "check_snapshots":[
+                {"required_check_names":["linux"],"check_runs":[{"pull_request":1,"commit":"current","name":"linux","status":"pending","id":"run-1"}]},
+                {"required_check_names":["linux"],"check_runs":[{"pull_request":1,"commit":"current","name":"linux","status":"pending","id":"run-2"}]},
+                {"required_check_names":["linux"],"check_runs":[{"pull_request":1,"commit":"current","name":"linux","status":"completed","conclusion":"success","id":"run-3"}]}
+            ]
+        }),
+    );
+    project.write("start-repair.json", json!({"corrections":[],"reviews":[]}));
 
-    let run = project.ok(&[
+    let start_args = [
         "start-backlog",
         "--config",
         "kiln.json",
@@ -379,7 +466,114 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         "planning.json",
         "--run-fixture",
         "scenario.json",
+        "--publication-fixture",
+        "start-github.json",
+        "--repair-fixture",
+        "start-repair.json",
+    ];
+    let child = Command::new(env!("CARGO_BIN_EXE_kiln"))
+        .args(start_args)
+        .current_dir(&project.repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let (run_id, initial_sessions) = loop {
+        let run_path = fs::read_dir(project.repo.join(".kiln/runs"))
+            .ok()
+            .and_then(|entries| {
+                entries.flatten().find_map(|entry| {
+                    (entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
+                        .then_some(entry.path())
+                })
+            });
+        if let Some(path) = run_path {
+            if let Ok(bytes) = fs::read(path) {
+                if let Ok(state) = serde_json::from_slice::<Value>(&bytes) {
+                    if state["status"] == "running"
+                        && state["delivery_groups"].as_array().is_some_and(|groups| {
+                            groups.iter().any(|group| {
+                                group["pull_request"].is_object()
+                                    && group["ci_attempts"]
+                                        .as_array()
+                                        .is_some_and(|a| !a.is_empty())
+                            })
+                        })
+                    {
+                        break (
+                            state["id"].as_str().unwrap().to_owned(),
+                            state["sessions"].as_array().unwrap().len(),
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run never reached pending CI"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let pause = project.cli(&["pause", &run_id]);
+    assert!(
+        pause.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pause.stderr)
+    );
+    let start_output = child.wait_with_output().unwrap();
+    assert!(
+        start_output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&start_output.stderr),
+        String::from_utf8_lossy(&start_output.stdout)
+    );
+    let paused: Value = serde_json::from_slice(&start_output.stdout).unwrap();
+    assert_eq!(paused["status"], "paused");
+    let paused_group = paused["delivery_groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["pull_request"].is_object())
+        .unwrap();
+    assert_eq!(paused_group["status"], "ci-pending");
+    assert_eq!(paused_group["ci_attempts"][0]["status"], "pending");
+    let paused_pr = paused_group["pull_request"].clone();
+    let resumed = project.cli(&[
+        "resume",
+        &run_id,
+        "--fixture",
+        "scenario.json",
+        "--publication-fixture",
+        "start-github.json",
+        "--repair-fixture",
+        "start-repair.json",
     ]);
+    assert!(
+        !resumed.status.success(),
+        "the unrelated failed issue remains blocked"
+    );
+    let run: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(run["status"], "blocked");
+    assert_eq!(run["sessions"].as_array().unwrap().len(), initial_sessions);
+    let resumed_group = run["delivery_groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["tickets"] == json!(["github:example/project#3"]))
+        .unwrap();
+    assert_eq!(resumed_group["status"], "verified");
+    assert_eq!(resumed_group["pull_request"]["number"], paused_pr["number"]);
+    let initial_published: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("start-github.json")).unwrap()).unwrap();
+    assert_eq!(
+        initial_published["pull_requests"].as_array().unwrap().len(),
+        1
+    );
+    let mut project_config: Value =
+        serde_json::from_slice(&fs::read(project.repo.join("kiln.json")).unwrap()).unwrap();
+    project_config["publication"]["required_checks_timeout_seconds"] = json!(1);
+    project.write("kiln.json", project_config);
 
     let dispositions = run["backlog"]["dispositions"].as_array().unwrap();
     assert_eq!(dispositions[0]["status"], "failed");
@@ -430,8 +624,8 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         independent_group["tickets"],
         json!(["github:example/project#3"])
     );
-    assert_eq!(independent_group["status"], "integrated");
-
+    assert_eq!(independent_group["pull_request"]["draft"], true);
+    assert_eq!(independent_group["status"], "verified");
     project.write(
         "github.json",
         json!({"pull_requests":[],"required_check_names":["linux"],"check_runs":[{"pull_request":1,"commit":"stale-head","name":"linux","status":"completed","conclusion":"success","id":"stale-1"}]}),
@@ -464,12 +658,12 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         .find(|g| g["tickets"] == json!(["github:example/project#3"]))
         .unwrap();
     assert_eq!(group["status"], "ci-pending");
-    assert_eq!(group["ci_attempts"][0]["checks"][0]["status"], "pending");
+    assert_eq!(group["ci_attempts"][2]["checks"][0]["status"], "pending");
     assert_eq!(
-        group["ci_attempts"][0]["checks"][0]["commit"],
+        group["ci_attempts"][2]["checks"][0]["commit"],
         group["commit"]
     );
-    assert!(!group["ci_attempts"][0]["observations"]
+    assert!(!group["ci_attempts"][2]["observations"]
         .as_array()
         .unwrap()
         .is_empty());
@@ -508,7 +702,7 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         .find(|g| g["tickets"] == json!(["github:example/project#3"]))
         .unwrap();
     assert_eq!(group["status"], "verified");
-    assert_eq!(group["ci_attempts"][0]["checks"][0]["commit"], commit);
+    assert_eq!(group["ci_attempts"][3]["checks"][0]["commit"], commit);
     assert!(group["pull_request"]["body"]
         .as_str()
         .unwrap()
@@ -553,11 +747,11 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
     assert_eq!(group["repair_attempts"], 1);
     assert_eq!(group["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(
-        group["ci_attempts"][2]["checks"][0]["conclusion"],
+        group["ci_attempts"][4]["checks"][0]["conclusion"],
         "failure"
     );
     assert_eq!(
-        group["ci_attempts"][3]["checks"][0]["commit"],
+        group["ci_attempts"][5]["checks"][0]["commit"],
         group["commit"]
     );
     assert!(group["pull_request"]["draft"].as_bool().unwrap());
@@ -612,7 +806,7 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
             .as_array()
             .unwrap()
             .len(),
-        5
+        7
     );
 }
 

@@ -39,7 +39,7 @@ enum Commands {
         #[arg(long)]
         gh: Option<PathBuf>,
     },
-    /// Freeze, plan, independently verify, and schedule the complete open issue graph.
+    /// Freeze and plan the open issue graph, schedule it, then deliver verified groups and wait for CI.
     StartBacklog {
         #[arg(long)]
         config: PathBuf,
@@ -55,6 +55,12 @@ enum Commands {
         claude: Option<PathBuf>,
         #[arg(long, conflicts_with_all = ["codex", "claude"])]
         run_fixture: Option<PathBuf>,
+        #[arg(long, conflicts_with = "gh")]
+        publication_fixture: Option<PathBuf>,
+        #[arg(long)]
+        gh: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        repair_fixture: Option<PathBuf>,
         #[arg(long)]
         plan_only: bool,
     },
@@ -198,6 +204,12 @@ enum Commands {
         /// Claude Code executable; mutually exclusive with --codex.
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
+        #[arg(long, conflicts_with = "gh")]
+        publication_fixture: Option<PathBuf>,
+        #[arg(long)]
+        gh: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        repair_fixture: Option<PathBuf>,
     },
     /// Let active ticket work settle, then pause before starting more work.
     Pause { id: String },
@@ -465,6 +477,9 @@ fn run() -> Result<()> {
             codex,
             claude,
             run_fixture,
+            publication_fixture,
+            gh,
+            repair_fixture,
             plan_only,
         } => {
             let source: Box<dyn kiln::import::IssueSource> = match issue_fixture {
@@ -530,7 +545,7 @@ fn run() -> Result<()> {
                     let config = engine.inspect(&id)?.config;
                     let repository = engine.repository.clone();
                     let isolation = config.isolation.clone();
-                    match Provider::select(codex, claude) {
+                    match Provider::select(codex.clone(), claude.clone()) {
                         Provider::Codex(path) => Box::new(
                             kiln::scheduler::CodexProviders::new(
                                 kiln::codex::CodexConfig::from_project(&config, path)?,
@@ -548,6 +563,49 @@ fn run() -> Result<()> {
             };
             let mut run = engine.run_tickets(&id, providers.as_ref())?;
             engine.record_backlog_results(&id, &mut run)?;
+            if kiln::publication::PublicationSettings::from_config(&run.config)?.is_some() {
+                let host: Box<dyn kiln::publication::PullRequestHost> = match publication_fixture {
+                    Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
+                        &engine.repository.join(path),
+                    )),
+                    None => Box::new(kiln::publication::GitHubPullRequests {
+                        program: gh.unwrap_or_else(|| "gh".into()),
+                    }),
+                };
+                if let Some(path) = repair_fixture {
+                    let repair = kiln::correction::FixtureCorrectionAgent::load(
+                        &engine.repository.join(path),
+                    )?;
+                    run = engine.publish_delivery_groups_with_repair(
+                        &id,
+                        host.as_ref(),
+                        Some((&repair, &repair)),
+                    )?;
+                } else {
+                    run = with_adapter!(
+                        Provider::select(codex.clone(), claude.clone()),
+                        &run.config,
+                        |agent| {
+                            engine.publish_delivery_groups_with_repair(
+                                &id,
+                                host.as_ref(),
+                                Some((&agent, &agent)),
+                            )?
+                        }
+                    );
+                }
+            } else if run
+                .delivery_groups
+                .iter()
+                .any(|group| group.status == "integrated")
+            {
+                run = engine.block_delivery_groups(
+                    &id,
+                    "publication is not configured; set publication.github_repository and publication.target_branch to deliver verified groups",
+                )?;
+                println!("{}", serde_json::to_string_pretty(&run)?);
+                anyhow::bail!("backlog delivery is blocked because publication is not configured");
+            }
             println!("{}", serde_json::to_string_pretty(&run)?);
             return Ok(());
         }
@@ -774,21 +832,36 @@ fn run() -> Result<()> {
             return Ok(());
         }
         command @ (Commands::Run { .. } | Commands::Resume { .. }) => {
-            let (resume, id, fixture, codex, claude) = match command {
-                Commands::Run {
-                    id,
-                    fixture,
-                    codex,
-                    claude,
-                } => (false, id, fixture, codex, claude),
-                Commands::Resume {
-                    id,
-                    fixture,
-                    codex,
-                    claude,
-                } => (true, id, fixture, codex, claude),
-                _ => unreachable!(),
-            };
+            let (resume, id, fixture, codex, claude, publication_fixture, gh, repair_fixture) =
+                match command {
+                    Commands::Run {
+                        id,
+                        fixture,
+                        codex,
+                        claude,
+                    } => (false, id, fixture, codex, claude, None, None, None),
+                    Commands::Resume {
+                        id,
+                        fixture,
+                        codex,
+                        claude,
+                        publication_fixture,
+                        gh,
+                        repair_fixture,
+                    } => (
+                        true,
+                        id,
+                        fixture,
+                        codex,
+                        claude,
+                        publication_fixture,
+                        gh,
+                        repair_fixture,
+                    ),
+                    _ => unreachable!(),
+                };
+            let delivery_codex = codex.clone();
+            let delivery_claude = claude.clone();
             let providers: Box<dyn kiln::scheduler::TicketProviders> = match fixture {
                 Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
                     &engine.repository.join(path),
@@ -825,6 +898,60 @@ fn run() -> Result<()> {
                 .is_some_and(|backlog| backlog.mode == "issue-graph")
             {
                 engine.record_backlog_results(&id, &mut run)?;
+            }
+            if run
+                .backlog
+                .as_ref()
+                .is_some_and(|b| b.mode == "issue-graph")
+            {
+                if kiln::publication::PublicationSettings::from_config(&run.config)?.is_none() {
+                    if run
+                        .delivery_groups
+                        .iter()
+                        .any(|group| group.status == "integrated")
+                    {
+                        run = engine.block_delivery_groups(
+                            &id,
+                            "publication is not configured; set publication.github_repository and publication.target_branch to deliver verified groups",
+                        )?;
+                        println!("{}", serde_json::to_string_pretty(&run)?);
+                        anyhow::bail!(
+                            "backlog delivery is blocked because publication is not configured"
+                        );
+                    }
+                } else {
+                    let host: Box<dyn kiln::publication::PullRequestHost> =
+                        match publication_fixture {
+                            Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
+                                &engine.repository.join(path),
+                            )),
+                            None => Box::new(kiln::publication::GitHubPullRequests {
+                                program: gh.unwrap_or_else(|| "gh".into()),
+                            }),
+                        };
+                    if let Some(path) = repair_fixture {
+                        let repair = kiln::correction::FixtureCorrectionAgent::load(
+                            &engine.repository.join(path),
+                        )?;
+                        run = engine.publish_delivery_groups_with_repair(
+                            &id,
+                            host.as_ref(),
+                            Some((&repair, &repair)),
+                        )?;
+                    } else {
+                        run = with_adapter!(
+                            Provider::select(delivery_codex, delivery_claude),
+                            &run.config,
+                            |agent| {
+                                engine.publish_delivery_groups_with_repair(
+                                    &id,
+                                    host.as_ref(),
+                                    Some((&agent, &agent)),
+                                )?
+                            }
+                        );
+                    }
+                }
             }
             println!("{}", serde_json::to_string_pretty(&run)?);
             if run.status == "blocked" {

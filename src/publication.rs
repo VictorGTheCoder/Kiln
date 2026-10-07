@@ -1014,6 +1014,40 @@ fn describe_group(
 }
 
 impl Engine {
+    pub fn block_delivery_groups(&self, id: &str, reason: &str) -> Result<Run> {
+        self.transact(id, |run| {
+            for group in &mut run.delivery_groups {
+                if group.status == "integrated" {
+                    group.status = "delivery-blocked".into();
+                    group.reason = Some(reason.into());
+                }
+            }
+            Ok(run.clone())
+        })
+    }
+
+    fn apply_delivery_control(&self, id: &str) -> Result<Option<Run>> {
+        let Some(action) = self.requested_control(id)? else {
+            return Ok(None);
+        };
+        let run = self.transact(id, |run| {
+            run.status = if action == "pause" {
+                "paused"
+            } else {
+                "cancelled"
+            }
+            .into();
+            for group in &mut run.delivery_groups {
+                if group.status == "awaiting-ci" {
+                    group.status = "ci-pending".into();
+                }
+            }
+            Ok(run.clone())
+        })?;
+        self.clear_control(id)?;
+        Ok(Some(run))
+    }
+
     /// Publish every independently verified dependency group in a whole-snapshot
     /// backlog. Each group gets its own branch and draft PR; one failed group
     /// never suppresses publication of unrelated verified groups.
@@ -1051,452 +1085,497 @@ impl Engine {
             std::time::Duration::from_secs(settings.required_checks_timeout_seconds.unwrap_or(600));
         let poll_interval =
             std::time::Duration::from_secs(settings.required_checks_poll_seconds.unwrap_or(5));
-        for group in initial.delivery_groups.clone() {
-            if !matches!(
-                group.status.as_str(),
-                "integrated"
-                    | "validating"
-                    | "validation-failed"
-                    | "validated"
-                    | "awaiting-ci"
-                    | "ci-failed"
-                    | "ci-pending"
-                    | "ci-unavailable"
-                    | "verified"
-            ) {
-                continue;
-            }
-            let (branch, commit) = crate::delivery::prepare_group_branch(self, &initial, &group)?;
-            let run = self.transact(id, |latest| {
-                let current = latest
-                    .delivery_groups
-                    .iter_mut()
-                    .find(|g| g.id == group.id)
-                    .context("delivery group disappeared")?;
-                current.branch = Some(branch.clone());
-                current.commit = Some(commit.clone());
-                current.status = "validating".into();
-                Ok(latest.clone())
-            })?;
-            let current_group = run
-                .delivery_groups
-                .iter()
-                .find(|g| g.id == group.id)
-                .context("delivery group missing")?;
-            let validation =
-                crate::delivery::validate_group(self, &run, current_group, &branch, &commit)?;
-            let run = self.transact(id, |latest| {
-                let current = latest
-                    .delivery_groups
-                    .iter_mut()
-                    .find(|g| g.id == group.id)
-                    .context("delivery group disappeared")?;
-                current.validation = Some(validation.clone());
-                current.status = if validation.outcome == "verified" {
-                    "validated"
-                } else {
-                    "validation-failed"
+        let prior_status = initial.status.clone();
+        self.transact(id, |run| {
+            run.status = "running".into();
+            Ok(())
+        })?;
+        let outcome = (|| -> Result<()> {
+            for group in initial.delivery_groups.clone() {
+                if self.apply_delivery_control(id)?.is_some() {
+                    bail!("delivery interrupted by run control");
                 }
-                .into();
-                current.reason = validation.failure.clone();
-                Ok(latest.clone())
-            })?;
-            if validation.outcome != "verified" {
-                continue;
-            }
-
-            let remote_ref = format!("refs/heads/{branch}");
-            let remote_tip = git(
-                &self.repository,
-                &["ls-remote", "--", &settings.remote, &remote_ref],
-            )?;
-            if remote_tip.split_whitespace().next() != Some(commit.as_str()) {
-                git(
-                    &self.repository,
-                    &[
-                        "push",
-                        "--porcelain",
-                        "--",
-                        &settings.remote,
-                        &format!("{commit}:{remote_ref}"),
-                    ],
-                )
-                .context("push dependency-group branch")?;
-            }
-            let draft = PullRequestDraft {
-                title: format!("Kiln dependency group: {}", group.id),
-                head: branch.clone(),
-                base: settings.target_branch.clone(),
-                body: describe_group(&run, &group, &validation, None, &settings),
-                draft: true,
-            };
-            let pull_request = match host.find_open(
-                &settings.github_repository,
-                &branch,
-                &settings.target_branch,
-            )? {
-                Some(mut existing) => {
-                    if existing.body != draft.body || existing.title != draft.title {
-                        host.update(&settings.github_repository, existing.number, &draft)?;
-                    }
-                    if !existing.draft {
-                        if !host.convert_to_draft(&settings.github_repository, &existing)? {
-                            bail!(
-                                "existing delivery-group pull request was not confirmed as draft"
-                            );
-                        }
-                        existing.draft = true;
-                    }
-                    PullRequest {
-                        title: draft.title.clone(),
-                        body: draft.body.clone(),
-                        ..existing
-                    }
+                if !matches!(
+                    group.status.as_str(),
+                    "integrated"
+                        | "validating"
+                        | "validation-failed"
+                        | "validated"
+                        | "awaiting-ci"
+                        | "ci-failed"
+                        | "ci-pending"
+                        | "ci-unavailable"
+                        | "verified"
+                ) {
+                    continue;
                 }
-                None => host.create(&settings.github_repository, &draft)?,
-            };
-            if pull_request.head != branch
-                || pull_request.base != settings.target_branch
-                || !pull_request.draft
-            {
-                bail!("GitHub returned a non-draft or mismatched delivery-group pull request");
-            }
-            self.transact(id, |latest| {
-                let current = latest
-                    .delivery_groups
-                    .iter_mut()
-                    .find(|g| g.id == group.id)
-                    .context("delivery group disappeared")?;
-                current.pull_request = Some(pull_request.clone());
-                current.status = "awaiting-ci".into();
-                Ok(latest.clone())
-            })?;
-            let mut head_commit = commit;
-            let mut group_validation = validation;
-            let mut pr = pull_request;
-            loop {
-                let attempt_id = format!(
-                    "{}-ci-{}",
-                    group.id,
-                    self.inspect(id)?
-                        .delivery_groups
-                        .iter()
-                        .find(|g| g.id == group.id)
-                        .map(|g| g.ci_attempts.len() + 1)
-                        .unwrap_or(1)
-                );
-                let initial_attempt = crate::delivery::CiAttempt {
-                    id: attempt_id.clone(),
-                    pull_request: pr.number,
-                    commit: head_commit.clone(),
-                    observed_unix_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)?
-                        .as_millis(),
-                    status: "pending".into(),
-                    checks: Vec::new(),
-                    failure: None,
-                    observations: Vec::new(),
-                };
-                self.transact(id, |latest| {
-                    let current = latest
-                        .delivery_groups
-                        .iter_mut()
-                        .find(|g| g.id == group.id)
-                        .context("delivery group disappeared")?;
-                    current.ci_attempts.push(initial_attempt.clone());
-                    current.status = "awaiting-ci".into();
-                    Ok(())
-                })?;
-                let _observed = crate::publication::wait_for_required_checks_observed(
-                    host,
-                    &settings.github_repository,
-                    pr.number,
-                    &head_commit,
-                    timeout,
-                    poll_interval,
-                    |observation| {
-                        let timestamp = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)?
-                            .as_millis();
-                        self.transact(id, |latest| {
-                            let current = latest
-                                .delivery_groups
-                                .iter_mut()
-                                .find(|g| g.id == group.id)
-                                .context("delivery group disappeared")?;
-                            let attempt = current
-                                .ci_attempts
-                                .iter_mut()
-                                .find(|attempt| attempt.id == attempt_id)
-                                .context("CI attempt disappeared")?;
-                            attempt.observed_unix_ms = timestamp;
-                            attempt.status = observation.status.clone();
-                            attempt.checks = observation.checks.clone();
-                            attempt.failure = observation.failure.clone();
-                            attempt.observations.push(crate::delivery::CiObservation {
-                                observed_unix_ms: timestamp,
-                                status: observation.status.clone(),
-                                checks: observation.checks.clone(),
-                                failure: observation.failure.clone(),
-                            });
-                            current.status = match observation.status.as_str() {
-                                "passed" | "no-required-checks" => "verified",
-                                "failed" => "ci-failed",
-                                "timed-out" => "ci-pending",
-                                _ => "awaiting-ci",
-                            }
-                            .into();
-                            current.reason = observation.failure.clone();
-                            Ok(())
-                        })?;
-                        Ok(())
-                    },
-                )?;
+                let (branch, commit) =
+                    crate::delivery::prepare_group_branch(self, &initial, &group)?;
                 let run = self.transact(id, |latest| {
                     let current = latest
                         .delivery_groups
                         .iter_mut()
                         .find(|g| g.id == group.id)
                         .context("delivery group disappeared")?;
-                    let attempt = current
-                        .ci_attempts
-                        .iter()
-                        .find(|attempt| attempt.id == attempt_id)
-                        .context("CI attempt disappeared")?;
-                    current.status = match attempt.status.as_str() {
-                        "passed" | "no-required-checks" => "verified",
-                        "failed" => "ci-failed",
-                        "timed-out" => "ci-pending",
-                        _ => "ci-unavailable",
-                    }
-                    .into();
-                    current.reason = attempt.failure.clone();
+                    current.branch = Some(branch.clone());
+                    current.commit = Some(commit.clone());
+                    current.status = "validating".into();
                     Ok(latest.clone())
                 })?;
-                let attempt = run
+                let current_group = run
                     .delivery_groups
                     .iter()
                     .find(|g| g.id == group.id)
-                    .and_then(|g| {
-                        g.ci_attempts
-                            .iter()
-                            .find(|attempt| attempt.id == attempt_id)
-                    })
-                    .cloned()
-                    .context("CI attempt disappeared")?;
-                let updated_group = run
-                    .delivery_groups
-                    .iter()
-                    .find(|g| g.id == group.id)
-                    .cloned()
                     .context("delivery group missing")?;
-                let body = describe_group(
-                    &run,
-                    &updated_group,
-                    &group_validation,
-                    Some(&attempt),
-                    &settings,
-                );
-                let updated_draft = PullRequestDraft {
-                    body,
-                    ..draft.clone()
-                };
-                host.update(&settings.github_repository, pr.number, &updated_draft)?;
-                self.transact(id, |latest| {
+                let validation =
+                    crate::delivery::validate_group(self, &run, current_group, &branch, &commit)?;
+                let run = self.transact(id, |latest| {
                     let current = latest
                         .delivery_groups
                         .iter_mut()
                         .find(|g| g.id == group.id)
                         .context("delivery group disappeared")?;
-                    current.pull_request = Some(PullRequest {
-                        body: updated_draft.body.clone(),
-                        ..pr.clone()
-                    });
-                    Ok(latest.clone())
-                })?;
-                if attempt.status != "failed" {
-                    break;
-                }
-                let limits = crate::limits::RunLimits::from_config(&run.config)?;
-                if updated_group.repair_attempts >= limits.correction_cycles {
-                    break;
-                }
-                let Some((corrector, reviewer)) = repair else {
-                    break;
-                };
-                // Count only after the run has durably started a provider call.
-                let started = self.transact(id, |latest| {
-                    let current = latest
-                        .delivery_groups
-                        .iter_mut()
-                        .find(|g| g.id == group.id)
-                        .context("delivery group disappeared")?;
-                    current.repair_attempts += 1;
-                    current.status = "repairing".into();
-                    Ok(latest.clone())
-                })?;
-                let mut repair_group = started
-                    .delivery_groups
-                    .iter()
-                    .find(|g| g.id == group.id)
-                    .cloned()
-                    .context("delivery group missing")?;
-                let findings: Vec<String> = attempt
-                    .checks
-                    .iter()
-                    .map(|check| {
-                        format!(
-                            "{}: status={}, conclusion={}, url={}",
-                            check.name,
-                            check.status,
-                            check.conclusion.as_deref().unwrap_or("pending"),
-                            check.url.as_deref().unwrap_or("unavailable")
-                        )
-                    })
-                    .chain(attempt.failure.iter().cloned())
-                    .collect();
-                let repaired_commit = match crate::delivery::repair_group(
-                    self,
-                    &started,
-                    &repair_group,
-                    &branch,
-                    &head_commit,
-                    &findings,
-                    corrector,
-                ) {
-                    Ok(commit) => commit,
-                    Err(error) => {
-                        self.transact(id, |latest| {
-                            let current = latest
-                                .delivery_groups
-                                .iter_mut()
-                                .find(|g| g.id == group.id)
-                                .context("delivery group disappeared")?;
-                            current.status = "repair-failed".into();
-                            current.reason = Some(format!("CI repair failed: {error:#}"));
-                            Ok(())
-                        })?;
-                        break;
-                    }
-                };
-                repair_group.commit = Some(repaired_commit.clone());
-                repair_group.status = "reviewing-repair".into();
-                let review = match crate::delivery::review_group(
-                    self,
-                    &started,
-                    &repair_group,
-                    &repaired_commit,
-                    reviewer,
-                ) {
-                    Ok(review) => review,
-                    Err(error) => {
-                        self.transact(id, |latest| {
-                            let current = latest
-                                .delivery_groups
-                                .iter_mut()
-                                .find(|g| g.id == group.id)
-                                .context("delivery group disappeared")?;
-                            current.status = "review-failed".into();
-                            current.reason = Some(format!("fresh group review failed: {error:#}"));
-                            Ok(())
-                        })?;
-                        break;
-                    }
-                };
-                self.transact(id, |latest| {
-                    let current = latest
-                        .delivery_groups
-                        .iter_mut()
-                        .find(|g| g.id == group.id)
-                        .context("delivery group disappeared")?;
-                    current.commit = Some(repaired_commit.clone());
-                    current.reviews.push(review.clone());
-                    current.status = if review.passed {
-                        "validating-repair"
-                    } else {
-                        "review-failed"
-                    }
-                    .into();
-                    current.reason = if review.passed {
-                        None
-                    } else {
-                        Some("fresh independent group review rejected the CI repair".into())
-                    };
-                    Ok(())
-                })?;
-                if !review.passed {
-                    break;
-                }
-                let refreshed = self.inspect(id)?;
-                repair_group = refreshed
-                    .delivery_groups
-                    .iter()
-                    .find(|g| g.id == group.id)
-                    .cloned()
-                    .context("delivery group missing")?;
-                let repaired_validation = crate::delivery::validate_group(
-                    self,
-                    &refreshed,
-                    &repair_group,
-                    &branch,
-                    &repaired_commit,
-                )?;
-                self.transact(id, |latest| {
-                    let current = latest
-                        .delivery_groups
-                        .iter_mut()
-                        .find(|g| g.id == group.id)
-                        .context("delivery group disappeared")?;
-                    current.validation = Some(repaired_validation.clone());
-                    current.status = if repaired_validation.outcome == "verified" {
+                    current.validation = Some(validation.clone());
+                    current.status = if validation.outcome == "verified" {
                         "validated"
                     } else {
                         "validation-failed"
                     }
                     .into();
-                    current.reason = repaired_validation.failure.clone();
-                    Ok(())
+                    current.reason = validation.failure.clone();
+                    Ok(latest.clone())
                 })?;
-                if repaired_validation.outcome != "verified" {
-                    break;
+                if validation.outcome != "verified" {
+                    continue;
                 }
+
                 let remote_ref = format!("refs/heads/{branch}");
-                git(
+                let remote_tip = git(
                     &self.repository,
-                    &[
-                        "push",
-                        "--porcelain",
-                        "--",
-                        &settings.remote,
-                        &format!("{repaired_commit}:{remote_ref}"),
-                    ],
-                )
-                .context("push corrected dependency-group branch")?;
-                let latest = self.inspect(id)?;
-                let mut revised = latest
-                    .delivery_groups
-                    .iter()
-                    .find(|g| g.id == group.id)
-                    .cloned()
-                    .context("delivery group missing")?;
-                revised.commit = Some(repaired_commit.clone());
-                revised.validation = Some(repaired_validation.clone());
-                let pending_body = describe_group(
-                    &latest,
-                    &revised,
-                    &repaired_validation,
-                    Some(&attempt),
-                    &settings,
-                );
-                let pending_draft = PullRequestDraft {
-                    body: pending_body,
-                    ..draft.clone()
+                    &["ls-remote", "--", &settings.remote, &remote_ref],
+                )?;
+                if remote_tip.split_whitespace().next() != Some(commit.as_str()) {
+                    git(
+                        &self.repository,
+                        &[
+                            "push",
+                            "--porcelain",
+                            "--",
+                            &settings.remote,
+                            &format!("{commit}:{remote_ref}"),
+                        ],
+                    )
+                    .context("push dependency-group branch")?;
+                }
+                let draft = PullRequestDraft {
+                    title: format!("Kiln dependency group: {}", group.id),
+                    head: branch.clone(),
+                    base: settings.target_branch.clone(),
+                    body: describe_group(&run, &group, &validation, None, &settings),
+                    draft: true,
                 };
-                host.update(&settings.github_repository, pr.number, &pending_draft)?;
-                pr.body = pending_draft.body;
-                head_commit = repaired_commit;
-                group_validation = repaired_validation;
+                let pull_request = match host.find_open(
+                    &settings.github_repository,
+                    &branch,
+                    &settings.target_branch,
+                )? {
+                    Some(mut existing) => {
+                        if existing.body != draft.body || existing.title != draft.title {
+                            host.update(&settings.github_repository, existing.number, &draft)?;
+                        }
+                        if !existing.draft {
+                            if !host.convert_to_draft(&settings.github_repository, &existing)? {
+                                bail!(
+                                "existing delivery-group pull request was not confirmed as draft"
+                            );
+                            }
+                            existing.draft = true;
+                        }
+                        PullRequest {
+                            title: draft.title.clone(),
+                            body: draft.body.clone(),
+                            ..existing
+                        }
+                    }
+                    None => host.create(&settings.github_repository, &draft)?,
+                };
+                if pull_request.head != branch
+                    || pull_request.base != settings.target_branch
+                    || !pull_request.draft
+                {
+                    bail!("GitHub returned a non-draft or mismatched delivery-group pull request");
+                }
+                self.transact(id, |latest| {
+                    let current = latest
+                        .delivery_groups
+                        .iter_mut()
+                        .find(|g| g.id == group.id)
+                        .context("delivery group disappeared")?;
+                    current.pull_request = Some(pull_request.clone());
+                    current.status = "awaiting-ci".into();
+                    Ok(latest.clone())
+                })?;
+                let mut head_commit = commit;
+                let mut group_validation = validation;
+                let mut pr = pull_request;
+                loop {
+                    let attempt_id = format!(
+                        "{}-ci-{}",
+                        group.id,
+                        self.inspect(id)?
+                            .delivery_groups
+                            .iter()
+                            .find(|g| g.id == group.id)
+                            .map(|g| g.ci_attempts.len() + 1)
+                            .unwrap_or(1)
+                    );
+                    let initial_attempt = crate::delivery::CiAttempt {
+                        id: attempt_id.clone(),
+                        pull_request: pr.number,
+                        commit: head_commit.clone(),
+                        observed_unix_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)?
+                            .as_millis(),
+                        status: "pending".into(),
+                        checks: Vec::new(),
+                        failure: None,
+                        observations: Vec::new(),
+                    };
+                    self.transact(id, |latest| {
+                        let current = latest
+                            .delivery_groups
+                            .iter_mut()
+                            .find(|g| g.id == group.id)
+                            .context("delivery group disappeared")?;
+                        current.ci_attempts.push(initial_attempt.clone());
+                        current.status = "awaiting-ci".into();
+                        Ok(())
+                    })?;
+                    let _observed = crate::publication::wait_for_required_checks_observed(
+                        host,
+                        &settings.github_repository,
+                        pr.number,
+                        &head_commit,
+                        timeout,
+                        poll_interval,
+                        |observation| {
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)?
+                                .as_millis();
+                            self.transact(id, |latest| {
+                                let current = latest
+                                    .delivery_groups
+                                    .iter_mut()
+                                    .find(|g| g.id == group.id)
+                                    .context("delivery group disappeared")?;
+                                let attempt = current
+                                    .ci_attempts
+                                    .iter_mut()
+                                    .find(|attempt| attempt.id == attempt_id)
+                                    .context("CI attempt disappeared")?;
+                                attempt.observed_unix_ms = timestamp;
+                                attempt.status = observation.status.clone();
+                                attempt.checks = observation.checks.clone();
+                                attempt.failure = observation.failure.clone();
+                                attempt.observations.push(crate::delivery::CiObservation {
+                                    observed_unix_ms: timestamp,
+                                    status: observation.status.clone(),
+                                    checks: observation.checks.clone(),
+                                    failure: observation.failure.clone(),
+                                });
+                                current.status = match observation.status.as_str() {
+                                    "passed" | "no-required-checks" => "verified",
+                                    "failed" => "ci-failed",
+                                    "timed-out" => "ci-pending",
+                                    _ => "awaiting-ci",
+                                }
+                                .into();
+                                current.reason = observation.failure.clone();
+                                Ok(())
+                            })?;
+                            if self.apply_delivery_control(id)?.is_some() {
+                                bail!("delivery interrupted by run control");
+                            }
+                            Ok(())
+                        },
+                    );
+                    if let Err(error) = _observed {
+                        if matches!(self.inspect(id)?.status.as_str(), "paused" | "cancelled") {
+                            bail!("delivery interrupted by run control: {error:#}");
+                        }
+                        return Err(error);
+                    }
+                    let run = self.transact(id, |latest| {
+                        let current = latest
+                            .delivery_groups
+                            .iter_mut()
+                            .find(|g| g.id == group.id)
+                            .context("delivery group disappeared")?;
+                        let attempt = current
+                            .ci_attempts
+                            .iter()
+                            .find(|attempt| attempt.id == attempt_id)
+                            .context("CI attempt disappeared")?;
+                        current.status = match attempt.status.as_str() {
+                            "passed" | "no-required-checks" => "verified",
+                            "failed" => "ci-failed",
+                            "timed-out" => "ci-pending",
+                            _ => "ci-unavailable",
+                        }
+                        .into();
+                        current.reason = attempt.failure.clone();
+                        Ok(latest.clone())
+                    })?;
+                    let attempt = run
+                        .delivery_groups
+                        .iter()
+                        .find(|g| g.id == group.id)
+                        .and_then(|g| {
+                            g.ci_attempts
+                                .iter()
+                                .find(|attempt| attempt.id == attempt_id)
+                        })
+                        .cloned()
+                        .context("CI attempt disappeared")?;
+                    let updated_group = run
+                        .delivery_groups
+                        .iter()
+                        .find(|g| g.id == group.id)
+                        .cloned()
+                        .context("delivery group missing")?;
+                    let body = describe_group(
+                        &run,
+                        &updated_group,
+                        &group_validation,
+                        Some(&attempt),
+                        &settings,
+                    );
+                    let updated_draft = PullRequestDraft {
+                        body,
+                        ..draft.clone()
+                    };
+                    host.update(&settings.github_repository, pr.number, &updated_draft)?;
+                    self.transact(id, |latest| {
+                        let current = latest
+                            .delivery_groups
+                            .iter_mut()
+                            .find(|g| g.id == group.id)
+                            .context("delivery group disappeared")?;
+                        current.pull_request = Some(PullRequest {
+                            body: updated_draft.body.clone(),
+                            ..pr.clone()
+                        });
+                        Ok(latest.clone())
+                    })?;
+                    if attempt.status != "failed" {
+                        break;
+                    }
+                    let limits = crate::limits::RunLimits::from_config(&run.config)?;
+                    if updated_group.repair_attempts >= limits.correction_cycles {
+                        break;
+                    }
+                    let Some((corrector, reviewer)) = repair else {
+                        break;
+                    };
+                    if self.apply_delivery_control(id)?.is_some() {
+                        bail!("delivery interrupted by run control");
+                    }
+                    // Count only after the run has durably started a provider call.
+                    let started = self.transact(id, |latest| {
+                        let current = latest
+                            .delivery_groups
+                            .iter_mut()
+                            .find(|g| g.id == group.id)
+                            .context("delivery group disappeared")?;
+                        current.repair_attempts += 1;
+                        current.status = "repairing".into();
+                        Ok(latest.clone())
+                    })?;
+                    let mut repair_group = started
+                        .delivery_groups
+                        .iter()
+                        .find(|g| g.id == group.id)
+                        .cloned()
+                        .context("delivery group missing")?;
+                    let findings: Vec<String> = attempt
+                        .checks
+                        .iter()
+                        .map(|check| {
+                            format!(
+                                "{}: status={}, conclusion={}, url={}",
+                                check.name,
+                                check.status,
+                                check.conclusion.as_deref().unwrap_or("pending"),
+                                check.url.as_deref().unwrap_or("unavailable")
+                            )
+                        })
+                        .chain(attempt.failure.iter().cloned())
+                        .collect();
+                    let repaired_commit = match crate::delivery::repair_group(
+                        self,
+                        &started,
+                        &repair_group,
+                        &branch,
+                        &head_commit,
+                        &findings,
+                        corrector,
+                    ) {
+                        Ok(commit) => commit,
+                        Err(error) => {
+                            self.transact(id, |latest| {
+                                let current = latest
+                                    .delivery_groups
+                                    .iter_mut()
+                                    .find(|g| g.id == group.id)
+                                    .context("delivery group disappeared")?;
+                                current.status = "repair-failed".into();
+                                current.reason = Some(format!("CI repair failed: {error:#}"));
+                                Ok(())
+                            })?;
+                            break;
+                        }
+                    };
+                    if self.apply_delivery_control(id)?.is_some() {
+                        bail!("delivery interrupted by run control");
+                    }
+                    repair_group.commit = Some(repaired_commit.clone());
+                    repair_group.status = "reviewing-repair".into();
+                    let review = match crate::delivery::review_group(
+                        self,
+                        &started,
+                        &repair_group,
+                        &repaired_commit,
+                        reviewer,
+                    ) {
+                        Ok(review) => review,
+                        Err(error) => {
+                            self.transact(id, |latest| {
+                                let current = latest
+                                    .delivery_groups
+                                    .iter_mut()
+                                    .find(|g| g.id == group.id)
+                                    .context("delivery group disappeared")?;
+                                current.status = "review-failed".into();
+                                current.reason =
+                                    Some(format!("fresh group review failed: {error:#}"));
+                                Ok(())
+                            })?;
+                            break;
+                        }
+                    };
+                    if self.apply_delivery_control(id)?.is_some() {
+                        bail!("delivery interrupted by run control");
+                    }
+                    self.transact(id, |latest| {
+                        let current = latest
+                            .delivery_groups
+                            .iter_mut()
+                            .find(|g| g.id == group.id)
+                            .context("delivery group disappeared")?;
+                        current.commit = Some(repaired_commit.clone());
+                        current.reviews.push(review.clone());
+                        current.status = if review.passed {
+                            "validating-repair"
+                        } else {
+                            "review-failed"
+                        }
+                        .into();
+                        current.reason = if review.passed {
+                            None
+                        } else {
+                            Some("fresh independent group review rejected the CI repair".into())
+                        };
+                        Ok(())
+                    })?;
+                    if !review.passed {
+                        break;
+                    }
+                    let refreshed = self.inspect(id)?;
+                    repair_group = refreshed
+                        .delivery_groups
+                        .iter()
+                        .find(|g| g.id == group.id)
+                        .cloned()
+                        .context("delivery group missing")?;
+                    let repaired_validation = crate::delivery::validate_group(
+                        self,
+                        &refreshed,
+                        &repair_group,
+                        &branch,
+                        &repaired_commit,
+                    )?;
+                    self.transact(id, |latest| {
+                        let current = latest
+                            .delivery_groups
+                            .iter_mut()
+                            .find(|g| g.id == group.id)
+                            .context("delivery group disappeared")?;
+                        current.validation = Some(repaired_validation.clone());
+                        current.status = if repaired_validation.outcome == "verified" {
+                            "validated"
+                        } else {
+                            "validation-failed"
+                        }
+                        .into();
+                        current.reason = repaired_validation.failure.clone();
+                        Ok(())
+                    })?;
+                    if repaired_validation.outcome != "verified" {
+                        break;
+                    }
+                    if self.apply_delivery_control(id)?.is_some() {
+                        bail!("delivery interrupted by run control");
+                    }
+                    let remote_ref = format!("refs/heads/{branch}");
+                    git(
+                        &self.repository,
+                        &[
+                            "push",
+                            "--porcelain",
+                            "--",
+                            &settings.remote,
+                            &format!("{repaired_commit}:{remote_ref}"),
+                        ],
+                    )
+                    .context("push corrected dependency-group branch")?;
+                    let latest = self.inspect(id)?;
+                    let mut revised = latest
+                        .delivery_groups
+                        .iter()
+                        .find(|g| g.id == group.id)
+                        .cloned()
+                        .context("delivery group missing")?;
+                    revised.commit = Some(repaired_commit.clone());
+                    revised.validation = Some(repaired_validation.clone());
+                    let pending_body = describe_group(
+                        &latest,
+                        &revised,
+                        &repaired_validation,
+                        Some(&attempt),
+                        &settings,
+                    );
+                    let pending_draft = PullRequestDraft {
+                        body: pending_body,
+                        ..draft.clone()
+                    };
+                    host.update(&settings.github_repository, pr.number, &pending_draft)?;
+                    pr.body = pending_draft.body;
+                    head_commit = repaired_commit;
+                    group_validation = repaired_validation;
+                }
             }
+            Ok(())
+        })();
+        let latest = self.inspect(id)?;
+        if matches!(latest.status.as_str(), "paused" | "cancelled") {
+            return Ok(latest);
+        }
+        self.transact(id, |run| {
+            run.status = prior_status.clone();
+            Ok(())
+        })?;
+        if let Err(error) = outcome {
+            return Err(error);
         }
         self.inspect(id)
     }
