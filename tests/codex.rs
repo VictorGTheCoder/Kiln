@@ -1,5 +1,6 @@
 use kiln::{
-    codex::{CodexAdapter, CodexConfig},
+    codex::{CodexAdapter, CodexConfig, CodexPlanningAgent},
+    planning::{PlanningAgent, VerificationRequest},
     sandbox::IsolationPolicy,
 };
 use std::{fs, os::unix::fs::PermissionsExt};
@@ -54,6 +55,95 @@ fn fake(script: &str, seconds: u64) -> (tempfile::TempDir, CodexAdapter, Isolati
     };
     (dir, CodexAdapter::new(config), policy)
 }
+
+#[test]
+fn verified_planning_prompt_requires_findings_to_be_empty() {
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cli = dir.path().join("codex");
+    fs::write(
+        &cli,
+        r##"#!/bin/sh
+prompt=$(cat)
+printf '%s\n' '{"type":"thread.started","thread_id":"verify-contract"}'
+case "$prompt" in
+  *"A verified outcome must have an empty findings array"*)
+    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"verified\",\"findings\":[]}"}}'
+    ;;
+  *)
+    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"verified\",\"findings\":[{\"code\":\"COVERAGE_CONFIRMED\",\"message\":\"All requirements are covered\"}]}"}}'
+    ;;
+esac
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}'
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+    let auth = dir.path().join("auth.json");
+    fs::write(&auth, r#"{"tokens":{"access_token":"private-auth-value"}}"#).unwrap();
+    let config = CodexConfig {
+        installation: cli,
+        auth,
+        model: None,
+        timeout_seconds: 5,
+    };
+    let isolation = IsolationPolicy {
+        network: "allow-all".into(),
+        runtime: "system".into(),
+        commands: vec![config.argv()],
+        secrets: Default::default(),
+    };
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@localhost"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fs::write(
+        repo.join("one.md"),
+        "# Feature\n## Acceptance criteria\n- Works\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-qm", "initial"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+
+    let agent = CodexPlanningAgent {
+        adapter: CodexAdapter::new(config),
+        repository: repo,
+        isolation,
+    };
+    let verification = agent
+        .verify(&VerificationRequest {
+            context_id: "verify-contract".into(),
+            instructions: "Compare proposed tickets with requirements.".into(),
+            specs: vec![],
+            requirements: vec![],
+            tickets: vec![],
+        })
+        .unwrap();
+    assert_eq!(verification.outcome, "verified");
+    assert!(verification.findings.is_empty());
+}
+
 #[test]
 fn exit_zero_with_provider_error_is_failure() {
     let (dir, adapter, policy) = fake(
