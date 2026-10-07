@@ -433,6 +433,14 @@ impl crate::replanning::ReplanningAgent for CodexPlanningAgent {
         self.structured(&format!("{}\nReturn only one JSON ticket object with id (unchanged), title, description, acceptance_criteria, covers (exact requirement IDs), blocked_by. Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
     }
 }
+impl crate::spec_replanning::SpecReplanningAgent for CodexPlanningAgent {
+    fn revise(
+        &self,
+        request: &crate::spec_replanning::SpecReplanRequest,
+    ) -> Result<Vec<crate::planning::Ticket>> {
+        self.structured(&format!("{}\nReturn only a JSON array of complete revised or new tickets, each with id, title, description, acceptance_criteria, covers (exact requirement IDs), blocked_by. Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
+    }
+}
 impl CodexConfig {
     pub fn from_project(
         config: &crate::ProjectConfig,

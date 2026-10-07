@@ -34,6 +34,9 @@ pub struct ImplementationSession {
     pub checks: Vec<CheckResult>,
     pub verification_passed: bool,
     pub failure: Option<String>,
+    /// Input version (spec revision) the session was produced under; 0 = frozen specs.
+    #[serde(default)]
+    pub input_version: u32,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ImplementationRequest {
@@ -208,6 +211,7 @@ impl Engine {
             checks: Vec::new(),
             verification_passed: false,
             failure: None,
+            input_version: run.input_version(),
         };
         run.sessions.push(session.clone());
         Ok((run.clone(), session, ticket, prerequisites))
@@ -349,6 +353,11 @@ impl Engine {
         self.transact(id, |latest| {
             let target = latest.sessions.iter_mut().find(|s| s.id == session.id)
                 .context("reserved session is missing")?;
+            // A spec replan invalidated this session while it ran: keep the late
+            // result inspectable but never integrable.
+            if target.status == "superseded" {
+                session.status = "superseded".into();
+            }
             *target = session;
             Ok(latest.clone())
         })
