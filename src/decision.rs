@@ -3,9 +3,9 @@
 //! second, specs third. The engine (not the agent) ranks the positions and rejects
 //! a proposal that is not governed by the highest-ranked source present.
 use crate::{planning::Finding, Engine, Run, SpecRevision};
-use sha2::{Digest, Sha256};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub const PRODUCT_OBJECTIVE: &str = "product_objective";
@@ -89,7 +89,8 @@ pub struct FixtureDecisionAgent {
 }
 impl FixtureDecisionAgent {
     pub fn load(path: &Path) -> Result<Self> {
-        serde_json::from_slice(&std::fs::read(path)?).context("invalid deterministic decision fixture")
+        serde_json::from_slice(&std::fs::read(path)?)
+            .context("invalid deterministic decision fixture")
     }
 }
 impl DecisionAgent for FixtureDecisionAgent {
@@ -98,10 +99,16 @@ impl DecisionAgent for FixtureDecisionAgent {
     }
 }
 impl crate::planning::PlanningAgent for FixtureDecisionAgent {
-    fn generate(&self, _: &crate::planning::PlanningRequest) -> Result<Vec<crate::planning::Ticket>> {
+    fn generate(
+        &self,
+        _: &crate::planning::PlanningRequest,
+    ) -> Result<Vec<crate::planning::Ticket>> {
         bail!("decision fixtures do not generate plans")
     }
-    fn verify(&self, _: &crate::planning::VerificationRequest) -> Result<crate::planning::Verification> {
+    fn verify(
+        &self,
+        _: &crate::planning::VerificationRequest,
+    ) -> Result<crate::planning::Verification> {
         Ok(self.verification.clone())
     }
 }
@@ -129,10 +136,15 @@ pub struct Decision {
 }
 
 fn configured_statement(run: &Run, key: &str, reference: &str) -> Option<String> {
-    run.config.extensions.get(key)?.as_array()?.iter().find_map(|entry| {
-        (entry.get("id")?.as_str()? == reference)
-            .then(|| entry.get("statement")?.as_str().map(Into::into))?
-    })
+    run.config
+        .extensions
+        .get(key)?
+        .as_array()?
+        .iter()
+        .find_map(|entry| {
+            (entry.get("id")?.as_str()? == reference)
+                .then(|| entry.get("statement")?.as_str().map(Into::into))?
+        })
 }
 fn source_statement(run: &Run, position: &Position) -> Result<String> {
     let found = match position.source.as_str() {
@@ -180,7 +192,8 @@ impl Engine {
         let mut positions = Vec::new();
         for p in &ambiguity.positions {
             positions.push(RankedPosition {
-                rank: rank(&p.source).with_context(|| format!("unknown decision source {}", p.source))?,
+                rank: rank(&p.source)
+                    .with_context(|| format!("unknown decision source {}", p.source))?,
                 source: p.source.clone(),
                 reference: p.reference.clone(),
                 statement: p.statement.clone(),
@@ -197,7 +210,11 @@ impl Engine {
             question: ambiguity.question.clone(),
             positions: positions.clone(),
             specs: run.effective_specs(),
-            tickets: run.plan.as_ref().map(|p| p.tickets.clone()).unwrap_or_default(),
+            tickets: run
+                .plan
+                .as_ref()
+                .map(|p| p.tickets.clone())
+                .unwrap_or_default(),
         })?;
         let mut findings = Vec::new();
         let top = positions[0].rank;
@@ -208,7 +225,10 @@ impl Engine {
         match &governing {
             None => findings.push(Finding {
                 code: "unknown_governing_position".into(),
-                message: format!("{} is not one of the recorded positions", proposal.governing),
+                message: format!(
+                    "{} is not one of the recorded positions",
+                    proposal.governing
+                ),
             }),
             Some(g) if g.rank != top => findings.push(Finding {
                 code: "hierarchy_violation".into(),
@@ -219,7 +239,9 @@ impl Engine {
             }),
             Some(_) => {}
         }
-        if proposal.rationale.trim().is_empty() || proposal.evidence.iter().all(|e| e.trim().is_empty()) {
+        if proposal.rationale.trim().is_empty()
+            || proposal.evidence.iter().all(|e| e.trim().is_empty())
+        {
             findings.push(Finding {
                 code: "missing_rationale".into(),
                 message: "a decision must preserve its rationale and evidence".into(),
@@ -228,13 +250,19 @@ impl Engine {
         let mut revision = None;
         let mut reverification = None;
         let mut adopted_plan = None;
-        if findings.is_empty() && (proposal.spec_revision.is_some() || !proposal.tickets.is_empty()) {
+        if findings.is_empty() && (proposal.spec_revision.is_some() || !proposal.tickets.is_empty())
+        {
             let mut specs = run.effective_specs();
             if let Some(proposed) = &proposal.spec_revision {
                 let spec = specs
                     .iter_mut()
                     .find(|s| s.path == proposed.path)
-                    .with_context(|| format!("spec revision targets {}, which is not a frozen spec of this run", proposed.path))?;
+                    .with_context(|| {
+                        format!(
+                            "spec revision targets {}, which is not a frozen spec of this run",
+                            proposed.path
+                        )
+                    })?;
                 let sha = format!("{:x}", Sha256::digest(proposed.content.as_bytes()));
                 revision = Some(SpecRevision {
                     version: run.spec_revisions.len() as u32 + 1,
@@ -249,10 +277,23 @@ impl Engine {
                 spec.content = proposed.content.clone();
                 spec.content_sha256 = sha;
             }
-            let plan = reverify(&run, &specs, &proposal.tickets, verifier, &decision_id, &context_id)?;
+            let plan = reverify(
+                &run,
+                &specs,
+                &proposal.tickets,
+                &[],
+                verifier,
+                &decision_id,
+                &context_id,
+            )?;
             findings.extend(plan.findings.iter().cloned());
             if let Some(r) = &mut revision {
-                r.status = if plan.executable { "verified" } else { "rejected" }.into();
+                r.status = if plan.executable {
+                    "verified"
+                } else {
+                    "rejected"
+                }
+                .into();
             }
             if plan.executable {
                 adopted_plan = Some(plan.clone());
@@ -269,7 +310,12 @@ impl Engine {
             resolution: proposal.resolution,
             rationale: proposal.rationale,
             evidence: proposal.evidence,
-            outcome: if findings.is_empty() { "resolved" } else { "rejected" }.into(),
+            outcome: if findings.is_empty() {
+                "resolved"
+            } else {
+                "rejected"
+            }
+            .into(),
             findings,
             spec_revision: revision.as_ref().map(|r| r.version),
             reverification,
@@ -293,6 +339,7 @@ pub(crate) fn reverify(
     run: &Run,
     specs: &[crate::FrozenSpec],
     revised: &[crate::planning::Ticket],
+    removed: &[String],
     verifier: &dyn crate::planning::PlanningAgent,
     origin: &str,
     origin_context: &str,
@@ -304,6 +351,7 @@ pub(crate) fn reverify(
         .context("revising work requires an independently verified executable plan")?
         .tickets
         .clone();
+    tickets.retain(|ticket| !removed.contains(&ticket.id));
     for t in revised {
         match tickets.iter_mut().find(|x| x.id == t.id) {
             Some(existing) => *existing = t.clone(),

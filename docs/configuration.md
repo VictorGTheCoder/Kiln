@@ -338,7 +338,7 @@ presents them, with observed usage and any exhaustion, in `scheduler.limits`
 | `duration_limit_seconds` | none | Wall-clock budget of one `kiln run` invocation. |
 | `usage_token_limit` | none | Cumulative provider tokens observed across the run. |
 | `cost_limit_usd` | none | Monetary ceiling; there is no default ceiling. |
-| `limit_policy` | `settle` | `settle` lets in-flight provider invocations finish; `stop` cancels them through their stop handles. |
+| `limit_policy` | `settle` | `settle` lets active work finish; `stop` cancels provider invocations and supervised sandbox build/test checks, including their child processes. |
 
 Usage is accounted from recorded provider observations (`usage`, `cost`,
 `cost_estimate` in session and review logs), once per provider context.
@@ -422,9 +422,11 @@ Each named spec must be a frozen input of the run. Changed specs become new
 `spec_revisions` (with `replan_id`); the highest verified revision version is the
 run's input version (0 = frozen specs). Requirements whose criterion changed, was
 added or was removed are `changed_requirements`; tickets covering them are
-`affected_tickets`. A fresh session returns revised (same id) or new tickets, and
-the whole plan is independently reverified against the revised specs in a separate
-context. Fixture shape: `{"tickets":[...], "verification":{"outcome","findings"}}`.
+`affected_tickets`. A fresh session returns revised (same id) or new tickets and
+lists obsolete affected tickets explicitly in `remove_ticket_ids`. The whole plan
+is independently reverified against the revised specs in a separate context;
+unknown blockers and dependency cycles still reject it. Fixture shape:
+`{"tickets":[...], "remove_ticket_ids":[], "verification":{"outcome","findings"}}`.
 
 Only a `replanned` outcome takes effect (`kiln replan` exits unsuccessfully
 otherwise, and a `rejected` revision stays visible without changing anything):

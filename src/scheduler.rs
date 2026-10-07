@@ -88,6 +88,7 @@ struct Gate<'a> {
     limits: RunLimits,
     started: Instant,
     exhausted: Mutex<Option<LimitExhaustion>>,
+    command_cancellation: crate::sandbox::CommandCancellation,
     providers: &'a dyn TicketProviders,
 }
 impl Gate<'_> {
@@ -102,10 +103,14 @@ impl Gate<'_> {
         if current.is_none() {
             *current = Some(exhaustion);
             if self.limits.limit_policy == crate::limits::STOP {
+                self.command_cancellation.cancel();
                 self.providers.stop_active();
             }
         }
-        current.as_ref().map(|e| e.reason.clone()).unwrap_or_default()
+        current
+            .as_ref()
+            .map(|e| e.reason.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -141,7 +146,10 @@ enum Event {
     /// The ticket left its implementation phase and released its slot.
     Implemented(String, Option<String>),
     Integrating(String),
-    Finished(String, std::result::Result<(), (String, Option<&'static str>)>),
+    Finished(
+        String,
+        std::result::Result<(), (String, Option<&'static str>)>,
+    ),
 }
 
 impl Engine {
@@ -217,6 +225,7 @@ impl Engine {
             limits: state.limits.as_ref().expect("limits").configured.clone(),
             started: Instant::now(),
             exhausted: Mutex::new(None),
+            command_cancellation: crate::sandbox::CommandCancellation::default(),
             providers,
         };
         let deadline = gate.limits.duration().map(|d| gate.started + d);
@@ -245,11 +254,24 @@ impl Engine {
                     let integration = &integration;
                     let gate = &gate;
                     scope.spawn(move || {
-                        let result = self.ticket_pipeline(id, &ticket, gate, integration, &sender);
+                        let result = crate::sandbox::with_command_cancellation(
+                            gate.command_cancellation.clone(),
+                            || self.ticket_pipeline(id, &ticket, gate, integration, &sender),
+                        );
+                        let result = match (result, gate.exhausted()) {
+                            (Err(_), Some(exhaustion))
+                                if gate.limits.limit_policy == crate::limits::STOP =>
+                            {
+                                Err(Halt::Limit(exhaustion.reason).into())
+                            }
+                            (result, _) => result,
+                        };
                         // Settle the outcome of revised work; a run-limit stop stays open.
                         let settled = match &result {
                             Ok(()) => Some("integrated"),
-                            Err(e) if matches!(e.downcast_ref::<Halt>(), Some(Halt::Limit(_))) => None,
+                            Err(e) if matches!(e.downcast_ref::<Halt>(), Some(Halt::Limit(_))) => {
+                                None
+                            }
                             Err(_) => Some("blocked"),
                         };
                         let result = match settled.map(|r| self.settle_replanning(id, &ticket, r)) {
@@ -398,7 +420,12 @@ impl Engine {
                 "replanning attempt {} for ticket {ticket} {}: {}",
                 attempt.attempt,
                 attempt.outcome,
-                attempt.findings.iter().map(|f| f.message.as_str()).collect::<Vec<_>>().join("; ")
+                attempt
+                    .findings
+                    .iter()
+                    .map(|f| f.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ))
             .into());
         }
@@ -445,6 +472,7 @@ impl Engine {
                     self.implement_ticket(id, ticket, implementer.as_ref())?
                 }
             };
+            self.checkpoint(id, gate)?;
             let mut session = latest_session(&run, ticket)?;
             if session.status == "implemented"
                 && !run.reviews.iter().any(|r| r.session_id == session.id)
@@ -693,8 +721,8 @@ impl FixtureScenario {
         )?;
         let replanned = self.replanned.lock().is_ok_and(|r| r.contains(ticket));
         if let (true, Some(value)) = (replanned, &spec.replanning) {
-            let r: ScenarioReplanning = serde_json::from_value(value.clone())
-                .context("invalid replanning fixture")?;
+            let r: ScenarioReplanning =
+                serde_json::from_value(value.clone()).context("invalid replanning fixture")?;
             spec.implementation = r.implementation;
             spec.review = r.review;
             spec.corrections = None;
@@ -795,10 +823,16 @@ impl crate::replanning::ReplanningAgent for ScenarioReplanner<'_> {
     }
 }
 impl crate::planning::PlanningAgent for ScenarioReplanner<'_> {
-    fn generate(&self, _: &crate::planning::PlanningRequest) -> Result<Vec<crate::planning::Ticket>> {
+    fn generate(
+        &self,
+        _: &crate::planning::PlanningRequest,
+    ) -> Result<Vec<crate::planning::Ticket>> {
         bail!("replanning fixtures do not generate plans")
     }
-    fn verify(&self, _: &crate::planning::VerificationRequest) -> Result<crate::planning::Verification> {
+    fn verify(
+        &self,
+        _: &crate::planning::VerificationRequest,
+    ) -> Result<crate::planning::Verification> {
         Ok(self.spec.verification.clone())
     }
 }

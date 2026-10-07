@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -136,7 +136,11 @@ impl Engine {
     pub fn lock_run(&self, id: &str, purpose: &str) -> Result<RunLock> {
         validate_id(id)?;
         fs::create_dir_all(self.runs_dir())?;
-        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
             .open(self.runs_dir().join(format!("{id}.{purpose}.lock")))?;
         use std::os::fd::AsRawFd;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
@@ -149,13 +153,67 @@ impl Engine {
     pub fn own_run(&self, id: &str) -> Result<RunLock> {
         validate_id(id)?;
         fs::create_dir_all(self.runs_dir())?;
-        let file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
             .open(self.runs_dir().join(format!("{id}.owner.lock")))?;
         use std::os::fd::AsRawFd;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             bail!("run '{id}' is active in another process; resume only an interrupted run");
         }
         Ok(RunLock(file))
+    }
+    /// Process-held lock shared by every integration. The marker file is persistent:
+    /// flock on its open file description provides liveness, while the contents are
+    /// diagnostic metadata only. Never unlinking the inode avoids splitting locks.
+    pub(crate) fn lock_integration(&self, id: &str) -> Result<RunLock> {
+        validate_id(id)?;
+        fs::create_dir_all(self.repository.join(".kiln"))?;
+        let path = self.repository.join(".kiln/integration.lock");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let owner = fs::read_to_string(&path).unwrap_or_default();
+            let owner = owner.trim();
+            if owner.is_empty() {
+                bail!("another integration is active (lock metadata is unavailable); wait for it to finish");
+            }
+            bail!("another integration is active for run '{owner}'; wait for it to finish");
+        }
+        file.set_len(0)?;
+        file.write_all(id.as_bytes())?;
+        file.sync_all()?;
+        Ok(RunLock(file))
+    }
+    /// Clear this run's abandoned diagnostic marker only after acquiring the same
+    /// process lock used by integration. The persistent lock inode is never removed.
+    pub(crate) fn clear_interrupted_integration_marker(&self, id: &str) -> Result<bool> {
+        validate_id(id)?;
+        let path = self.repository.join(".kiln/integration.lock");
+        let mut file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Ok(false);
+        }
+        let mut owner = String::new();
+        file.read_to_string(&mut owner)?;
+        if owner.trim() != id {
+            return Ok(false);
+        }
+        file.set_len(0)?;
+        file.sync_all()?;
+        Ok(true)
     }
     /// Apply only one ticket's changed records to current durable state.
     pub(crate) fn save_ticket(&self, run: &Run, ticket: &str) -> Result<Run> {
@@ -168,18 +226,30 @@ impl Engine {
                     if superseded {
                         existing.status = "superseded".into();
                     }
-                } else { latest.sessions.push(session.clone()); }
+                } else {
+                    latest.sessions.push(session.clone());
+                }
             }
             for review in run.reviews.iter().filter(|r| r.ticket_id == ticket) {
-                if !latest.reviews.iter().any(|r| r.id == review.id) { latest.reviews.push(review.clone()); }
+                if !latest.reviews.iter().any(|r| r.id == review.id) {
+                    latest.reviews.push(review.clone());
+                }
             }
             for correction in run.corrections.iter().filter(|r| r.ticket_id == ticket) {
-                if !latest.corrections.iter().any(|r| r.id == correction.id) { latest.corrections.push(correction.clone()); }
+                if !latest.corrections.iter().any(|r| r.id == correction.id) {
+                    latest.corrections.push(correction.clone());
+                }
             }
             for integration in run.integrations.iter().filter(|r| r.ticket_id == ticket) {
-                if let Some(existing) = latest.integrations.iter_mut().find(|r| r.id == integration.id) {
+                if let Some(existing) = latest
+                    .integrations
+                    .iter_mut()
+                    .find(|r| r.id == integration.id)
+                {
                     *existing = integration.clone();
-                } else { latest.integrations.push(integration.clone()); }
+                } else {
+                    latest.integrations.push(integration.clone());
+                }
             }
             Ok(latest.clone())
         })
@@ -228,6 +298,8 @@ pub struct RunLock(fs::File);
 impl Drop for RunLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN); }
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }

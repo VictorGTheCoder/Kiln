@@ -414,7 +414,7 @@ impl crate::planning::PlanningAgent for CodexPlanningAgent {
         &self,
         request: &crate::planning::VerificationRequest,
     ) -> Result<crate::planning::Verification> {
-        self.structured(&format!("{}\nReturn only a JSON object with outcome (verified, failed, unable-to-verify) and findings (array of objects with code and message). Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
+        self.structured(&format!("{}\nReturn only a JSON object with outcome (verified, failed, unable-to-verify) and findings (array of objects with code and message). Use findings only for concrete blocking defects that make the outcome failed or unable-to-verify; positive confirmations belong nowhere in findings. A verified outcome must have an empty findings array. Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
     }
 }
 impl crate::decision::DecisionAgent for CodexPlanningAgent {
@@ -437,8 +437,8 @@ impl crate::spec_replanning::SpecReplanningAgent for CodexPlanningAgent {
     fn revise(
         &self,
         request: &crate::spec_replanning::SpecReplanRequest,
-    ) -> Result<Vec<crate::planning::Ticket>> {
-        self.structured(&format!("{}\nReturn only a JSON array of complete revised or new tickets, each with id, title, description, acceptance_criteria, covers (exact requirement IDs), blocked_by. Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
+    ) -> Result<crate::spec_replanning::SpecReplanProposal> {
+        self.structured(&format!("{}\nReturn only a JSON object with tickets (array of complete revised or new tickets, each with id, title, description, acceptance_criteria, covers (exact requirement IDs), blocked_by) and remove_ticket_ids (array of affected existing ticket IDs that are obsolete). Do not edit files.\n{}",request.instructions,serde_json::to_string_pretty(request)?))
     }
 }
 impl CodexConfig {

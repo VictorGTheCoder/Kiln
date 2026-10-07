@@ -21,7 +21,11 @@ impl Repo {
         repo.git(&["init", "-q"]);
         repo.git(&["config", "user.name", "Test"]);
         repo.git(&["config", "user.email", "test@example.com"]);
-        fs::write(repo.path.join("one.md"), "# One\n## Acceptance criteria\n- Works\n").unwrap();
+        fs::write(
+            repo.path.join("one.md"),
+            "# One\n## Acceptance criteria\n- Works\n",
+        )
+        .unwrap();
         fs::write(repo.path.join(".gitignore"), ".kiln/\n").unwrap();
         let mut config = json!({"build":["git","diff","--check"],"test":["git","diff","--check"],"startup":["git","--version"],"acceptance_criteria":["works"],"isolation":{"network":"none","runtime":"system","commands":[["git","diff","--check"],["git","--version"]]}});
         for (k, v) in extra.as_object().unwrap() {
@@ -33,8 +37,16 @@ impl Repo {
         repo
     }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("git").args(args).current_dir(&self.path).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&self.path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
     fn cli(&self, args: &[&str]) -> Output {
@@ -47,7 +59,11 @@ impl Repo {
     /// `tickets` are (id, blocked_by).
     fn planned(&self, tickets: &[(&str, &[&str])]) -> String {
         let prepared = self.cli(&["prepare", "--config", "kiln.json", "--spec", "one.md"]);
-        assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
+        assert!(
+            prepared.status.success(),
+            "{}",
+            String::from_utf8_lossy(&prepared.stderr)
+        );
         let prepared: Value = serde_json::from_slice(&prepared.stdout).unwrap();
         let id = prepared["id"].as_str().unwrap().to_owned();
         let plan_tickets: Vec<Value> = tickets
@@ -56,11 +72,16 @@ impl Repo {
             .collect();
         fs::write(
             self.path.join("plan.json"),
-            json!({"tickets":plan_tickets,"verification":{"outcome":"verified","findings":[]}}).to_string(),
+            json!({"tickets":plan_tickets,"verification":{"outcome":"verified","findings":[]}})
+                .to_string(),
         )
         .unwrap();
         let planned = self.cli(&["plan", &id, "--fixture", "plan.json"]);
-        assert!(planned.status.success(), "{}", String::from_utf8_lossy(&planned.stderr));
+        assert!(
+            planned.status.success(),
+            "{}",
+            String::from_utf8_lossy(&planned.stderr)
+        );
         id
     }
     fn run(&self, id: &str, scenario: Value) -> (Output, Value) {
@@ -72,7 +93,11 @@ impl Repo {
     }
     fn inspect(&self, id: &str) -> Value {
         let out = self.cli(&["inspect", id]);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         serde_json::from_slice(&out.stdout).unwrap()
     }
 }
@@ -94,16 +119,28 @@ fn never_corrected(cycles: usize) -> Value {
     let corrections: Vec<Value> = (0..cycles)
         .map(|n| json!({"files":{"bad.txt":format!("attempt {n}")},"outcome":"completed"}))
         .collect();
-    let reviews: Vec<Value> = (0..cycles).map(|_| json!({"standards":approved(),"spec":rejected()})).collect();
+    let reviews: Vec<Value> = (0..cycles)
+        .map(|_| json!({"standards":approved(),"spec":rejected()}))
+        .collect();
     json!({"implementation":{"files":{"bad.txt":"wrong"},"outcome":"completed"},
            "review":{"standards":approved(),"spec":rejected()},
            "corrections":{"corrections":corrections,"reviews":reviews}})
 }
 fn ticket<'a>(run: &'a Value, id: &str) -> &'a Value {
-    run["scheduler"]["tickets"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()
+    run["scheduler"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .unwrap()
 }
 fn count(run: &Value, field: &str, ticket: &str) -> usize {
-    run[field].as_array().unwrap().iter().filter(|s| s["ticket_id"] == ticket).count()
+    run[field]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["ticket_id"] == ticket)
+        .count()
 }
 
 #[test]
@@ -114,7 +151,10 @@ fn ticket_correction_exhaustion_blocks_only_that_ticket_with_default_three_cycle
         &id,
         json!({"tickets":{"a":never_corrected(5),"b":works("b.txt", json!(null))}}),
     );
-    assert!(!out.status.success(), "an exhausted ticket must not report success");
+    assert!(
+        !out.status.success(),
+        "an exhausted ticket must not report success"
+    );
     assert_eq!(run["status"], "blocked");
     // Defaults: three correction cycles per ticket, three concurrent implementations,
     // and no invented monetary ceiling.
@@ -147,7 +187,10 @@ fn usage_limit_stops_further_work_and_preserves_resumable_state() {
     let id = repo.planned(&[("a", &[]), ("b", &["a"])]);
     let scenario = json!({"tickets":{"a":works("a.txt", usage(700, json!(null))),"b":works("b.txt", json!(null))}});
     let (out, run) = repo.run(&id, scenario.clone());
-    assert!(!out.status.success(), "a stopped run must not report success");
+    assert!(
+        !out.status.success(),
+        "a stopped run must not report success"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("usage_token_limit"), "{stderr}");
     assert_eq!(run["status"], "limit_exhausted");
@@ -161,7 +204,10 @@ fn usage_limit_stops_further_work_and_preserves_resumable_state() {
     assert_eq!(ticket(&run, "a")["state"], "stopped");
     assert!(ticket(&run, "a")["exhaustion"].is_null());
     assert_eq!(ticket(&run, "b")["state"], "waiting");
-    assert!(ticket(&run, "b")["blocker"].is_null(), "b is resumable, not blocked");
+    assert!(
+        ticket(&run, "b")["blocker"].is_null(),
+        "b is resumable, not blocked"
+    );
 
     let inspected = repo.inspect(&id);
     assert_eq!(inspected["status"], "limit_exhausted");
@@ -183,8 +229,14 @@ fn duration_limit_under_stop_policy_cancels_the_active_session() {
     let mut a = works("a.txt", json!(null));
     a["await_file"] = json!("never-released");
     let started = Instant::now();
-    let (out, run) = repo.run(&id, json!({"tickets":{"a":a,"b":works("b.txt", json!(null))}}));
-    assert!(started.elapsed() < Duration::from_secs(15), "the active session was not stopped");
+    let (out, run) = repo.run(
+        &id,
+        json!({"tickets":{"a":a,"b":works("b.txt", json!(null))}}),
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the active session was not stopped"
+    );
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("duration"));
     assert_eq!(run["status"], "limit_exhausted");
@@ -196,6 +248,62 @@ fn duration_limit_under_stop_policy_cancels_the_active_session() {
     assert_eq!(count(&run, "corrections", "a"), 0);
     assert_eq!(count(&run, "sessions", "b"), 0);
     assert_eq!(ticket(&run, "b")["state"], "waiting");
+}
+
+#[test]
+fn duration_stop_cancels_project_checks_and_kills_their_descendants() {
+    const SLOW_CHECK: [&str; 3] = [
+        "sh",
+        "-c",
+        "mkdir -p .kiln; (sleep 3; touch .kiln/late-child) & wait",
+    ];
+    let repo = Repo::new(json!({
+        "duration_limit_seconds": 1,
+        "limit_policy": "stop",
+        "build": SLOW_CHECK,
+        "isolation": {
+            "network": "none",
+            "runtime": "system",
+            "commands": [["git", "diff", "--check"], ["git", "--version"], SLOW_CHECK]
+        }
+    }));
+    let id = repo.planned(&[("a", &[])]);
+    let started = Instant::now();
+    let (out, run) = repo.run(&id, json!({"tickets":{"a":works("a.txt", json!(null))}}));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "stop policy waited for project check"
+    );
+    assert!(!out.status.success());
+    assert_eq!(run["status"], "limit_exhausted");
+    assert_eq!(ticket(&run, "a")["state"], "stopped");
+    assert_eq!(run["sessions"][0]["status"], "interrupted");
+    let worktree = PathBuf::from(run["sessions"][0]["worktree"].as_str().unwrap());
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !worktree.join(".kiln/late-child").exists(),
+        "a child process outlived the stopped check"
+    );
+
+    // Resume with the same durable run after the run-wide timeout has reset.
+    let mut resumable = run;
+    resumable["config"]["duration_limit_seconds"] = json!(10);
+    resumable["config"]["build"] = json!(["git", "diff", "--check"]);
+    fs::write(
+        repo.path.join(".kiln/runs").join(format!("{id}.json")),
+        serde_json::to_vec_pretty(&resumable).unwrap(),
+    )
+    .unwrap();
+    let resumed = repo.cli(&["resume", &id, "--fixture", "scenario.json"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let resumed: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(resumed["status"], "awaiting_validation");
+    assert_eq!(count(&resumed, "sessions", "a"), 2);
+    assert_eq!(resumed["sessions"][0]["status"], "interrupted");
 }
 
 #[test]
@@ -215,8 +323,16 @@ fn invalid_limit_configuration_is_rejected_before_launch() {
 #[test]
 fn unavailable_or_estimated_cost_is_identified_and_never_enforced() {
     for (cost_field, data, ceiling) in [
-        (json!({"cost": null}), "unavailable", "not_enforced_cost_unavailable"),
-        (json!({"cost": null, "cost_estimate": 5.0}), "estimated", "not_enforced_estimate_only"),
+        (
+            json!({"cost": null}),
+            "unavailable",
+            "not_enforced_cost_unavailable",
+        ),
+        (
+            json!({"cost": null, "cost_estimate": 5.0}),
+            "estimated",
+            "not_enforced_estimate_only",
+        ),
     ] {
         let repo = Repo::new(json!({"cost_limit_usd": 0.01}));
         let id = repo.planned(&[("a", &[])]);
@@ -225,11 +341,18 @@ fn unavailable_or_estimated_cost_is_identified_and_never_enforced() {
             log[k] = v.clone();
         }
         let (out, run) = repo.run(&id, json!({"tickets":{"a":works("a.txt", log)}}));
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(run["status"], "awaiting_validation");
         let limits = &repo.inspect(&id)["scheduler"]["limits"];
         assert_eq!(limits["usage"]["cost_data"], data);
-        assert!(limits["usage"]["measured_cost_usd"].is_null(), "unavailable cost is not zero");
+        assert!(
+            limits["usage"]["measured_cost_usd"].is_null(),
+            "unavailable cost is not zero"
+        );
         assert_eq!(limits["cost_ceiling"], ceiling);
         assert!(limits["exhausted"].is_null());
         if data == "estimated" {

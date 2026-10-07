@@ -330,7 +330,8 @@ impl Engine {
     /// Validate the current integrated revision. Configured workflows and
     /// verifier-derived tests supply evidence per frozen acceptance criterion.
     pub fn validate(&self, id: &str, verifier: &VerifierChecks) -> Result<crate::Run> {
-        let mut run = self.inspect(id)?;
+        let _owner = self.own_run(id)?;
+        let run = self.inspect(id)?;
         let settings = ValidationSettings::from_config(&run.config)?;
         // Validate against the current input version (frozen specs plus verified revisions).
         let specs = run.effective_specs();
@@ -477,8 +478,28 @@ impl Engine {
         }
         .into();
         report.checks = global.into_iter().map(|e| e.check).collect();
-        run.validation_reports.push(report);
-        self.save(&run)?;
-        Ok(run)
+        self.transact(id, |latest| {
+            let current_tip = latest.integration_branch.as_ref().and_then(|branch| {
+                git(
+                    &self.repository,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("refs/heads/{branch}^{{commit}}"),
+                    ],
+                )
+                .ok()
+            });
+            if latest.input_version() != report.input_version
+                || current_tip != report.integrated_commit
+            {
+                report.outcome = "stale".into();
+                report.failure = Some(
+                    "approved input version or integration branch changed during validation; rerun validation against the current revision".into(),
+                );
+            }
+            latest.validation_reports.push(report);
+            Ok(latest.clone())
+        })
     }
 }

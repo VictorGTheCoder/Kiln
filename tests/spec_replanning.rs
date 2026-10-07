@@ -35,8 +35,16 @@ impl Repo {
         repo
     }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("git").args(args).current_dir(&self.path).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&self.path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
     fn cli(&self, args: &[&str]) -> Output {
@@ -48,7 +56,11 @@ impl Repo {
     }
     fn ok(&self, args: &[&str]) -> Value {
         let out = self.cli(args);
-        assert!(out.status.success(), "kiln {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "kiln {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         serde_json::from_slice(&out.stdout).unwrap()
     }
     fn write(&self, name: &str, value: Value) {
@@ -56,13 +68,24 @@ impl Repo {
     }
     /// a covers one.md; b and c cover two.md; c depends on a.
     fn planned(&self) -> String {
-        let prepared = self.ok(&["prepare", "--config", "kiln.json", "--spec", "one.md", "--spec", "two.md"]);
+        let prepared = self.ok(&[
+            "prepare",
+            "--config",
+            "kiln.json",
+            "--spec",
+            "one.md",
+            "--spec",
+            "two.md",
+        ]);
         let id = prepared["id"].as_str().unwrap().to_owned();
-        self.write("plan.json", json!({"tickets":[
+        self.write(
+            "plan.json",
+            json!({"tickets":[
             ticket("a", "Greet", &["one.md#ac-1"], &[]),
             ticket("b", "Count", &["two.md#ac-1"], &[]),
             ticket("c", "Count greetings", &["two.md#ac-1"], &["a"])],
-            "verification":{"outcome":"verified","findings":[]}}));
+            "verification":{"outcome":"verified","findings":[]}}),
+        );
         self.ok(&["plan", &id, "--fixture", "plan.json"]);
         id
     }
@@ -78,7 +101,11 @@ impl Repo {
         let id = self.planned();
         let (out, run) = self.run(&id, json!({"tickets":{
             "a":works("a.txt","hello"),"b":works("b.txt","count"),"c":works("c.txt","count greetings")}}));
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(run["status"], "awaiting_validation");
         (id, run)
     }
@@ -109,10 +136,20 @@ fn revise_a(verification: &str) -> Value {
            "verification":{"outcome":verification,"findings":[]}})
 }
 fn sessions<'a>(run: &'a Value, ticket: &str) -> Vec<&'a Value> {
-    run["sessions"].as_array().unwrap().iter().filter(|s| s["ticket_id"] == ticket).collect()
+    run["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["ticket_id"] == ticket)
+        .collect()
 }
 fn strings(value: &Value) -> Vec<&str> {
-    value.as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect()
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect()
 }
 
 #[test]
@@ -128,7 +165,11 @@ fn external_spec_edits_do_not_mutate_frozen_inputs() {
     assert_eq!(after["plan"], before["plan"]);
     // Running again neither picks up the edit nor redoes integrated work.
     let (out, rerun) = repo.run(&id, json!({"tickets":{}}));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(rerun["sessions"].as_array().unwrap().len(), 3);
     assert_eq!(rerun["specs"][0]["content"], ONE);
 }
@@ -139,11 +180,19 @@ fn replanning_captures_revised_specs_and_identifies_affected_work() {
     let (id, before) = repo.integrated();
     fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
     let (out, run) = repo.replan(&id, &["one.md", "two.md"], revise_a("verified"));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // Frozen inputs stay; the revision is a new versioned input.
     assert_eq!(run["specs"][0]["content"], ONE);
     let revisions = run["spec_revisions"].as_array().unwrap();
-    assert_eq!(revisions.len(), 1, "only changed specs are revised: {revisions:?}");
+    assert_eq!(
+        revisions.len(),
+        1,
+        "only changed specs are revised: {revisions:?}"
+    );
     assert_eq!(revisions[0]["version"], 1);
     assert_eq!(revisions[0]["path"], "one.md");
     assert_eq!(revisions[0]["content"], ONE_REVISED);
@@ -157,16 +206,33 @@ fn replanning_captures_revised_specs_and_identifies_affected_work() {
     assert_eq!(strings(&replan["dependent_tickets"]), ["c"]);
     let a_session = sessions(&before, "a")[0]["id"].as_str().unwrap();
     assert_eq!(strings(&replan["invalidated_sessions"]), [a_session]);
-    assert_eq!(replan["invalidated_integrations"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        replan["invalidated_integrations"].as_array().unwrap().len(),
+        1
+    );
     // Old and new decisions remain inspectable; the revised plan was independently checked.
     assert_eq!(replan["previous_plan"], before["plan"]);
-    assert_ne!(replan["context_id"], replan["verification"]["verification_context"]);
+    assert_ne!(
+        replan["context_id"],
+        replan["verification"]["verification_context"]
+    );
     assert_eq!(replan["verification"]["executable"], true);
-    let a = run["plan"]["tickets"].as_array().unwrap().iter().find(|t| t["id"] == "a").unwrap();
+    let a = run["plan"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "a")
+        .unwrap();
     assert_eq!(a["description"], "Greet in French");
-    assert_eq!(run["plan"]["requirements"][0]["criterion"], "Greets in French");
+    assert_eq!(
+        run["plan"]["requirements"][0]["criterion"],
+        "Greets in French"
+    );
     assert_eq!(run["status"], "replanned");
-    assert_eq!(repo.ok(&["inspect", &id])["spec_replans"], run["spec_replans"]);
+    assert_eq!(
+        repo.ok(&["inspect", &id])["spec_replans"],
+        run["spec_replans"]
+    );
 }
 
 #[test]
@@ -181,7 +247,12 @@ fn replanning_marks_new_tickets_for_changed_requirements_as_affected() {
 
     let (out, run) = repo.replan(&id, &["one.md"], revised);
 
-    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stderr), run);
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        run
+    );
     let replan = &run["spec_replans"][0];
     assert_eq!(replan["outcome"], "replanned");
     assert_eq!(strings(&replan["changed_requirements"]), ["one.md#ac-1"]);
@@ -189,8 +260,102 @@ fn replanning_marks_new_tickets_for_changed_requirements_as_affected() {
     assert_eq!(strings(&replan["dependent_tickets"]), ["c"]);
     let old_a = sessions(&before, "a")[0]["id"].as_str().unwrap();
     assert_eq!(strings(&replan["invalidated_sessions"]), [old_a]);
-    let old_a_integration = before["integrations"].as_array().unwrap().iter().find(|i| i["ticket_id"] == "a").unwrap()["id"].as_str().unwrap();
-    assert_eq!(strings(&replan["invalidated_integrations"]), [old_a_integration]);
+    let old_a_integration = before["integrations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["ticket_id"] == "a")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        strings(&replan["invalidated_integrations"]),
+        [old_a_integration]
+    );
+}
+
+#[test]
+fn replan_can_remove_an_obsolete_ticket_and_must_repair_its_dependents() {
+    let repo = Repo::new();
+    fs::write(
+        repo.path.join("one.md"),
+        "# One\n## Acceptance criteria\n- Greets in English\n- Repeats the greeting\n",
+    )
+    .unwrap();
+    let prepared = repo.ok(&[
+        "prepare",
+        "--config",
+        "kiln.json",
+        "--spec",
+        "one.md",
+        "--spec",
+        "two.md",
+    ]);
+    let id = prepared["id"].as_str().unwrap().to_owned();
+    repo.write(
+        "plan.json",
+        json!({"tickets":[
+        ticket("a", "Greet", &["one.md#ac-1"], &[]),
+        ticket("obsolete", "Repeat greeting", &["one.md#ac-2"], &[]),
+        ticket("c", "Count", &["two.md#ac-1"], &["obsolete"])
+    ],"verification":{"outcome":"verified","findings":[]}}),
+    );
+    repo.ok(&["plan", &id, "--fixture", "plan.json"]);
+    fs::write(
+        repo.path.join("one.md"),
+        "# One\n## Acceptance criteria\n- Greets in English\n",
+    )
+    .unwrap();
+
+    let (out, rejected) = repo.replan(
+        &id,
+        &["one.md"],
+        json!({"tickets":[],"remove_ticket_ids":["obsolete"],"verification":{"outcome":"verified","findings":[]}}),
+    );
+    assert!(
+        !out.status.success(),
+        "removing a blocker without revising its dependent must be rejected"
+    );
+    assert!(rejected["spec_replans"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["code"] == "unknown_blocker"));
+    assert!(rejected["plan"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == "obsolete"));
+
+    let (out, run) = repo.replan(
+        &id,
+        &["one.md"],
+        json!({"tickets":[ticket("c", "Count", &["two.md#ac-1"], &[])],"remove_ticket_ids":["obsolete"],"verification":{"outcome":"verified","findings":[]}}),
+    );
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        run
+    );
+    assert_eq!(
+        run["spec_replans"][1]["removed_tickets"],
+        json!(["obsolete"])
+    );
+    assert!(!run["plan"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == "obsolete"));
+    assert_eq!(
+        run["plan"]["tickets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == "c")
+            .unwrap()["blocked_by"],
+        json!([])
+    );
 }
 
 #[test]
@@ -199,13 +364,26 @@ fn a_revised_plan_failing_independent_verification_changes_nothing() {
     let (id, before) = repo.integrated();
     fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
     let (out, run) = repo.replan(&id, &["one.md"], revise_a("failed"));
-    assert!(!out.status.success(), "a rejected replan must not report success");
+    assert!(
+        !out.status.success(),
+        "a rejected replan must not report success"
+    );
     let replan = &run["spec_replans"][0];
     assert_eq!(replan["outcome"], "rejected");
-    assert!(replan["findings"].as_array().unwrap().iter().any(|f| f["code"] == "verification_not_verified"));
+    assert!(replan["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["code"] == "verification_not_verified"));
     assert_eq!(replan["input_version"], 0);
-    assert!(replan["invalidated_sessions"].as_array().unwrap().is_empty());
-    assert_eq!(run["spec_revisions"][0]["status"], "rejected", "the rejected revision stays inspectable");
+    assert!(replan["invalidated_sessions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        run["spec_revisions"][0]["status"], "rejected",
+        "the rejected revision stays inspectable"
+    );
     assert_eq!(run["plan"], before["plan"]);
     assert_eq!(run["sessions"], before["sessions"]);
     assert_eq!(run["status"], "awaiting_validation");
@@ -218,11 +396,18 @@ fn replanning_requires_a_changed_approved_input_of_the_run() {
     let (out, _) = repo.replan(&id, &["one.md"], revise_a("verified"));
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no approved spec changed"));
-    fs::write(repo.path.join("three.md"), "# Three\n## Acceptance criteria\n- New\n").unwrap();
+    fs::write(
+        repo.path.join("three.md"),
+        "# Three\n## Acceptance criteria\n- New\n",
+    )
+    .unwrap();
     let (out, _) = repo.replan(&id, &["three.md"], revise_a("verified"));
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not an approved input"));
-    assert!(repo.ok(&["inspect", &id])["spec_replans"].as_array().unwrap().is_empty());
+    assert!(repo.ok(&["inspect", &id])["spec_replans"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -232,10 +417,18 @@ fn after_integration_a_changed_spec_reexecutes_only_affected_work_under_the_new_
     fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
     repo.git(&["commit", "-qam", "approve French greeting"]);
     let (out, _) = repo.replan(&id, &["one.md"], revise_a("verified"));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // Only the affected ticket has a response: anything else re-executing would fail.
     let (out, run) = repo.run(&id, json!({"tickets":{"a":works("a.txt","bonjour")}}));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(run["status"], "awaiting_validation");
 
     // Affected work: old evidence invalidated, new session under input version 1.
@@ -245,10 +438,29 @@ fn after_integration_a_changed_spec_reexecutes_only_affected_work_under_the_new_
     assert_eq!(a[0]["input_version"], 0);
     assert_eq!(a[1]["status"], "integrated");
     assert_eq!(a[1]["input_version"], 1);
-    let context = fs::read_to_string(repo.path.join(".kiln/contexts").join(format!("{}.json", a[1]["id"].as_str().unwrap()))).unwrap();
-    assert!(context.contains("Greets in French") && !context.contains("Greets in English"), "{context}");
-    let a_integrations: Vec<&Value> = run["integrations"].as_array().unwrap().iter().filter(|i| i["ticket_id"] == "a").collect();
-    assert_eq!(a_integrations.iter().map(|i| i["status"].as_str().unwrap()).collect::<Vec<_>>(), ["superseded", "integrated"]);
+    let context = fs::read_to_string(
+        repo.path
+            .join(".kiln/contexts")
+            .join(format!("{}.json", a[1]["id"].as_str().unwrap())),
+    )
+    .unwrap();
+    assert!(
+        context.contains("Greets in French") && !context.contains("Greets in English"),
+        "{context}"
+    );
+    let a_integrations: Vec<&Value> = run["integrations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["ticket_id"] == "a")
+        .collect();
+    assert_eq!(
+        a_integrations
+            .iter()
+            .map(|i| i["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["superseded", "integrated"]
+    );
 
     // Unaffected independent work is retained with its provenance.
     assert_eq!(sessions(&run, "b"), sessions(&before, "b"));
@@ -260,16 +472,34 @@ fn after_integration_a_changed_spec_reexecutes_only_affected_work_under_the_new_
     assert_eq!(b["input_version"], 0);
 
     // Dependent work is kept, but its evidence is revalidated against the re-integrated prerequisite.
-    assert_eq!(sessions(&run, "c"), sessions(&before, "c"), "dependent work is not re-implemented");
-    let revalidation = replan["revalidations"].as_array().unwrap().iter().find(|r| r["ticket_id"] == "c").unwrap();
+    assert_eq!(
+        sessions(&run, "c"),
+        sessions(&before, "c"),
+        "dependent work is not re-implemented"
+    );
+    let revalidation = replan["revalidations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["ticket_id"] == "c")
+        .unwrap();
     assert_eq!(revalidation["outcome"], "revalidated");
     assert_eq!(revalidation["input_version"], 1);
     let tip = repo.git(&["rev-parse", run["integration_branch"].as_str().unwrap()]);
     assert_eq!(revalidation["verified_commit"], tip.as_str());
     let new_a = a_integrations[1]["integrated_commit"].as_str().unwrap();
     repo.git(&["merge-base", "--is-ancestor", new_a, &tip]);
-    assert!(revalidation["checks"].as_array().unwrap().iter().all(|c| c["passed"] == true));
-    let c = run["scheduler"]["tickets"].as_array().unwrap().iter().find(|t| t["id"] == "c").unwrap();
+    assert!(revalidation["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["passed"] == true));
+    let c = run["scheduler"]["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "c")
+        .unwrap();
     assert_eq!(c["state"], "integrated");
 }
 
@@ -278,22 +508,46 @@ fn active_affected_sessions_are_superseded_so_stale_results_cannot_be_integrated
     let repo = Repo::new();
     let id = repo.planned();
     for (ticket, file) in [("a", "a.txt"), ("b", "b.txt")] {
-        repo.write("implement.json", json!({"files":{file:"old"},"outcome":"completed"}));
+        repo.write(
+            "implement.json",
+            json!({"files":{file:"old"},"outcome":"completed"}),
+        );
         repo.ok(&["implement", &id, ticket, "--fixture", "implement.json"]);
-        repo.write("review.json", json!({"standards":approved(),"spec":approved()}));
+        repo.write(
+            "review.json",
+            json!({"standards":approved(),"spec":approved()}),
+        );
         repo.ok(&["review", &id, ticket, "--fixture", "review.json"]);
     }
     fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
     let (out, run) = repo.replan(&id, &["one.md"], revise_a("verified"));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let a = sessions(&run, "a");
     assert_eq!(a[0]["status"], "superseded");
-    assert_eq!(strings(&run["spec_replans"][0]["invalidated_sessions"]), [a[0]["id"].as_str().unwrap()]);
-    assert_eq!(sessions(&run, "b")[0]["status"], "implemented", "unaffected active work is kept");
+    assert_eq!(
+        strings(&run["spec_replans"][0]["invalidated_sessions"]),
+        [a[0]["id"].as_str().unwrap()]
+    );
+    assert_eq!(
+        sessions(&run, "b")[0]["status"],
+        "implemented",
+        "unaffected active work is kept"
+    );
     let integrate = repo.cli(&["integrate", &id, "a"]);
-    assert!(!integrate.status.success(), "a stale result must not be integrated");
+    assert!(
+        !integrate.status.success(),
+        "a stale result must not be integrated"
+    );
     let after = repo.ok(&["inspect", &id]);
-    assert!(after["integrations"].as_array().unwrap().iter().all(|i| i["ticket_id"] != "a"));
+    assert!(after["integrations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i["ticket_id"] != "a"));
     repo.ok(&["integrate", &id, "b"]);
 }
 
@@ -303,7 +557,10 @@ fn replanning_waits_for_a_live_scheduler_to_stop() {
     let id = repo.planned();
     let mut a = works("a.txt", "hello");
     a["await_file"] = json!("release");
-    repo.write("scenario.json", json!({"tickets":{"a":a,"b":works("b.txt","count"),"c":works("c.txt","greetings")}}));
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{"a":a,"b":works("b.txt","count"),"c":works("c.txt","greetings")}}),
+    );
     let mut child = Command::new(env!("CARGO_BIN_EXE_kiln"))
         .args(["run", &id, "--fixture", "scenario.json"])
         .current_dir(&repo.path)
@@ -311,18 +568,33 @@ fn replanning_waits_for_a_live_scheduler_to_stop() {
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !repo.ok(&["inspect", &id])["sessions"].as_array().unwrap().iter().any(|s| s["ticket_id"] == "a" && s["status"] == "running") {
-        assert!(std::time::Instant::now() < deadline, "session a never started");
+    while !repo.ok(&["inspect", &id])["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["ticket_id"] == "a" && s["status"] == "running")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session a never started"
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
     let (out, _) = repo.replan(&id, &["one.md"], revise_a("verified"));
     fs::write(repo.path.join("release"), "").unwrap();
     assert!(child.wait().unwrap().success());
-    assert!(!out.status.success(), "replanning must not race a live scheduler");
+    assert!(
+        !out.status.success(),
+        "replanning must not race a live scheduler"
+    );
     assert!(String::from_utf8_lossy(&out.stderr).contains("active in another process"));
     let (out, run) = repo.replan(&id, &["one.md"], revise_a("verified"));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(strings(&run["spec_replans"][0]["affected_tickets"]), ["a"]);
 }
 
@@ -334,12 +606,20 @@ struct ReplanMidSession {
     replan: PathBuf,
 }
 impl kiln::execution::ImplementationAgent for ReplanMidSession {
-    fn implement(&self, request: &kiln::execution::ImplementationRequest) -> anyhow::Result<kiln::execution::AgentResult> {
+    fn implement(
+        &self,
+        request: &kiln::execution::ImplementationRequest,
+    ) -> anyhow::Result<kiln::execution::AgentResult> {
         fs::write(request.worktree.join("a.txt"), "hello").unwrap();
         let agent = kiln::spec_replanning::FixtureSpecReplanning::load(&self.replan)?;
-        let run = self.engine.replan_specs(&self.run, &[PathBuf::from("one.md")], &agent)?;
+        let run = self
+            .engine
+            .replan_specs(&self.run, &[PathBuf::from("one.md")], &agent)?;
         assert_eq!(run.spec_replans[0].outcome, "replanned");
-        Ok(kiln::execution::AgentResult { outcome: "completed".into(), log: String::new() })
+        Ok(kiln::execution::AgentResult {
+            outcome: "completed".into(),
+            log: String::new(),
+        })
     }
 }
 
@@ -350,21 +630,39 @@ fn a_session_finishing_after_a_replan_stays_superseded() {
     fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
     repo.write("replan.json", revise_a("verified"));
     let engine = kiln::Engine::open(&repo.path).unwrap();
-    let agent = ReplanMidSession { engine: engine.clone(), run: id.clone(), replan: repo.path.join("replan.json") };
+    let agent = ReplanMidSession {
+        engine: engine.clone(),
+        run: id.clone(),
+        replan: repo.path.join("replan.json"),
+    };
     let run = engine.implement_ticket(&id, "a", &agent).unwrap();
     let session = run.sessions.iter().find(|s| s.ticket_id == "a").unwrap();
-    assert_eq!(session.status, "superseded", "the late result must not revive stale work");
-    assert!(session.commit.is_some(), "the late result stays inspectable");
+    assert_eq!(
+        session.status, "superseded",
+        "the late result must not revive stale work"
+    );
+    assert!(
+        session.commit.is_some(),
+        "the late result stays inspectable"
+    );
     assert!(engine.integrate_ticket(&id, "a", None).is_err());
 }
 
 struct ReplanMidCorrection(ReplanMidSession);
 impl kiln::correction::CorrectionAgent for ReplanMidCorrection {
-    fn correct(&self, request: &kiln::correction::CorrectionRequest) -> anyhow::Result<kiln::execution::AgentResult> {
+    fn correct(
+        &self,
+        request: &kiln::correction::CorrectionRequest,
+    ) -> anyhow::Result<kiln::execution::AgentResult> {
         fs::write(request.worktree.join("a.txt"), "corrected").unwrap();
         let agent = kiln::spec_replanning::FixtureSpecReplanning::load(&self.0.replan)?;
-        self.0.engine.replan_specs(&self.0.run, &[PathBuf::from("one.md")], &agent)?;
-        Ok(kiln::execution::AgentResult { outcome: "completed".into(), log: String::new() })
+        self.0
+            .engine
+            .replan_specs(&self.0.run, &[PathBuf::from("one.md")], &agent)?;
+        Ok(kiln::execution::AgentResult {
+            outcome: "completed".into(),
+            log: String::new(),
+        })
     }
 }
 
@@ -373,19 +671,35 @@ fn a_correction_finishing_after_a_replan_cannot_be_integrated() {
     let repo = Repo::new();
     let id = repo.planned();
     let engine = kiln::Engine::open(&repo.path).unwrap();
-    repo.write("implement.json", json!({"files":{"a.txt":"hello"},"outcome":"completed"}));
+    repo.write(
+        "implement.json",
+        json!({"files":{"a.txt":"hello"},"outcome":"completed"}),
+    );
     repo.ok(&["implement", &id, "a", "--fixture", "implement.json"]);
     repo.write("rejected.json", json!({"standards":approved(),"spec":{"outcome":"rejected","findings":[{"code":"wrong","message":"No","evidence":"x","required":true}],"evidence":"Observed"}}));
     let _ = repo.cli(&["review", &id, "a", "--fixture", "rejected.json"]);
     fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
     repo.write("replan.json", revise_a("verified"));
-    repo.write("review.json", json!({"standards":approved(),"spec":approved()}));
+    repo.write(
+        "review.json",
+        json!({"standards":approved(),"spec":approved()}),
+    );
     let reviewer = kiln::review::FixtureReviewAgent::load(&repo.path.join("review.json")).unwrap();
-    let corrector = ReplanMidCorrection(ReplanMidSession { engine: engine.clone(), run: id.clone(), replan: repo.path.join("replan.json") });
+    let corrector = ReplanMidCorrection(ReplanMidSession {
+        engine: engine.clone(),
+        run: id.clone(),
+        replan: repo.path.join("replan.json"),
+    });
     let _ = engine.correct_ticket(&id, "a", &corrector, &reviewer);
     let run = engine.inspect(&id).unwrap();
     assert_eq!(run.spec_replans.len(), 1);
-    assert!(run.sessions.iter().filter(|s| s.ticket_id == "a").all(|s| s.status == "superseded"), "{:?}",
-        run.sessions.iter().map(|s| &s.status).collect::<Vec<_>>());
+    assert!(
+        run.sessions
+            .iter()
+            .filter(|s| s.ticket_id == "a")
+            .all(|s| s.status == "superseded"),
+        "{:?}",
+        run.sessions.iter().map(|s| &s.status).collect::<Vec<_>>()
+    );
     assert!(engine.integrate_ticket(&id, "a", None).is_err());
 }

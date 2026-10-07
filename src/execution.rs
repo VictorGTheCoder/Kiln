@@ -136,85 +136,85 @@ impl Engine {
     ) -> Result<Run> {
         agent.prepare_redaction()?;
         let (run, mut session, ticket, prerequisites) = self.transact(id, |run| {
-        run.config.isolation.validate(&self.repository)?;
-        let plan = run
-            .plan
-            .as_ref()
-            .filter(|p| p.executable)
-            .context("implementation requires an independently verified executable plan")?;
-        let ticket = plan
-            .tickets
-            .iter()
-            .find(|t| t.id == ticket_id)
-            .context("unknown ticket")?
-            .clone();
-        if run.sessions.iter().any(|s| {
-            s.ticket_id == ticket_id
-                && matches!(s.status.as_str(), "running" | "implemented" | "integrated")
-        }) {
-            bail!("ticket already has an active or completed implementation");
-        }
-        let mut prerequisites = Vec::new();
-        for blocker in &ticket.blocked_by {
-            prerequisites.push(
-                run.sessions
-                    .iter()
-                    .find(|s| {
-                        s.ticket_id == *blocker
-                            && s.status == "integrated"
-                            && s.verification_passed
-                            && s.commit.is_some()
-                    })
-                    .with_context(|| {
-                        format!("prerequisite {blocker} is not integrated and verified")
-                    })?
-                    .clone(),
-            );
-        }
-        let integration = match &run.integration_branch {
-            Some(branch) => branch.clone(),
-            None => {
-                let branch = format!("kiln/{}/integration", run.id);
-                git(&self.repository, &["branch", &branch, "HEAD"])?;
-                run.integration_branch = Some(branch.clone());
-                branch
+            run.config.isolation.validate(&self.repository)?;
+            let plan = run
+                .plan
+                .as_ref()
+                .filter(|p| p.executable)
+                .context("implementation requires an independently verified executable plan")?;
+            let ticket = plan
+                .tickets
+                .iter()
+                .find(|t| t.id == ticket_id)
+                .context("unknown ticket")?
+                .clone();
+            if run.sessions.iter().any(|s| {
+                s.ticket_id == ticket_id
+                    && matches!(s.status.as_str(), "running" | "implemented" | "integrated")
+            }) {
+                bail!("ticket already has an active or completed implementation");
             }
-        };
-        let base_commit = git(&self.repository, &["rev-parse", &integration])?;
-        for prerequisite in &prerequisites {
-            git(
-                &self.repository,
-                &[
-                    "merge-base",
-                    "--is-ancestor",
-                    prerequisite.commit.as_deref().unwrap(),
-                    &base_commit,
-                ],
-            )
-            .context("prerequisite commit is absent from integration branch")?;
-        }
-        let session_id = format!("{}-session-{}", run.id, run.sessions.len() + 1);
-        let branch = format!("kiln/{}/session-{}", run.id, run.sessions.len() + 1);
-        let worktree = self.repository.join(".kiln/worktrees").join(&session_id);
-        let session = ImplementationSession {
-            id: session_id.clone(),
-            ticket_id: ticket_id.into(),
-            context_id: session_id.clone(),
-            branch,
-            worktree: worktree.to_string_lossy().into_owned(),
-            base_commit,
-            status: "running".into(),
-            diff: String::new(),
-            commit: None,
-            agent_outcome: None,
-            agent_log: String::new(),
-            checks: Vec::new(),
-            verification_passed: false,
-            failure: None,
-            input_version: run.input_version(),
-        };
-        run.sessions.push(session.clone());
-        Ok((run.clone(), session, ticket, prerequisites))
+            let mut prerequisites = Vec::new();
+            for blocker in &ticket.blocked_by {
+                prerequisites.push(
+                    run.sessions
+                        .iter()
+                        .find(|s| {
+                            s.ticket_id == *blocker
+                                && s.status == "integrated"
+                                && s.verification_passed
+                                && s.commit.is_some()
+                        })
+                        .with_context(|| {
+                            format!("prerequisite {blocker} is not integrated and verified")
+                        })?
+                        .clone(),
+                );
+            }
+            let integration = match &run.integration_branch {
+                Some(branch) => branch.clone(),
+                None => {
+                    let branch = format!("kiln/{}/integration", run.id);
+                    git(&self.repository, &["branch", &branch, "HEAD"])?;
+                    run.integration_branch = Some(branch.clone());
+                    branch
+                }
+            };
+            let base_commit = git(&self.repository, &["rev-parse", &integration])?;
+            for prerequisite in &prerequisites {
+                git(
+                    &self.repository,
+                    &[
+                        "merge-base",
+                        "--is-ancestor",
+                        prerequisite.commit.as_deref().unwrap(),
+                        &base_commit,
+                    ],
+                )
+                .context("prerequisite commit is absent from integration branch")?;
+            }
+            let session_id = format!("{}-session-{}", run.id, run.sessions.len() + 1);
+            let branch = format!("kiln/{}/session-{}", run.id, run.sessions.len() + 1);
+            let worktree = self.repository.join(".kiln/worktrees").join(&session_id);
+            let session = ImplementationSession {
+                id: session_id.clone(),
+                ticket_id: ticket_id.into(),
+                context_id: session_id.clone(),
+                branch,
+                worktree: worktree.to_string_lossy().into_owned(),
+                base_commit,
+                status: "running".into(),
+                diff: String::new(),
+                commit: None,
+                agent_outcome: None,
+                agent_log: String::new(),
+                checks: Vec::new(),
+                verification_passed: false,
+                failure: None,
+                input_version: run.input_version(),
+            };
+            run.sessions.push(session.clone());
+            Ok((run.clone(), session, ticket, prerequisites))
         })?;
         let session_id = session.id.clone();
         let worktree = PathBuf::from(&session.worktree);
@@ -278,32 +278,8 @@ impl Engine {
                 bail!("agent produced no usable Git change");
             }
             for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
-                let result = crate::sandbox::Sandbox::command(
-                    &run.config.isolation,
-                    &worktree,
-                    name,
-                    argv,
-                    &[],
-                )
-                .and_then(|mut command| Ok(command.output()?));
-                let check = match result {
-                    Ok(result) => CheckResult {
-                        name: name.into(),
-                        command: argv.clone(),
-                        exit_code: result.status.code(),
-                        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
-                        passed: result.status.success(),
-                    },
-                    Err(error) => CheckResult {
-                        name: name.into(),
-                        command: argv.clone(),
-                        exit_code: None,
-                        stdout: String::new(),
-                        stderr: error.to_string(),
-                        passed: false,
-                    },
-                };
+                let check =
+                    crate::sandbox::Sandbox::check(&run.config.isolation, &worktree, name, argv);
                 session.checks.push(check);
             }
             if session.checks.iter().any(|c| !c.passed) {
@@ -338,7 +314,12 @@ impl Engine {
             Ok(())
         })();
         if let Err(error) = execution {
-            session.status = "failed".into();
+            session.status = if crate::sandbox::command_cancellation_active() {
+                "interrupted"
+            } else {
+                "failed"
+            }
+            .into();
             session.failure = Some(format!("{error:#}"));
         }
         session.agent_log = agent.redact_output(&run.config.isolation.redact(&session.agent_log));
@@ -351,7 +332,10 @@ impl Engine {
             check.stderr = agent.redact_output(&run.config.isolation.redact(&check.stderr));
         }
         self.transact(id, |latest| {
-            let target = latest.sessions.iter_mut().find(|s| s.id == session.id)
+            let target = latest
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == session.id)
                 .context("reserved session is missing")?;
             // A spec replan invalidated this session while it ran: keep the late
             // result inspectable but never integrable.

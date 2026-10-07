@@ -22,7 +22,7 @@ kiln --repo /path/to/project import RUN \
   --verification-fixture verification.json
 ```
 
-Exactly one of `--codex` and `--verification-fixture` is required. Supplying both is rejected. Codex independently checks the imported issue tickets against the exact frozen specs, criterion coverage, dependency graph, and ticket granularity. A rejected or unable-to-verify result is recorded and prevents the imported plan from becoming executable. Existing issue URLs and dependency identities remain attached to the run for `kiln sync` after execution.
+Exactly one of `--codex` and `--verification-fixture` is required. Supplying both is rejected. Codex independently checks the imported issue tickets against the exact frozen specs, criterion coverage, dependency graph, and ticket granularity. Findings are reserved for blocking defects; a verified response must return an empty findings array. A rejected, unable-to-verify, or finding-bearing result is recorded and prevents the imported plan from becoming executable. Existing issue URLs and dependency identities remain attached to the run for `kiln sync` after execution.
 
 This provider choice changes only import verification. The ticket proposals still come from the selected GitHub issue bodies; it does not call Codex to generate a second ticket plan. The current `plan --codex` command is a separate path for runs prepared without imported issues. Provider token usage from planning verification is not retained in the plan record, so this path provides a real verification outcome and context identity but no planning cost estimate. Do not describe imported ticket text as Codex-generated.
 

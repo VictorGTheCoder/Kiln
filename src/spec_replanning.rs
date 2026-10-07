@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SPEC_REPLANNING_INSTRUCTIONS: &str = "Approved specs changed. Revise the plan for the new input version: return complete revised tickets (same id) for every affected ticket and any new tickets the changed requirements need. Leave unaffected tickets out. Cover every changed requirement with exact requirement IDs. Do not implement and do not ask the developer.";
+pub const SPEC_REPLANNING_INSTRUCTIONS: &str = "Approved specs changed. Revise the plan for the new input version: return complete revised tickets (same id) for affected work that remains necessary, any new tickets the changed requirements need, and an explicit remove_ticket_ids list for affected tickets that are obsolete. Leave unaffected tickets out. Update blockers so none reference removed tickets. Cover every changed requirement with exact requirement IDs. Do not implement and do not ask the developer.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SpecReplanRequest {
@@ -36,7 +36,14 @@ pub struct SpecReplanRequest {
 }
 /// System boundary: a fresh revision session; verification runs in its own context.
 pub trait SpecReplanningAgent {
-    fn revise(&self, request: &SpecReplanRequest) -> Result<Vec<Ticket>>;
+    fn revise(&self, request: &SpecReplanRequest) -> Result<SpecReplanProposal>;
+}
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SpecReplanProposal {
+    #[serde(default)]
+    pub tickets: Vec<Ticket>,
+    #[serde(default)]
+    pub remove_ticket_ids: Vec<String>,
 }
 pub trait SpecReplanner: SpecReplanningAgent + PlanningAgent {}
 impl<T: SpecReplanningAgent + PlanningAgent> SpecReplanner for T {}
@@ -45,23 +52,32 @@ impl<T: SpecReplanningAgent + PlanningAgent> SpecReplanner for T {}
 #[derive(Deserialize)]
 pub struct FixtureSpecReplanning {
     tickets: Vec<Ticket>,
+    #[serde(default)]
+    remove_ticket_ids: Vec<String>,
     verification: crate::planning::Verification,
 }
 impl FixtureSpecReplanning {
     pub fn load(path: &Path) -> Result<Self> {
-        serde_json::from_slice(&fs::read(path)?).context("invalid deterministic spec replanning fixture")
+        serde_json::from_slice(&fs::read(path)?)
+            .context("invalid deterministic spec replanning fixture")
     }
 }
 impl SpecReplanningAgent for FixtureSpecReplanning {
-    fn revise(&self, _: &SpecReplanRequest) -> Result<Vec<Ticket>> {
-        Ok(self.tickets.clone())
+    fn revise(&self, _: &SpecReplanRequest) -> Result<SpecReplanProposal> {
+        Ok(SpecReplanProposal {
+            tickets: self.tickets.clone(),
+            remove_ticket_ids: self.remove_ticket_ids.clone(),
+        })
     }
 }
 impl PlanningAgent for FixtureSpecReplanning {
     fn generate(&self, _: &crate::planning::PlanningRequest) -> Result<Vec<Ticket>> {
         bail!("spec replanning fixtures do not generate plans")
     }
-    fn verify(&self, _: &crate::planning::VerificationRequest) -> Result<crate::planning::Verification> {
+    fn verify(
+        &self,
+        _: &crate::planning::VerificationRequest,
+    ) -> Result<crate::planning::Verification> {
         Ok(self.verification.clone())
     }
 }
@@ -92,6 +108,9 @@ pub struct SpecReplan {
     /// Descendants of affected tickets: evidence revalidated before reuse.
     pub dependent_tickets: Vec<String>,
     pub revised_tickets: Vec<Ticket>,
+    /// Existing tickets explicitly removed because revised approved specs made them obsolete.
+    #[serde(default)]
+    pub removed_tickets: Vec<String>,
     pub previous_plan: Option<Plan>,
     /// Independent reverification of the revised plan.
     pub verification: Option<Plan>,
@@ -165,12 +184,15 @@ impl Engine {
             if result.iter().any(|(p, _)| *p == relative) {
                 bail!("duplicate spec {relative}");
             }
-            let content = fs::read_to_string(&source).context("spec must be readable UTF-8 Markdown")?;
+            let content =
+                fs::read_to_string(&source).context("spec must be readable UTF-8 Markdown")?;
             if content.trim().is_empty() {
                 bail!("spec {relative} is empty");
             }
             if run.config.isolation.redact(&content) != content {
-                bail!("approved spec contains a registered secret value; remove it before replanning");
+                bail!(
+                    "approved spec contains a registered secret value; remove it before replanning"
+                );
             }
             result.push((relative, content));
         }
@@ -178,7 +200,12 @@ impl Engine {
     }
 
     /// Apply revised approved specs to a run through an explicit replanning operation.
-    pub fn replan_specs(&self, id: &str, paths: &[PathBuf], agent: &dyn SpecReplanner) -> Result<Run> {
+    pub fn replan_specs(
+        &self,
+        id: &str,
+        paths: &[PathBuf],
+        agent: &dyn SpecReplanner,
+    ) -> Result<Run> {
         let _owner = self.own_run(id)?;
         let run = self.inspect(id)?;
         let current = run
@@ -192,7 +219,10 @@ impl Engine {
         let context_id = format!("{replan_id}-context");
         let mut revisions = Vec::new();
         for (path, content) in self.read_approved(&run, paths)? {
-            let spec = specs.iter_mut().find(|s| s.path == path).context("frozen spec")?;
+            let spec = specs
+                .iter_mut()
+                .find(|s| s.path == path)
+                .context("frozen spec")?;
             if spec.content == content {
                 continue;
             }
@@ -216,7 +246,10 @@ impl Engine {
         let new = requirements(&specs);
         let changed: Vec<Requirement> = new
             .iter()
-            .filter(|r| !old.iter().any(|o| o.id == r.id && o.criterion == r.criterion))
+            .filter(|r| {
+                !old.iter()
+                    .any(|o| o.id == r.id && o.criterion == r.criterion)
+            })
             .cloned()
             .collect();
         let removed: Vec<String> = old
@@ -245,6 +278,7 @@ impl Engine {
             affected_tickets: covering.clone(),
             dependent_tickets: Vec::new(),
             revised_tickets: Vec::new(),
+            removed_tickets: Vec::new(),
             previous_plan: Some(current.clone()),
             verification: None,
             findings: Vec::new(),
@@ -270,23 +304,68 @@ impl Engine {
                 code: "replanning_failed".into(),
                 message: format!("{e:#}"),
             }),
-            Ok(revised) => {
-                let plan = crate::decision::reverify(&run, &specs, &revised, agent, &replan_id, &context_id)?;
-                record.findings = plan.findings.clone();
-                record.outcome = if plan.executable { "replanned" } else { "rejected" }.into();
-                if plan.executable {
-                    adopted = Some(plan.clone());
+            Ok(proposal) => {
+                let current_ids: BTreeSet<&str> =
+                    current.tickets.iter().map(|t| t.id.as_str()).collect();
+                let affected_ids: BTreeSet<&str> = covering.iter().map(String::as_str).collect();
+                let revised_ids: BTreeSet<&str> =
+                    proposal.tickets.iter().map(|t| t.id.as_str()).collect();
+                let mut seen_removals = BTreeSet::new();
+                let removals = &proposal.remove_ticket_ids;
+                let invalid_removal = removals.iter().find(|id| {
+                    !current_ids.contains(id.as_str())
+                        || !affected_ids.contains(id.as_str())
+                        || revised_ids.contains(id.as_str())
+                        || !seen_removals.insert(id.as_str())
+                });
+                if let Some(id) = invalid_removal {
+                    record.findings.push(Finding {
+                        code: "invalid_ticket_removal".into(),
+                        message: format!("ticket {id} is not an affected existing ticket and cannot be removed by this replan"),
+                    });
+                    record.outcome = "rejected".into();
+                    record.revised_tickets = proposal.tickets;
+                    record.removed_tickets = removals.clone();
+                } else {
+                    let plan = crate::decision::reverify(
+                        &run,
+                        &specs,
+                        &proposal.tickets,
+                        removals,
+                        agent,
+                        &replan_id,
+                        &context_id,
+                    )?;
+                    record.findings = plan.findings.clone();
+                    record.outcome = if plan.executable {
+                        "replanned"
+                    } else {
+                        "rejected"
+                    }
+                    .into();
+                    if plan.executable {
+                        adopted = Some(plan.clone());
+                    }
+                    record.revised_tickets = proposal.tickets;
+                    record.removed_tickets = removals.clone();
+                    record.verification = Some(plan);
                 }
-                record.revised_tickets = revised;
-                record.verification = Some(plan);
             }
         }
-        let status = if adopted.is_some() { "verified" } else { "rejected" };
+        let status = if adopted.is_some() {
+            "verified"
+        } else {
+            "rejected"
+        };
         for r in &mut revisions {
             r.status = status.into();
         }
         if let Some(plan) = &adopted {
-            record.input_version = revisions.iter().map(|r| r.version).max().unwrap_or(previous_input_version);
+            record.input_version = revisions
+                .iter()
+                .map(|r| r.version)
+                .max()
+                .unwrap_or(previous_input_version);
             let mut affected: Vec<String> = Vec::new();
             for t in &plan.tickets {
                 let revised = record.revised_tickets.iter().any(|r| r.id == t.id)
@@ -297,6 +376,11 @@ impl Engine {
                     .any(|requirement| record.changed_requirements.contains(requirement));
                 if covering.contains(&t.id) || revised || covers_changed_requirement {
                     affected.push(t.id.clone());
+                }
+            }
+            for removed in &record.removed_tickets {
+                if !affected.contains(removed) {
+                    affected.push(removed.clone());
                 }
             }
             record.dependent_tickets = descendants(&plan.tickets, &affected);
@@ -319,8 +403,9 @@ impl Engine {
     /// on the current combined result (which includes re-integrated prerequisites).
     pub fn revalidate_ticket(&self, id: &str, ticket: &str) -> Result<Revalidation> {
         let run = self.inspect(id)?;
-        let replan = pending_revalidation(&run, ticket)
-            .with_context(|| format!("ticket {ticket} has no dependent evidence awaiting revalidation"))?;
+        let replan = pending_revalidation(&run, ticket).with_context(|| {
+            format!("ticket {ticket} has no dependent evidence awaiting revalidation")
+        })?;
         let replan_id = replan.id.clone();
         let input_version = replan.input_version;
         let session = run
@@ -339,22 +424,37 @@ impl Engine {
             outcome: "failed".into(),
             failure: None,
         };
-        let worktree = self
-            .repository
-            .join(".kiln/worktrees")
-            .join(format!("{replan_id}-revalidate-{ticket}-{}", replan.revalidations.len() + 1));
+        let worktree = self.repository.join(".kiln/worktrees").join(format!(
+            "{replan_id}-revalidate-{ticket}-{}",
+            replan.revalidations.len() + 1
+        ));
         let result = (|| -> Result<()> {
-            let branch = run.integration_branch.clone().context("missing integration branch")?;
+            let branch = run
+                .integration_branch
+                .clone()
+                .context("missing integration branch")?;
             let tip = git(&self.repository, &["rev-parse", &branch])?;
             revalidation.verified_commit = Some(tip.clone());
-            let commit = session.commit.clone().context("retained work has no commit")?;
-            git(&self.repository, &["merge-base", "--is-ancestor", &commit, &tip])
-                .context("retained work is no longer part of the integration branch")?;
+            let commit = session
+                .commit
+                .clone()
+                .context("retained work has no commit")?;
+            git(
+                &self.repository,
+                &["merge-base", "--is-ancestor", &commit, &tip],
+            )
+            .context("retained work is no longer part of the integration branch")?;
             {
                 let _git = self.lock_run(id, "git")?;
                 git(
                     &self.repository,
-                    &["worktree", "add", "--detach", worktree.to_str().context("non UTF-8 worktree")?, &tip],
+                    &[
+                        "worktree",
+                        "add",
+                        "--detach",
+                        worktree.to_str().context("non UTF-8 worktree")?,
+                        &tip,
+                    ],
                 )?;
             }
             for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
@@ -367,7 +467,15 @@ impl Engine {
         })();
         if worktree.exists() {
             let _git = self.lock_run(id, "git")?;
-            let _ = git(&self.repository, &["worktree", "remove", "--force", worktree.to_str().unwrap_or_default()]);
+            let _ = git(
+                &self.repository,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    worktree.to_str().unwrap_or_default(),
+                ],
+            );
         }
         match result {
             Ok(()) => revalidation.outcome = "revalidated".into(),
@@ -391,26 +499,7 @@ impl Engine {
 }
 
 fn check(run: &Run, worktree: &Path, name: &str, argv: &[String]) -> CheckResult {
-    match crate::sandbox::Sandbox::command(&run.config.isolation, worktree, name, argv, &[])
-        .and_then(|mut command| Ok(command.output()?))
-    {
-        Ok(output) => CheckResult {
-            name: name.into(),
-            command: argv.to_vec(),
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            passed: output.status.success(),
-        },
-        Err(error) => CheckResult {
-            name: name.into(),
-            command: argv.to_vec(),
-            exit_code: None,
-            stdout: String::new(),
-            stderr: error.to_string(),
-            passed: false,
-        },
-    }
+    crate::sandbox::Sandbox::check(&run.config.isolation, worktree, name, argv)
 }
 
 /// Transitive descendants of `roots` in plan order, excluding the roots.
@@ -436,20 +525,36 @@ fn descendants(tickets: &[Ticket], roots: &[String]) -> Vec<String> {
 /// Invalidate affected work and evidence; record retained work with its provenance.
 fn invalidate(run: &mut Run, record: &mut SpecReplan) {
     let affected = &record.affected_tickets;
-    for s in run.sessions.iter_mut().filter(|s| affected.contains(&s.ticket_id)) {
+    for s in run
+        .sessions
+        .iter_mut()
+        .filter(|s| affected.contains(&s.ticket_id))
+    {
         if matches!(s.status.as_str(), "running" | "implemented" | "integrated") {
             s.status = "superseded".into();
             record.invalidated_sessions.push(s.id.clone());
         }
     }
-    for i in run.integrations.iter_mut().filter(|i| affected.contains(&i.ticket_id)) {
+    for i in run
+        .integrations
+        .iter_mut()
+        .filter(|i| affected.contains(&i.ticket_id))
+    {
         if i.status == "integrated" {
             i.status = "superseded".into();
             record.invalidated_integrations.push(i.id.clone());
         }
     }
-    record.invalidated_validation_reports = run.validation_reports.iter().map(|r| r.id.clone()).collect();
-    for s in run.sessions.iter().filter(|s| s.status == "integrated" && !affected.contains(&s.ticket_id)) {
+    record.invalidated_validation_reports = run
+        .validation_reports
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    for s in run
+        .sessions
+        .iter()
+        .filter(|s| s.status == "integrated" && !affected.contains(&s.ticket_id))
+    {
         record.retained.push(RetainedWork {
             ticket_id: s.ticket_id.clone(),
             session_id: s.id.clone(),
@@ -458,9 +563,11 @@ fn invalidate(run: &mut Run, record: &mut SpecReplan) {
         });
     }
     if let Some(scheduler) = &mut run.scheduler {
-        for t in scheduler.tickets.iter_mut().filter(|t| {
-            affected.contains(&t.id) || record.dependent_tickets.contains(&t.id)
-        }) {
+        for t in scheduler
+            .tickets
+            .iter_mut()
+            .filter(|t| affected.contains(&t.id) || record.dependent_tickets.contains(&t.id))
+        {
             t.state = "waiting".into();
             t.blocker = None;
             t.exhaustion = None;

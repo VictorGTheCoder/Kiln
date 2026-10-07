@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{fs, process::Command};
+use std::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrationAttempt {
     pub id: String,
@@ -22,12 +22,6 @@ pub struct IntegrationAttempt {
     pub checks: Vec<CheckResult>,
     pub conflicts: Vec<String>,
     pub failure: Option<String>,
-}
-struct Lock(std::path::PathBuf);
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
 }
 /// Replace an attempt by identity; other tickets' records may follow it.
 fn record(run: &mut Run, attempt: &IntegrationAttempt) {
@@ -63,17 +57,7 @@ impl Engine {
         ticket_id: &str,
         provider: Option<(&dyn CorrectionAgent, &dyn ReviewAgent)>,
     ) -> Result<Run> {
-        let lock_path = self.repository.join(".kiln/integration.lock");
-        let mut owner = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .context(
-                "another integration is active; inspect lock before recovering interrupted work",
-            )?;
-        let _lock = Lock(lock_path);
-        // Owning run identity lets resume release a lock its interrupted process left.
-        std::io::Write::write_all(&mut owner, id.as_bytes())?;
+        let _lock = self.lock_integration(id)?;
         if let Some((a, r)) = provider {
             a.prepare_redaction()?;
             r.prepare_redaction()?;
@@ -184,27 +168,8 @@ impl Engine {
             let candidate = git(&path, &["rev-parse", "HEAD"])?;
             attempt.candidate_commit = Some(candidate.clone());
             for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
-                let result =
-                    crate::sandbox::Sandbox::command(&run.config.isolation, &path, name, argv, &[])
-                        .and_then(|mut c| Ok(c.output()?));
-                let mut check = match result {
-                    Ok(o) => CheckResult {
-                        name: name.into(),
-                        command: argv.clone(),
-                        exit_code: o.status.code(),
-                        stdout: String::from_utf8_lossy(&o.stdout).into(),
-                        stderr: String::from_utf8_lossy(&o.stderr).into(),
-                        passed: o.status.success(),
-                    },
-                    Err(e) => CheckResult {
-                        name: name.into(),
-                        command: argv.clone(),
-                        exit_code: None,
-                        stdout: String::new(),
-                        stderr: e.to_string(),
-                        passed: false,
-                    },
-                };
+                let mut check =
+                    crate::sandbox::Sandbox::check(&run.config.isolation, &path, name, argv);
                 let redact = |s: &str| {
                     let s = run.config.isolation.redact(s);
                     if let Some((a, r)) = provider {

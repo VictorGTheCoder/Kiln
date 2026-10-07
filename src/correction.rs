@@ -248,32 +248,12 @@ impl Engine {
                     bail!("correction outcome: {}", result.outcome);
                 }
                 for (name, argv) in [("build", &run.config.build), ("test", &run.config.test)] {
-                    let output = crate::sandbox::Sandbox::command(
+                    after.checks.push(crate::sandbox::Sandbox::check(
                         &run.config.isolation,
                         &worktree,
                         name,
                         argv,
-                        &[],
-                    )
-                    .and_then(|mut c| Ok(c.output()?));
-                    after.checks.push(match output {
-                        Ok(o) => CheckResult {
-                            name: name.into(),
-                            command: argv.clone(),
-                            exit_code: o.status.code(),
-                            stdout: String::from_utf8_lossy(&o.stdout).into(),
-                            stderr: String::from_utf8_lossy(&o.stderr).into(),
-                            passed: o.status.success(),
-                        },
-                        Err(e) => CheckResult {
-                            name: name.into(),
-                            command: argv.clone(),
-                            exit_code: None,
-                            stdout: String::new(),
-                            stderr: e.to_string(),
-                            passed: false,
-                        },
-                    });
+                    ));
                 }
                 if after.checks.iter().any(|c| !c.passed) {
                     bail!("configured verification failed");

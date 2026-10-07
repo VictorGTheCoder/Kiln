@@ -317,8 +317,7 @@ fn run() -> Result<()> {
             fixture,
             codex,
         } => {
-            let ambiguity =
-                kiln::decision::Ambiguity::load(&engine.repository.join(ambiguity))?;
+            let ambiguity = kiln::decision::Ambiguity::load(&engine.repository.join(ambiguity))?;
             let run = if let Some(path) = fixture {
                 let agent =
                     kiln::decision::FixtureDecisionAgent::load(&engine.repository.join(path))?;
@@ -363,7 +362,11 @@ fn run() -> Result<()> {
                 engine.replan_specs(&id, &spec, &agent)?
             };
             println!("{}", serde_json::to_string_pretty(&run)?);
-            if run.spec_replans.last().is_none_or(|r| r.outcome != "replanned") {
+            if run
+                .spec_replans
+                .last()
+                .is_none_or(|r| r.outcome != "replanned")
+            {
                 anyhow::bail!("replan not adopted; inspect the recorded findings");
             }
             return Ok(());
@@ -374,6 +377,7 @@ fn run() -> Result<()> {
             fixture,
             codex,
         } => {
+            let _owner = engine.own_run(&id)?;
             let run = if let Some(path) = fixture {
                 let a =
                     kiln::correction::FixtureCorrectionAgent::load(&engine.repository.join(path))?;
