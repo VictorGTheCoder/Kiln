@@ -170,6 +170,30 @@ fn replanning_captures_revised_specs_and_identifies_affected_work() {
 }
 
 #[test]
+fn replanning_marks_new_tickets_for_changed_requirements_as_affected() {
+    let repo = Repo::new();
+    let (id, before) = repo.integrated();
+    fs::write(repo.path.join("one.md"), ONE_REVISED).unwrap();
+    let revised = json!({
+        "tickets":[ticket("d", "Greet in French", &["one.md#ac-1"], &[])],
+        "verification":{"outcome":"verified","findings":[]}
+    });
+
+    let (out, run) = repo.replan(&id, &["one.md"], revised);
+
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stderr), run);
+    let replan = &run["spec_replans"][0];
+    assert_eq!(replan["outcome"], "replanned");
+    assert_eq!(strings(&replan["changed_requirements"]), ["one.md#ac-1"]);
+    assert_eq!(strings(&replan["affected_tickets"]), ["a", "d"]);
+    assert_eq!(strings(&replan["dependent_tickets"]), ["c"]);
+    let old_a = sessions(&before, "a")[0]["id"].as_str().unwrap();
+    assert_eq!(strings(&replan["invalidated_sessions"]), [old_a]);
+    let old_a_integration = before["integrations"].as_array().unwrap().iter().find(|i| i["ticket_id"] == "a").unwrap()["id"].as_str().unwrap();
+    assert_eq!(strings(&replan["invalidated_integrations"]), [old_a_integration]);
+}
+
+#[test]
 fn a_revised_plan_failing_independent_verification_changes_nothing() {
     let repo = Repo::new();
     let (id, before) = repo.integrated();
