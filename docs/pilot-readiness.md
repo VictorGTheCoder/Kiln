@@ -53,6 +53,15 @@ Record actual start/end timestamps and deviations. Do not expose earlier provide
 
 Scored attempts must not start until these prerequisites are resolved and recorded. Access failures or unavailable measurements should be reported, not replaced with assumptions.
 
+## Access and environment preflight
+
+- **Codex/Kiln:** the current Codex environment is available. Kiln has not yet been run against this repository.
+- **TypeScript environment:** the TFT repository's CI uses Node 20 and its engine package requires Node 20 or newer. The current shell has Node `v22.22.1` and npm `10.9.4`, so the declared runtime versions are compatible. Dependency installation and project checks have not been run during packet preparation.
+- **Devin:** no Devin connector or credentials are available in this session; account entitlement is unknown.
+- **Copilot cloud agent:** GitHub CLI is authenticated, but the Copilot entitlement and cloud-agent availability for this private repository are unverified. No Copilot CLI extension is installed; this alone does not establish whether the cloud agent is available.
+- **Onboarding:** no provider has been onboarded for a scored run. Onboarding minutes are therefore unmeasured, not zero.
+- **Usage controls:** no provider-native cap or authorized allowance is known. No purchase or extra spending is authorized by this record. These controls must be recorded before any attempt starts.
+
 ## Repository inspection findings
 
 Issue #28 and the checked-out source confirm the duplicate-champion concern:
