@@ -4,7 +4,7 @@ mod state;
 pub mod web;
 pub use config::ProjectConfig;
 pub use engine::Engine;
-pub use state::{FrozenSpec, Run, SpecRevision};
+pub use state::{BacklogRun, FrozenSpec, Run, SpecRevision};
 
 pub mod import;
 pub mod planning;
@@ -33,5 +33,6 @@ pub mod validation;
 
 pub mod publication;
 
+pub mod backlog;
 pub mod recovery;
 pub mod synchronization;

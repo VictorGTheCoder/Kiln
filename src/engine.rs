@@ -89,6 +89,7 @@ impl Engine {
             status: "prepared".into(),
             config,
             specs,
+            backlog: None,
             plan: None,
             imported_issues: Vec::new(),
             integration_branch: None,

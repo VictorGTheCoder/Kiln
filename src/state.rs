@@ -19,6 +19,9 @@ pub struct Run {
     pub status: String,
     pub config: ProjectConfig,
     pub specs: Vec<FrozenSpec>,
+    /// Frozen open-issue inputs and derived criteria for a one-command backlog run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog: Option<BacklogRun>,
     #[serde(default)]
     pub plan: Option<crate::planning::Plan>,
     #[serde(default)]
@@ -56,6 +59,21 @@ pub struct Run {
     /// Progress comments reflected back to imported GitHub issues.
     #[serde(default)]
     pub synchronization: Option<crate::synchronization::Synchronization>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogRun {
+    pub github_repository: String,
+    pub selected_issue: u64,
+    pub snapshot_unix_ms: u128,
+    pub issue_snapshot: Vec<crate::import::ImportedIssue>,
+    #[serde(default)]
+    pub inferred_requirements: Vec<String>,
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    pub skill_version: String,
+    pub outcome: String,
 }
 /// A spec revision produced by a decision: an explicit, versioned run artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]

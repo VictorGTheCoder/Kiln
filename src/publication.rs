@@ -86,6 +86,8 @@ pub struct PullRequest {
     pub title: String,
     #[serde(default)]
     pub body: String,
+    #[serde(default)]
+    pub draft: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestDraft {
@@ -93,6 +95,7 @@ pub struct PullRequestDraft {
     pub head: String,
     pub base: String,
     pub body: String,
+    pub draft: bool,
 }
 /// The GitHub pull request operations publication relies on.
 pub trait PullRequestHost {
@@ -197,6 +200,7 @@ impl PullRequestHost for FixturePullRequests {
             base: draft.base.clone(),
             title: draft.title.clone(),
             body: draft.body.clone(),
+            draft: draft.draft,
         };
         state.pull_requests.push(FixturePullRequest {
             repository: repository.into(),
@@ -275,6 +279,7 @@ impl GitHubPullRequests {
             base: value["base"]["ref"].as_str().unwrap_or_default().into(),
             title: value["title"].as_str().unwrap_or_default().into(),
             body: value["body"].as_str().unwrap_or_default().into(),
+            draft: value["draft"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -316,7 +321,7 @@ impl PullRequestHost for GitHubPullRequests {
             ],
             Some(&serde_json::json!({
                 "title": draft.title, "head": draft.head, "base": draft.base,
-                "body": draft.body, "maintainer_can_modify": false,
+                "body": draft.body, "maintainer_can_modify": false, "draft": draft.draft,
             })),
         )?;
         Self::parse(&value)
@@ -568,6 +573,7 @@ impl Engine {
             head: branch.clone(),
             base: settings.target_branch.clone(),
             body: describe(&run, &report, &settings),
+            draft: true,
         };
         let pull_request = match host.find_open(
             &settings.github_repository,

@@ -105,6 +105,20 @@ kiln --repo /path/to/project serve --bind 127.0.0.1:3000
 
 See [configuration and CLI usage](docs/configuration.md) for the complete workflow.
 
+## One-command issue run
+
+For one clear, independent GitHub issue, `start-issue` snapshots the repository's open issues, derives run-scoped requirements from the selected issue and repository, then runs planning, implementation, independent review, configured validation, and draft pull request publication:
+
+```sh
+kiln --repo /path/to/project start-issue \
+  --config kiln.json \
+  --github-repo owner/name \
+  --issue 123 \
+  --codex /path/to/codex
+```
+
+The issue snapshot and generated requirements are recorded with the run. Issue bodies, labels, assignees, comments, and state are read-only. Issues with dependencies or a rejected/unverifiable plan stop before implementation; successful output remains a draft pull request. See [one-issue backlog runs](docs/backlog.md) for deterministic adapter options and the recorded skill version.
+
 ## Planning from specs
 
 Specs are version-controlled Markdown files and remain the source of truth for a run.

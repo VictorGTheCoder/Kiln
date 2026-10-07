@@ -259,7 +259,24 @@ impl Engine {
                 .collect();
             let repository_instructions =
                 fs::read_to_string(worktree.join("AGENTS.md")).unwrap_or_default();
-            let request=ImplementationRequest { context_id:session_id.clone(),isolation:run.config.isolation.clone(),instructions:"Implement this ticket using its frozen specs and prerequisite context. Preserve repository standards. Return a concrete usable change; do not integrate or release dependent tickets.".into(),ticket,specs,repository_instructions,prerequisites,worktree:worktree.clone() };
+            let mut instructions = "Implement this ticket using its frozen specs and prerequisite context. Preserve repository standards. Return a concrete usable change; do not integrate or release dependent tickets.".to_owned();
+            if let Some(backlog) = &run.backlog {
+                instructions.push_str(&format!(
+                    " Pinned Matt Pocock workflow version {}. {}",
+                    backlog.skill_version,
+                    crate::backlog::IMPLEMENTATION_SKILL_INSTRUCTIONS
+                ));
+            }
+            let request = ImplementationRequest {
+                context_id: session_id.clone(),
+                isolation: run.config.isolation.clone(),
+                instructions,
+                ticket,
+                specs,
+                repository_instructions,
+                prerequisites,
+                worktree: worktree.clone(),
+            };
             fs::create_dir_all(self.repository.join(".kiln/contexts"))?;
             fs::write(
                 self.repository

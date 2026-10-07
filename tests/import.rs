@@ -288,7 +288,7 @@ fn github_rest_contract_preserves_native_blocker_and_reports_unselected_prerequi
         include_str!("fixtures/github/blockers-15.json"),
     )
     .unwrap();
-    fs::write(bin.join("gh"), "#!/bin/sh\ncase \"$4\" in\n repos/VictorGTheCoder/kiln/issues/15) cat \"$(dirname \"$0\")/issue.json\";;\n repos/VictorGTheCoder/kiln/issues/15/dependencies/blocked_by?*) cat \"$(dirname \"$0\")/blockers.json\";;\n *) exit 1;;\nesac\n").unwrap();
+    fs::write(bin.join("gh"), "#!/bin/sh\ncase \"$4\" in\n repos/VictorGTheCoder/kiln/issues/15) cat \"$(dirname \"$0\")/issue.json\";;\n repos/VictorGTheCoder/kiln/issues/15/dependencies/blocked_by?*) cat \"$(dirname \"$0\")/blockers.json\";;\n repos/VictorGTheCoder/kiln/issues/15/comments?*) printf '[]\\n';;\n *) exit 1;;\nesac\n").unwrap();
     fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
     let cli = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_kiln"))

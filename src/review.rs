@@ -272,11 +272,15 @@ impl Engine {
                 ],
             )?;
             git(&repo, &["checkout", "--detach", &commit])?;
+            let mut instructions = format!("Independently review {axis} at the exact supplied commit. Inspect the diff, changed files, and relevant documentation; report concrete observed behavior with file and line references. Report only actionable defects as findings. Do not edit files, modify Git metadata, or integrate. Kiln reruns build and test itself, but the implementation check list may not cover every verification command required by the spec. When required executable evidence is missing, select the exact authorized command from isolation.commands in acceptance_checks so Kiln runs it and records its result before your verdict; in particular, include a configured typecheck command when a criterion requires TypeScript validation and no typecheck result is listed in implementation_checks. If you run project checks, wait for dependency installation to finish and run build, test, and typecheck commands serially; never launch wrappers that install dependencies concurrently in the same worktree. If unable to verify, return unable-to-verify with a concrete explanation. Approval cannot substitute for executable evidence.");
+            if let Some(backlog) = &run.backlog {
+                instructions.push_str(&format!(" Pinned Matt Pocock workflow version {}. {} Independently verify the issue-derived requirements.", backlog.skill_version, crate::backlog::REVIEW_SKILL_INSTRUCTIONS));
+            }
             let request = ReviewRequest {
                 context_id: context_id.clone(),
                 axis: axis.into(),
                 author_context_id: session.context_id.clone(),
-                instructions: format!("Independently review {axis} at the exact supplied commit. Inspect the diff, changed files, and relevant documentation; report concrete observed behavior with file and line references. Report only actionable defects as findings. Do not edit files, modify Git metadata, or integrate. Kiln reruns build and test itself, but the implementation check list may not cover every verification command required by the spec. When required executable evidence is missing, select the exact authorized command from isolation.commands in acceptance_checks so Kiln runs it and records its result before your verdict; in particular, include a configured typecheck command when a criterion requires TypeScript validation and no typecheck result is listed in implementation_checks. If you run project checks, wait for dependency installation to finish and run build, test, and typecheck commands serially; never launch wrappers that install dependencies concurrently in the same worktree. If unable to verify, return unable-to-verify with a concrete explanation. Approval cannot substitute for executable evidence."),
+                instructions,
                 isolation: run.config.isolation.clone(),
                 ticket: ticket.clone(),
                 specs: specs.clone(),

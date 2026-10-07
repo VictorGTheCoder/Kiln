@@ -16,6 +16,12 @@ pub struct ImportedIssue {
     pub body: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub comments: Vec<String>,
+    #[serde(default = "open_state")]
+    pub state: String,
     /// Canonical github:owner/repository#number identities, including external blockers.
     #[serde(default)]
     pub blocked_by: Vec<String>,
@@ -24,6 +30,10 @@ pub struct ImportedIssue {
 }
 pub trait IssueSource {
     fn selected(&self, repository: &str, numbers: &[u64]) -> Result<Vec<ImportedIssue>>;
+    fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>>;
+}
+fn open_state() -> String {
+    "OPEN".into()
 }
 #[derive(Deserialize)]
 pub struct FixtureIssues {
@@ -46,6 +56,22 @@ impl IssueSource for FixtureIssues {
                     .with_context(|| format!("selected issue #{number} missing from fixture"))
             })
             .collect()
+    }
+    fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>> {
+        let mut issues: Vec<_> = self
+            .issues
+            .iter()
+            .filter(|issue| issue.state.eq_ignore_ascii_case("open"))
+            .cloned()
+            .collect();
+        for issue in &mut issues {
+            issue
+                .blocked_by
+                .extend(body_blockers(repository, &issue.body));
+            issue.blocked_by.sort();
+            issue.blocked_by.dedup();
+        }
+        Ok(issues)
     }
 }
 pub struct GitHubIssues;
@@ -91,6 +117,12 @@ impl IssueSource for GitHubIssues {
                         .iter()
                         .filter_map(|l| l["name"].as_str().map(String::from))
                         .collect(),
+                    assignee: value["assignee"]["login"].as_str().map(String::from),
+                    comments: Vec::new(),
+                    state: value["state"]
+                        .as_str()
+                        .unwrap_or("open")
+                        .to_ascii_uppercase(),
                     blocked_by: Vec::new(),
                     dependency_source: "native".into(),
                 };
@@ -121,9 +153,51 @@ impl IssueSource for GitHubIssues {
                 issue.blocked_by.sort();
                 issue.blocked_by.dedup();
                 issue.dependency_source = "native-and-body".into();
+                let mut page = 1;
+                loop {
+                    let comments =
+                        Self::get(&format!("{endpoint}/comments?per_page=100&page={page}"))?;
+                    let comments = comments
+                        .as_array()
+                        .context("invalid GitHub comments response")?;
+                    issue.comments.extend(
+                        comments
+                            .iter()
+                            .filter_map(|comment| comment["body"].as_str().map(String::from)),
+                    );
+                    if comments.len() < 100 {
+                        break;
+                    }
+                    page += 1;
+                }
                 Ok(issue)
             })
             .collect()
+    }
+    fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>> {
+        let mut numbers = Vec::new();
+        let mut page = 1;
+        loop {
+            let issues = Self::get(&format!(
+                "repos/{repository}/issues?state=open&per_page=100&page={page}"
+            ))?;
+            let issues = issues
+                .as_array()
+                .context("invalid GitHub open issue response")?;
+            numbers.extend(
+                issues
+                    .iter()
+                    .filter(|issue| issue.get("pull_request").is_none())
+                    .filter_map(|issue| issue["number"].as_u64()),
+            );
+            if issues.len() < 100 {
+                break;
+            }
+            page += 1;
+        }
+        let mut snapshot = self.selected(repository, &numbers)?;
+        snapshot.retain(|issue| issue.state.eq_ignore_ascii_case("open"));
+        Ok(snapshot)
     }
 }
 fn identity_from_url(url: &str) -> Option<String> {
@@ -134,7 +208,7 @@ fn identity_from_url(url: &str) -> Option<String> {
         .ok()
         .map(|n| format!("github:{repo}#{n}"))
 }
-fn section(body: &str, name: &str) -> Vec<String> {
+pub(crate) fn section(body: &str, name: &str) -> Vec<String> {
     let mut active = false;
     let mut result = Vec::new();
     for line in body.lines() {
@@ -160,7 +234,7 @@ fn section(body: &str, name: &str) -> Vec<String> {
     }
     result
 }
-fn body_blockers(repository: &str, body: &str) -> Vec<String> {
+pub(crate) fn body_blockers(repository: &str, body: &str) -> Vec<String> {
     section(body, "Blocked by")
         .into_iter()
         .filter_map(|line| {

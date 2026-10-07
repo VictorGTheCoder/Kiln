@@ -13,6 +13,32 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Snapshot open issues and take one independent issue through planning, delivery gates and draft PR publication.
+    StartIssue {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        github_repo: String,
+        #[arg(long)]
+        issue: u64,
+        #[arg(long)]
+        issue_fixture: Option<PathBuf>,
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
+        planning_fixture: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["claude", "planning_fixture"])]
+        codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
+        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
+        run_fixture: Option<PathBuf>,
+        #[arg(long)]
+        verifier: Option<PathBuf>,
+        #[arg(long, conflicts_with = "gh")]
+        publication_fixture: Option<PathBuf>,
+        #[arg(long)]
+        gh: Option<PathBuf>,
+    },
     /// Read selected GitHub issues and independently verify against frozen specs.
     Import {
         id: String,
@@ -242,6 +268,126 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let engine = Engine::open(&cli.repo)?;
     let value = match cli.command {
+        Commands::StartIssue {
+            config,
+            github_repo,
+            issue,
+            issue_fixture,
+            planning_fixture,
+            codex,
+            claude,
+            run_fixture,
+            verifier,
+            publication_fixture,
+            gh,
+        } => {
+            let source: Box<dyn kiln::import::IssueSource> = match issue_fixture {
+                Some(path) => Box::new(kiln::import::FixtureIssues::load(
+                    &engine.repository.join(path),
+                )?),
+                None => Box::new(kiln::import::GitHubIssues),
+            };
+            let run =
+                engine.prepare_backlog_issue(&config, &github_repo, issue, source.as_ref())?;
+            let id = run.id.clone();
+            let mut planned = if let Some(path) = planning_fixture {
+                let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+                let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+                engine.plan(&id, &agent)?
+            } else {
+                let config = engine.inspect(&id)?.config;
+                with_planner!(
+                    Provider::select(codex.clone(), claude.clone()),
+                    engine,
+                    config,
+                    |agent| {
+                        let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+                        engine.plan(&id, &agent)?
+                    }
+                )
+            };
+            engine.record_backlog_plan(&id, &mut planned)?;
+            if !planned.plan.as_ref().is_some_and(|plan| plan.executable) {
+                println!("{}", serde_json::to_string_pretty(&planned)?);
+                anyhow::bail!("backlog issue plan rejected; inspect recorded findings");
+            }
+            let providers: Box<dyn kiln::scheduler::TicketProviders> =
+                if let Some(path) = run_fixture {
+                    Box::new(kiln::scheduler::FixtureScenario::load(
+                        &engine.repository.join(path),
+                        &engine.repository,
+                    )?)
+                } else {
+                    let config = engine.inspect(&id)?.config;
+                    let repository = engine.repository.clone();
+                    let isolation = config.isolation.clone();
+                    match Provider::select(codex, claude) {
+                        Provider::Codex(path) => Box::new(
+                            kiln::scheduler::CodexProviders::new(
+                                kiln::codex::CodexConfig::from_project(&config, path)?,
+                            )
+                            .with_replanning(repository, isolation),
+                        ),
+                        Provider::Claude(path) => Box::new(
+                            kiln::scheduler::ClaudeProviders::new(
+                                kiln::claude::ClaudeConfig::from_project(&config, path)?,
+                            )
+                            .with_replanning(repository, isolation),
+                        ),
+                    }
+                };
+            let run = engine.run_tickets(&id, providers.as_ref())?;
+            if run.status == "blocked" {
+                anyhow::bail!(
+                    "backlog issue blocked during implementation; inspect recorded run evidence"
+                );
+            }
+            let checks = match verifier {
+                Some(path) => {
+                    kiln::validation::VerifierChecks::load(&engine.repository.join(path))?
+                }
+                None => Default::default(),
+            };
+            let run = engine.validate(&id, &checks)?;
+            if !run
+                .validation_reports
+                .last()
+                .is_some_and(|report| report.outcome == kiln::validation::VERIFIED)
+            {
+                anyhow::bail!("backlog issue failed validation; inspect the recorded report");
+            }
+            let host: Box<dyn kiln::publication::PullRequestHost> = match publication_fixture {
+                Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
+                    &engine.repository.join(path),
+                )),
+                None => Box::new(kiln::publication::GitHubPullRequests {
+                    program: gh.unwrap_or_else(|| "gh".into()),
+                }),
+            };
+            let mut run = engine.publish(&id, host.as_ref())?;
+            engine.transact(&id, |stored| {
+                if let Some(backlog) = &mut stored.backlog {
+                    backlog.outcome = stored
+                        .publication
+                        .as_ref()
+                        .map(|p| p.status.clone())
+                        .unwrap_or_else(|| stored.status.clone());
+                    backlog.evidence.push(format!(
+                        "Final outcome: {}; publication status: {}.",
+                        stored.status,
+                        stored
+                            .publication
+                            .as_ref()
+                            .map(|p| p.status.as_str())
+                            .unwrap_or("missing")
+                    ));
+                }
+                run = stored.clone();
+                Ok(())
+            })?;
+            println!("{}", serde_json::to_string_pretty(&run)?);
+            return Ok(());
+        }
         Commands::Import {
             id,
             github_repo,
