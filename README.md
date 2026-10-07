@@ -4,9 +4,9 @@ Kiln is a Rust orchestrator that takes approved specs to an integrated, verified
 
 ## Project status
 
-The product specification and its decomposition into 19 tickets are approved. The Rust foundation prepares and inspects durable workflow runs through the CLI and local web view. Frozen specs can be decomposed and independently verified through a deterministic planning adapter. Real agent execution is added in subsequent implementation slices.
+The product specification and its decomposition into 19 tickets are approved. The Rust engine prepares frozen inputs, independently verifies ticket plans, executes isolated Codex sessions, reviews and corrects changes, schedules dependencies concurrently, and verifies integration. Durable state supports limits, interruption recovery, explicit spec replanning, acceptance evidence, and GitHub publication and progress synchronization. Deterministic adapters exercise the workflow without a live provider account.
 
-See [configuration and CLI usage](docs/configuration.md). Run `cargo test` to verify preparation behavior in temporary Git repositories and the shared local web state.
+See [configuration and CLI usage](docs/configuration.md). Run `cargo test` to verify observable CLI workflows in temporary Git repositories. Live provider evidence is documented separately from deterministic tests.
 
 The [product specification](docs/spec.md) defines the first-version scope: a Rust engine, CLI, local web interface, Codex as the first agent engine, concurrent execution, and recovery after interruptions. The [GitHub issues](https://github.com/VictorGTheCoder/kiln/issues) are the implementation tracker.
 
