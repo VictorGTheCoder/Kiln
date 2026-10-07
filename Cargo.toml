@@ -2,6 +2,11 @@
 name = "kiln"
 version = "0.1.0"
 edition = "2021"
+description = "Spec-driven coding agent orchestrator for planning, parallel implementation, review, validation, and verified pull requests"
+repository = "https://github.com/VictorGTheCoder/kiln"
+readme = "README.md"
+keywords = ["coding-agent", "ai-agents", "orchestration", "automation", "codex"]
+categories = ["development-tools"]
 
 [dependencies]
 anyhow = "1"
