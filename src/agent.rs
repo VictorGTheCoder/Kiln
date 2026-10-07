@@ -244,6 +244,7 @@ impl<P: Provider> Adapter<P> {
         };
         let mut failure = None;
         let mut completed = false;
+        let mut limit: Option<crate::limits::ProviderLimit> = None;
         let mut observe_line =
             |line: std::io::Result<String>,
              result: &mut Observation,
@@ -256,7 +257,10 @@ impl<P: Provider> Adapter<P> {
                         Ok(event) => match P::observe(&event, result) {
                             Signal::Continue => (),
                             Signal::Completed => completed = true,
-                            Signal::Failure(error) => *failure = Some(error),
+                            Signal::Failure(error) => {
+                                limit = limit.take().or_else(|| usage_limit::<P>(&event));
+                                *failure = Some(error)
+                            }
                         },
                         Err(_) => *failure = Some(format!("{name} emitted malformed JSONL event")),
                     }
@@ -311,7 +315,12 @@ impl<P: Provider> Adapter<P> {
         let stderr = self.redact_output(&redact(&errors.join().unwrap_or_default()));
         result.log.push_str(&stderr);
         if let Some(error) = failure {
-            bail!("{}; {}", self.redact_output(&error), result.log);
+            let detail = format!("{}; {}", self.redact_output(&error), result.log);
+            if let Some(mut limit) = limit {
+                limit.message = self.redact_output(&limit.message);
+                return Err(anyhow::Error::new(limit).context(detail));
+            }
+            bail!("{detail}");
         }
         if !status.unwrap().success() {
             bail!("{name} exited unsuccessfully: {}", result.log);
@@ -321,6 +330,21 @@ impl<P: Provider> Adapter<P> {
         }
         Ok(result)
     }
+}
+
+/// Shared provider-limit seam: only the provider's own failure message of a
+/// failed event (never the agent transcript) is classified.
+fn usage_limit<P: Provider>(event: &Value) -> Option<crate::limits::ProviderLimit> {
+    let message = [
+        &event["message"],
+        &event["error"]["message"],
+        &event["error"],
+        &event["result"],
+    ]
+    .into_iter()
+    .find_map(Value::as_str)
+    .map_or_else(|| event.to_string(), str::to_owned);
+    crate::limits::ProviderLimit::detect(P::SECTION, &message)
 }
 
 fn redact_with<'a>(text: &str, credentials: impl Iterator<Item = &'a String>) -> String {

@@ -312,7 +312,7 @@ fn blocked_ticket_stops_descendants_while_independent_work_continues() {
     assert_eq!(ticket(&run, "d")["state"], "integrated");
     let tip = repo.git(&["rev-parse", &format!("kiln/{id}/integration")]);
     assert_eq!(tip, integrated_commit(&run, "d"));
-    assert_eq!(repo.cli(&["inspect", &id]).status.success(), true);
+    assert!(repo.cli(&["inspect", &id]).status.success());
 }
 
 #[test]

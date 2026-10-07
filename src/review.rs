@@ -55,6 +55,9 @@ pub struct AxisReview {
     pub result: ReviewResult,
     pub checks: Vec<CheckResult>,
     pub failure: Option<String>,
+    /// The provider's usage or rate limit cut this axis short: no verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_limit: Option<crate::limits::ProviderLimit>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewSession {
@@ -97,6 +100,9 @@ pub trait ReviewAgent {
 pub struct FixtureReviewAgent {
     standards: ReviewResult,
     spec: ReviewResult,
+    /// Provider failure text, classified through the shared provider-limit seam.
+    #[serde(default)]
+    provider_failure: Option<String>,
 }
 impl FixtureReviewAgent {
     pub fn load(path: &Path) -> Result<Self> {
@@ -105,6 +111,9 @@ impl FixtureReviewAgent {
 }
 impl ReviewAgent for FixtureReviewAgent {
     fn review(&self, request: &ReviewRequest) -> Result<ReviewResult> {
+        if let Some(failure) = &self.provider_failure {
+            return Err(crate::limits::provider_failure("fixture", failure));
+        }
         Ok(if request.axis == "standards" {
             &self.standards
         } else {
@@ -165,6 +174,10 @@ impl AxisReview {
     }
 }
 impl ReviewSession {
+    /// A review cut short by a provider usage limit carries no verdict.
+    pub fn provider_limited(&self) -> bool {
+        self.standards.provider_limit.is_some() || self.spec.provider_limit.is_some()
+    }
     /// Consumers must also check the current worktree identity via Engine::review_gate.
     pub fn approves(&self, session: &ImplementationSession) -> bool {
         self.passed
@@ -174,6 +187,13 @@ impl ReviewSession {
             && session.commit.as_deref() == Some(&self.commit)
             && session.id == self.session_id
     }
+}
+/// Whether the session has a review verdict (reviews cut short by a provider
+/// usage limit do not count and are rerun).
+pub fn reviewed(run: &Run, session_id: &str) -> bool {
+    run.reviews
+        .iter()
+        .any(|r| r.session_id == session_id && !r.provider_limited())
 }
 impl Engine {
     pub fn review_gate(&self, run: &Run, session: &ImplementationSession) -> Result<bool> {
@@ -272,9 +292,11 @@ impl Engine {
                 agent.redact_output(&run.config.isolation.redact(&context_json)),
             )?;
             let mut failure = None;
+            let mut provider_limit = None;
             let mut result = match agent.review(&request) {
                 Ok(r) => r,
                 Err(e) => {
+                    provider_limit = crate::limits::ProviderLimit::in_error(&e).cloned();
                     let provider_error = format!("review provider error: {e:#}");
                     failure = Some(provider_error.clone());
                     ReviewResult {
@@ -348,6 +370,10 @@ impl Engine {
                 result,
                 checks,
                 failure: failure.map(|f| redact(&f)),
+                provider_limit: provider_limit.map(|mut l: crate::limits::ProviderLimit| {
+                    l.message = redact(&l.message);
+                    l
+                }),
             });
             crate::recovery::fault("review.after_axis", ticket_id);
         }
@@ -372,8 +398,16 @@ impl Engine {
                 .isolation
                 .redact(&serde_json::to_string(&review)?),
         );
-        run.reviews.push(serde_json::from_str(&safe_review)?);
+        let review: ReviewSession = serde_json::from_str(&safe_review)?;
+        let limit = [&review.standards, &review.spec]
+            .into_iter()
+            .find_map(|a| a.provider_limit.clone());
+        run.reviews.push(review);
         run = self.save_ticket(&run, ticket_id)?;
-        Ok(run)
+        match limit {
+            // Recorded first; the caller stops the run on the typed limit.
+            Some(limit) => Err(limit.into()),
+            None => Ok(run),
+        }
     }
 }

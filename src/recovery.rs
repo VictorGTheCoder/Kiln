@@ -258,6 +258,26 @@ impl Engine {
                 .map(|t| t.id.as_str())
                 .collect();
             for ticket in stopped {
+                // A correction cut short by a provider usage limit left its session
+                // untouched: bounded correction continues on it, uncharged.
+                let correction_cut_short = snapshot
+                    .corrections
+                    .iter()
+                    .rev()
+                    .find(|c| c.ticket_id == ticket)
+                    .filter(|c| c.outcome == crate::correction::PROVIDER_LIMIT)
+                    .filter(|c| {
+                        snapshot.sessions.iter().rev().find(|s| s.ticket_id == ticket)
+                            .is_some_and(|s| s.id == c.before.id && s.status == c.before.status)
+                    });
+                if let Some(cycle) = correction_cut_short {
+                    decisions.push(decision(Some(ticket), &cycle.id, "continued", format!(
+                        "correction attempt was cut short by the provider usage limit ({}); it is not charged, continuing bounded correction on session {}",
+                        cycle.failure.as_deref().unwrap_or("no recorded failure"),
+                        cycle.before.id
+                    )));
+                    continue;
+                }
                 let latest = run
                     .sessions
                     .iter_mut()
@@ -278,7 +298,7 @@ impl Engine {
             for session in snapshot.sessions.iter().filter(|s| {
                 s.status == "implemented" && !blocked.iter().any(|(t, _)| *t == s.ticket_id)
             }) {
-                let (action, reason) = if !snapshot.reviews.iter().any(|r| r.session_id == session.id) {
+                let (action, reason) = if !crate::review::reviewed(&snapshot, &session.id) {
                     let started = std::fs::read_dir(self.repository.join(".kiln/contexts"))
                         .into_iter()
                         .flatten()

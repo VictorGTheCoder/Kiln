@@ -46,6 +46,29 @@ fn stream_events_report_session_usage_estimate_and_redact_credentials() {
 }
 
 #[test]
+fn usage_limit_result_is_reported_as_a_provider_limit() {
+    let (dir, adapter, policy) = fake(
+        r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1760000000","session_id":"s"}'"#,
+        5,
+    );
+    let error = adapter.invoke(dir.path(), &policy, "test").unwrap_err();
+    let limit = kiln::limits::ProviderLimit::in_error(&error)
+        .unwrap_or_else(|| panic!("not classified as a provider limit: {error:#}"));
+    assert_eq!(limit.provider, "claude");
+    assert_eq!(limit.reset_at.as_deref(), Some("unix 1760000000"));
+    // An ordinary error result stays an ordinary failure.
+    let (dir, adapter, policy) = fake(
+        r#"printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Prompt is too long","session_id":"s"}'"#,
+        5,
+    );
+    let error = adapter.invoke(dir.path(), &policy, "test").unwrap_err();
+    assert!(
+        kiln::limits::ProviderLimit::in_error(&error).is_none(),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn recorded_estimate_is_accounted_as_estimate_not_measured_cost() {
     let (dir, adapter, policy) = fake(RESULT, 5);
     let observation = adapter.invoke(dir.path(), &policy, "test").unwrap();

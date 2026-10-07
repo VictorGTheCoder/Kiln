@@ -37,6 +37,10 @@ pub struct ImplementationSession {
     /// Input version (spec revision) the session was produced under; 0 = frozen specs.
     #[serde(default)]
     pub input_version: u32,
+    /// The provider's usage or rate limit cut this attempt short: it is
+    /// resumable run-wide exhaustion, not a ticket failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_limit: Option<crate::limits::ProviderLimit>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ImplementationRequest {
@@ -76,6 +80,10 @@ pub struct FixtureImplementationAgent {
     outcome: String,
     #[serde(default)]
     log: String,
+    /// Provider failure text reported after the files are written, classified
+    /// through the shared provider-limit seam like a real adapter's failure.
+    #[serde(default)]
+    provider_failure: Option<String>,
 }
 impl FixtureImplementationAgent {
     pub fn load(path: &Path) -> Result<Self> {
@@ -104,6 +112,9 @@ impl ImplementationAgent for FixtureImplementationAgent {
                 bail!("fixture path escapes worktree");
             }
             fs::write(destination, content)?;
+        }
+        if let Some(failure) = &self.provider_failure {
+            return Err(crate::limits::provider_failure("fixture", failure));
         }
         Ok(AgentResult {
             outcome: self.outcome.clone(),
@@ -212,6 +223,7 @@ impl Engine {
                 verification_passed: false,
                 failure: None,
                 input_version: run.input_version(),
+                provider_limit: None,
             };
             run.sessions.push(session.clone());
             Ok((run.clone(), session, ticket, prerequisites))
@@ -314,7 +326,10 @@ impl Engine {
             Ok(())
         })();
         if let Err(error) = execution {
-            session.status = if crate::sandbox::command_cancellation_active() {
+            session.provider_limit = crate::limits::ProviderLimit::in_error(&error).cloned();
+            session.status = if crate::sandbox::command_cancellation_active()
+                || session.provider_limit.is_some()
+            {
                 "interrupted"
             } else {
                 "failed"
@@ -327,6 +342,9 @@ impl Engine {
         session.failure = session
             .failure
             .map(|f| agent.redact_output(&run.config.isolation.redact(&f)));
+        if let Some(limit) = &mut session.provider_limit {
+            limit.message = agent.redact_output(&run.config.isolation.redact(&limit.message));
+        }
         for check in &mut session.checks {
             check.stdout = agent.redact_output(&run.config.isolation.redact(&check.stdout));
             check.stderr = agent.redact_output(&run.config.isolation.redact(&check.stderr));
@@ -342,8 +360,13 @@ impl Engine {
             if target.status == "superseded" {
                 session.status = "superseded".into();
             }
-            *target = session;
+            *target = session.clone();
             Ok(latest.clone())
+        })
+        .and_then(|run| match session.provider_limit {
+            // Recorded first; the caller stops the run on the typed limit.
+            Some(limit) => Err(limit.into()),
+            None => Ok(run),
         })
     }
 }

@@ -353,7 +353,7 @@ is running, including provider failures, rather than only after completion.
 
 `kiln correct RUN TICKET --codex /path/to/codex` recovers an attempted implementation or rejected review. It supplies frozen applicable specs, exact ticket, unresolved axis findings, checks, and current Git diff to a fresh correction context. Every correction runs build/test and new independent Standards and Spec reviews. It never integrates.
 
-`correction_cycles` is an optional positive integer (default 3). Each attempt is retained in `Run.corrections` with before/after identity, findings, checks, review, and `approved`, `retry`, `no-progress`, or `exhausted` outcome. Repeated invocation cannot reset the allowance. A fixture contains `corrections` (implementation fixture sequence) and `reviews` (independent axis fixture sequence). No unchanged correction is retried indefinitely.
+`correction_cycles` is an optional positive integer (default 3). Each attempt is retained in `Run.corrections` with before/after identity, findings, checks, review, and `approved`, `retry`, `no-progress`, `exhausted`, or uncharged `provider_limit` outcome. Repeated invocation cannot reset the allowance. A fixture contains `corrections` (implementation fixture sequence) and `reviews` (independent axis fixture sequence). No unchanged correction is retried indefinitely.
 
 ## Run limits
 
@@ -387,6 +387,38 @@ unsuccessfully. Completed integrations, sessions and evidence are preserved for
 resume, and correction cycles not started are not charged. Repeating `kiln run`
 cannot reset cumulative usage.
 
+### Provider usage limits
+
+A provider session that fails because the provider account's usage or rate limit
+is reached (Codex: "You've hit your usage limit … try again at 10:05 AM"; Claude
+Code: "usage limit reached", "5-hour limit reached ∙ resets 3pm", HTTP 429
+`rate_limit_error`) is a run-wide exhaustion, never a ticket blocker.
+`scheduler.limits.exhausted` records `limit: "provider_usage"`, the `provider`,
+its message in `reason`, and `reset_at` (verbatim, when the provider reports
+it). The same limit applies to implementation, review, correction and replanning
+sessions: the cut-short step is recorded with `provider_limit` evidence
+(implementation session `interrupted`; review axis `provider_limit`; correction
+cycle and replanning attempt with outcome `provider_limit`). Those records carry
+no verdict and are not charged against `correction_cycles` or
+`replanning_attempts`. Nothing further starts, in-flight sessions settle or stop
+per `limit_policy`, the ticket becomes `stopped` and the run `limit_exhausted`.
+After the reset, `kiln resume` (or `kiln run`) retries the interrupted step only:
+completed implementation, review, correction cycles and integrations are not
+repeated.
+
+Detection is provider-agnostic. The shared `agent::Adapter::invoke` classifies
+the failure message (`message`, `error.message`, `error` or `result` field) of
+any event a `Provider` reports as `Signal::Failure`, so Codex (`provider:
+"codex"`) and Claude Code (`provider: "claude"`) are both covered without
+provider-specific code. Other adapters pass only the provider's own failure
+message (never the agent transcript) to `kiln::limits::provider_failure(provider,
+message)` and return the resulting error; it carries a typed
+`kiln::limits::ProviderLimit` when the text reports an exhausted usage or rate
+limit (`ProviderLimit::detect` exposes the classifier). The engine recognises it
+anywhere in an error chain (`ProviderLimit::in_error`). Fixture implementation,
+review, correction and replanning entries accept `"provider_failure": "<text>"`
+to simulate it.
+
 Ticket correction exhaustion is ticket-scoped: the ticket is `blocked` with
 `exhaustion: "correction_cycles"` while `scheduler.limits.exhausted` stays null,
 so later bounded replanning can apply only when run-wide resources remain.
@@ -403,7 +435,7 @@ verifier outcome) before any revised work starts. A verified revision replaces
 the ticket in `plan`, marks its earlier sessions `superseded`, and the ticket is
 implemented and reviewed again. Each attempt is recorded in `replans` (`attempt`,
 `failures`, `previous`, `revised`, `verification`, `findings`, `outcome`:
-`replanned`, `rejected` or `failed`, and `result`: `integrated` or `blocked`).
+`replanned`, `rejected`, `failed` or uncharged `provider_limit`, and `result`: `integrated` or `blocked`).
 
 Persistent failure after replanning, or a replan that fails reverification,
 blocks the ticket with `exhaustion: "replanning"`. Its descendants never start;
@@ -494,8 +526,12 @@ attempt or lock), action and reason:
 - `completed`: a verified integration candidate whose base is unchanged gets its
   compare-and-swap ref update.
 - `restarted`: interrupted implementation or integration, and sessions cancelled by a
-  run-wide limit, restart in a fresh session or attempt; old evidence is kept.
-- `rerun`: missing or interrupted review (or failed re-verification) is rerun.
+  run-wide limit (including a provider usage limit), restart in a fresh session or
+  attempt; old evidence is kept.
+- `continued`: a correction cut short by a provider usage limit continues bounded
+  correction on the unchanged session without charging a cycle.
+- `rerun`: missing or interrupted review, including one cut short by a provider
+  usage limit (or failed re-verification), is rerun.
 - `unable-to-verify`: recorded integration the branch no longer contains; the ticket
   is blocked, never counted as success.
 - `preserved`: integrated work, recorded blockers, frozen specs and review history.

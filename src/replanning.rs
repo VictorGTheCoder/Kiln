@@ -72,8 +72,12 @@ fn failures(run: &Run, ticket: &str) -> Vec<String> {
 
 impl Engine {
     /// Replanning attempts already made for `ticket` in this run.
+    /// Attempts cut short by a provider usage limit are not charged.
     pub fn replanning_attempts(&self, run: &Run, ticket: &str) -> u64 {
-        run.replans.iter().filter(|r| r.ticket_id == ticket).count() as u64
+        run.replans
+            .iter()
+            .filter(|r| r.ticket_id == ticket && r.outcome != crate::correction::PROVIDER_LIMIT)
+            .count() as u64
     }
     /// One replanning attempt. Returns the recorded attempt; when `replanned`, the
     /// plan holds the verified revision and the ticket's earlier sessions are superseded.
@@ -91,7 +95,8 @@ impl Engine {
             .context("unknown ticket")?
             .clone();
         let attempt = self.replanning_attempts(&run, ticket) + 1;
-        let replan_id = format!("{}-replan-{ticket}-{attempt}", run.id);
+        let recorded = run.replans.iter().filter(|r| r.ticket_id == ticket).count() + 1;
+        let replan_id = format!("{}-replan-{ticket}-{recorded}", run.id);
         let context_id = format!("{replan_id}-context");
         let failures = failures(&run, ticket);
         let specs = run.effective_specs();
@@ -121,7 +126,16 @@ impl Engine {
                 .unwrap_or_default(),
         });
         let mut adopted = None;
+        let mut provider_limit = None;
         match revised {
+            Err(e) if crate::limits::ProviderLimit::in_error(&e).is_some() => {
+                provider_limit = crate::limits::ProviderLimit::in_error(&e).cloned();
+                record.outcome = crate::correction::PROVIDER_LIMIT.into();
+                record.findings.push(Finding {
+                    code: "provider_limit".into(),
+                    message: format!("{e:#}"),
+                });
+            }
             Err(e) => record.findings.push(Finding {
                 code: "replanning_failed".into(),
                 message: format!("{e:#}"),
@@ -168,7 +182,11 @@ impl Engine {
             run.replans.push(record.clone());
             Ok(())
         })?;
-        Ok(record)
+        match provider_limit {
+            // Recorded first; the caller stops the run on the typed limit.
+            Some(limit) => Err(limit.into()),
+            None => Ok(record),
+        }
     }
     /// Record what became of the revised work of the ticket's latest attempt.
     pub(crate) fn settle_replanning(&self, id: &str, ticket: &str, result: &str) -> Result<()> {

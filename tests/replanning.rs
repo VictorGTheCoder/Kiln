@@ -225,3 +225,36 @@ fn replanning_waits_for_remaining_run_limits() {
     assert!(run["replans"].as_array().unwrap().is_empty(), "no replanning without remaining resources");
     assert_eq!(ticket(&run, "a")["state"], "stopped", "the ticket stays resumable");
 }
+
+#[test]
+fn provider_usage_limit_during_replanning_spends_no_attempt_and_resume_replans() {
+    let repo = Repo::new(json!({}));
+    let id = repo.planned(&[("a", &[])]);
+    let mut limited = replanning("a", "verified", "good.txt", approved());
+    limited["provider_failure"] = json!("You've hit your usage limit. Upgrade to Pro or try again at 10:05 AM.");
+    let (out, run) = repo.run(&id, json!({"tickets":{"a":exhausting_then(limited)}}));
+    assert!(!out.status.success());
+    assert_eq!(run["status"], "limit_exhausted");
+    assert_eq!(run["scheduler"]["limits"]["exhausted"]["limit"], "provider_usage");
+    assert_eq!(ticket(&run, "a")["state"], "stopped");
+    assert!(ticket(&run, "a")["exhaustion"].is_null());
+    let r = replans(&run, "a");
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0]["outcome"], "provider_limit");
+
+    fs::write(
+        repo.path.join("scenario.json"),
+        json!({"tickets":{"a":exhausting_then(replanning("a","verified","good.txt",approved()))}}).to_string(),
+    )
+    .unwrap();
+    let resumed = repo.cli(&["resume", &id, "--fixture", "scenario.json"]);
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    let run: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(run["status"], "awaiting_validation");
+    assert_eq!(count(&run, "corrections", "a"), 3, "completed correction cycles are not repeated");
+    let r = replans(&run, "a");
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[1]["outcome"], "replanned");
+    assert_eq!(r[1]["attempt"], 1, "the cut-short attempt was not charged");
+    assert_ne!(r[0]["id"], r[1]["id"]);
+}
