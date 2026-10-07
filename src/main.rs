@@ -689,6 +689,11 @@ fn run() -> Result<()> {
             if run.status == "blocked" {
                 anyhow::bail!("run blocked; inspect scheduler blockers and ticket evidence");
             }
+            if run.status == "cancelled" {
+                anyhow::bail!(
+                    "run cancelled; active work was stopped and no further tickets were started"
+                );
+            }
             if let Some(exhausted) = run
                 .scheduler
                 .as_ref()
