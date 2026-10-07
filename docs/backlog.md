@@ -1,4 +1,19 @@
-# One-issue backlog runs
+# Backlog runs
+
+## Whole-snapshot graph runs
+
+`kiln start-backlog` freezes and plans every actionable issue in one repository snapshot. It requires an independent plan verifier before it executes any ticket:
+
+```sh
+kiln --repo /path/to/project start-backlog \
+  --config kiln.json \
+  --github-repo owner/name \
+  --codex /path/to/codex
+```
+
+Epic and tracking labels identify containers. Their open actionable issues remain independent plan candidates. Native GitHub dependencies and supported `Blocked by` issue-body references become plan edges. If acceptance criteria are absent, Kiln infers run-scoped criteria; ambiguous issues and issues with unsupported blockers stay in the durable run with a concrete `unable-to-verify` reason. Dependents of issues without an executable plan remain blocked. The scheduler continues unrelated eligible work and the run records completed, blocked, skipped, failed, and unable-to-verify issue outcomes.
+
+The deterministic graph scenario uses `--issue-fixture`, `--planning-fixture`, and `--run-fixture`. Add `--plan-only` to freeze and independently verify a graph without starting implementation.
 
 `kiln start-issue` takes one open, independent GitHub issue through Kiln's existing workflow from a single CLI invocation:
 
