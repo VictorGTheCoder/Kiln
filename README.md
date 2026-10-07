@@ -2,8 +2,6 @@
 
 Kiln is a Rust orchestrator for spec-driven software development. Give it approved Markdown specs and it coordinates coding agents through planning, implementation, review, correction, integration, and validation, with a GitHub pull request as the final deliverable.
 
-The coding agent does not own the run. Kiln does.
-
 Agent sessions stay focused on individual jobs. Kiln keeps the dependency graph, decides what can run in parallel, records what happened, checks the result, and preserves enough state to recover when a longer run is interrupted.
 
 Codex is the first supported coding agent. The provider boundary is separate from the orchestration engine so other agents can be added later.
