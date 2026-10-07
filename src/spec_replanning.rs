@@ -291,7 +291,11 @@ impl Engine {
             for t in &plan.tickets {
                 let revised = record.revised_tickets.iter().any(|r| r.id == t.id)
                     && current.tickets.iter().any(|c| c.id == t.id);
-                if covering.contains(&t.id) || revised {
+                let covers_changed_requirement = t
+                    .covers
+                    .iter()
+                    .any(|requirement| record.changed_requirements.contains(requirement));
+                if covering.contains(&t.id) || revised || covers_changed_requirement {
                     affected.push(t.id.clone());
                 }
             }
