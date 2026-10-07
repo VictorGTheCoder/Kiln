@@ -158,6 +158,20 @@ fn exit_zero_with_provider_error_is_failure() {
     assert!(!failure.contains("private-auth-value"));
 }
 #[test]
+fn malformed_structured_response_is_preserved_and_redacted() {
+    let (dir, adapter, policy) = fake(
+        "echo '{\"type\":\"thread.started\",\"thread_id\":\"review-thread\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"not-json private-auth-value\"}}'\necho '{\"type\":\"turn.completed\"}'",
+        3,
+    );
+    let failure = adapter
+        .structured_at::<serde_json::Value>(dir.path(), &policy, "review")
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("Codex final response must be the requested JSON value"));
+    assert!(failure.contains("not-json [REDACTED]"));
+    assert!(!failure.contains("private-auth-value"));
+}
+#[test]
 fn malformed_events_and_missing_completion_are_actionable() {
     for script in ["echo not-json", "echo '{\"type\":\"thread.started\"}'"] {
         let (dir, adapter, policy) = fake(script, 3);

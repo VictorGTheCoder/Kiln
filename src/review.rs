@@ -118,6 +118,17 @@ fn standards(repository: &Path, base: &str) -> Result<String> {
 fn clean(repo: &Path) -> Result<bool> {
     Ok(git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty())
 }
+fn append_failure(failure: &mut Option<String>, message: impl Into<String>) {
+    let message = message.into();
+    match failure {
+        Some(existing) if !existing.contains(&message) => {
+            existing.push_str("; ");
+            existing.push_str(&message);
+        }
+        Some(_) => {}
+        None => *failure = Some(message),
+    }
+}
 fn check(run: &Run, repo: &Path, name: &str, argv: &[String]) -> CheckResult {
     crate::sandbox::Sandbox::check(&run.config.isolation, repo, name, argv)
 }
@@ -248,12 +259,13 @@ impl Engine {
             let mut result = match agent.review(&request) {
                 Ok(r) => r,
                 Err(e) => {
-                    failure = Some(format!("{e:#}"));
+                    let provider_error = format!("review provider error: {e:#}");
+                    failure = Some(provider_error.clone());
                     ReviewResult {
                         outcome: "unable-to-verify".into(),
                         findings: vec![],
                         evidence: String::new(),
-                        log: String::new(),
+                        log: provider_error,
                         acceptance_checks: vec![],
                     }
                 }
@@ -271,7 +283,10 @@ impl Engine {
                 checks.push(check(&run, &repo, "test", argv));
             }
             if !clean(&repo)? || git(&repo, &["rev-parse", "HEAD"])? != commit {
-                failure=Some("review or verification changed commit content; requires new implementation and review".into());
+                append_failure(
+                    &mut failure,
+                    "review or verification changed commit content; requires new implementation and review",
+                );
             }
             if !session.verification_passed
                 || ![("build", &run.config.build), ("test", &run.config.test)]
@@ -285,7 +300,7 @@ impl Engine {
                 || session.checks.iter().any(|c| !c.passed)
                 || checks.iter().any(|c| !c.passed)
             {
-                failure = Some("required executable checks failed or missing".into());
+                append_failure(&mut failure, "required executable checks failed or missing");
             }
             if result.evidence.trim().is_empty()
                 || result
@@ -293,10 +308,10 @@ impl Engine {
                     .iter()
                     .any(|f| f.evidence.trim().is_empty() || f.message.trim().is_empty())
             {
-                failure = Some("missing observed review evidence".into());
+                append_failure(&mut failure, "missing observed review evidence");
             }
             if !["approved", "rejected", "unable-to-verify"].contains(&result.outcome.as_str()) {
-                failure = Some("invalid review outcome".into());
+                append_failure(&mut failure, "invalid review outcome");
             }
             let redact = |s: &str| agent.redact_output(&run.config.isolation.redact(s));
             result.outcome = redact(&result.outcome);
