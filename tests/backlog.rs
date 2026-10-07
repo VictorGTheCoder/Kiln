@@ -71,7 +71,7 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
     p.git(&["remote", "add", "origin", p.remote.to_str().unwrap()]);
     fs::write(p.repo.join("README.md"), "# Demo\nA tiny project.\n").unwrap();
     fs::write(p.repo.join(".gitignore"), ".kiln/\n").unwrap();
-    let criterion = "The project writes the requested greeting";
+    let criterion = "When the app starts, it writes the greeting to greeting.txt";
     p.write("kiln.json", json!({
         "build":["git","diff","--check"], "test":["git","diff","--check"], "startup":["git","--version"],
         "acceptance_criteria":[criterion],
@@ -82,9 +82,9 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
     p.git(&["add", "."]);
     p.git(&["commit", "-qm", "initial"]);
     p.git(&["push", "-q", "origin", "main"]);
-    let issue = json!({"issues":[{"number":7,"url":"https://github.com/example/project/issues/7","title":"Add greeting output","body":"## Acceptance criteria\n- The project writes the requested greeting\n","labels":["enhancement"],"assignee":"reporter","comments":["Please preserve existing output."],"blocked_by":[],"state":"OPEN","dependency_source":"native-and-body"}]});
+    let issue = json!({"issues":[{"number":7,"url":"https://github.com/example/project/issues/7","title":"Add greeting output","body":"When the app starts, write a friendly greeting to a text file so users can read it later.","labels":["enhancement"],"assignee":"reporter","comments":["Please preserve existing output."],"blocked_by":[],"state":"OPEN","dependency_source":"native-and-body"}]});
     p.write("issues.json", issue.clone());
-    p.write("planning.json", json!({"tickets":[{
+    p.write("planning.json", json!({"inferred_requirements":[criterion],"tickets":[{
         "id":"github:example/project#7","title":"Add greeting output","description":"Implement the issue using repository context.",
         "acceptance_criteria":[criterion],"covers":["github-example-project-7.md#ac-1"],"blocked_by":[]
     }],"verification":{"outcome":"verified","findings":[]}}));
@@ -123,7 +123,9 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
     assert_eq!(run["backlog"]["issue_snapshot"][0]["assignee"], "reporter");
     assert_eq!(run["backlog"]["issue_snapshot"][0]["state"], "OPEN");
     assert_eq!(run["plan"]["requirements"][0]["criterion"], criterion);
+    assert_eq!(run["backlog"]["inferred_requirements"][0], criterion);
     assert_eq!(run["plan"]["executable"], true);
+    assert_eq!(run["plan"]["verification"]["outcome"], "verified");
     assert_eq!(run["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(run["validation_reports"][0]["outcome"], "verified");
     assert_eq!(run["publication"]["pull_request"]["draft"], true);
@@ -243,6 +245,7 @@ fn ambiguous_plan_is_recorded_and_never_reaches_implementation() {
     fs::write(
         repo.join("planning.json"),
         json!({
+            "inferred_requirements":["The tool completes the explicitly requested improvement"],
             "tickets":[],
             "verification":{"outcome":"unable-to-verify","findings":[{"code":"ambiguous","message":"The request does not select speed or ease-of-use as the intended outcome."}]}
         })
@@ -277,4 +280,68 @@ fn ambiguous_plan_is_recorded_and_never_reaches_implementation() {
         .unwrap()
         .iter()
         .any(|f| f["code"] == "ambiguous"));
+}
+
+#[test]
+fn explicit_issue_acceptance_bullets_are_preserved_without_inference() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path();
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .status()
+        .unwrap();
+    fs::write(
+        repo.join("kiln.json"),
+        json!({
+            "build":["git"],"test":["git"],"startup":["git"],"acceptance_criteria":["Works"],
+            "isolation":{"network":"none","runtime":"system","commands":[["git"]]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("issues.json"),
+        json!({"issues":[{
+            "number":7,"url":"https://github.com/example/project/issues/7","title":"Add output",
+            "body":"## Acceptance criteria\n- Keep the original acceptance wording exactly\n","labels":[],"comments":[],"assignee":null,
+            "blocked_by":[],"state":"OPEN"
+        }]}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("planning.json"),
+        json!({"tickets":[],"verification":{"outcome":"unable-to-verify","findings":[]}})
+            .to_string(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kiln"))
+        .args([
+            "start-issue",
+            "--config",
+            "kiln.json",
+            "--github-repo",
+            "example/project",
+            "--issue",
+            "7",
+            "--issue-fixture",
+            "issues.json",
+            "--planning-fixture",
+            "planning.json",
+            "--run-fixture",
+            "unused.json",
+        ])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let run: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        run["backlog"]["inferred_requirements"][0],
+        "Keep the original acceptance wording exactly"
+    );
+    assert_eq!(
+        run["plan"]["requirements"][0]["criterion"],
+        "Keep the original acceptance wording exactly"
+    );
 }

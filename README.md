@@ -121,7 +121,7 @@ The issue snapshot and generated requirements are recorded with the run. Issue b
 
 ## Planning from specs
 
-Specs are version-controlled Markdown files and remain the source of truth for a run.
+In the approved-spec workflow, version-controlled Markdown files remain the source of truth for a run. The `start-issue` workflow is an explicit exception: it derives run-scoped requirements from one read-only issue and repository context without requiring an approved spec.
 
 Each approved spec contains explicit acceptance criteria. Kiln freezes the supplied files, derives requirement identities from those criteria, and gives the planning agent that fixed input.
 
@@ -192,7 +192,7 @@ The provider interface keeps agent-specific integration separate from orchestrat
 
 ## GitHub integration
 
-Kiln can import existing GitHub issues and use them as implementation tickets while keeping repository specs authoritative.
+The approved-spec import workflow can use GitHub issues as implementation tickets while keeping repository specs authoritative. The `start-issue` workflow instead derives a run-scoped spec from one issue and repository context.
 
 It can synchronize progress back to those issues without rewriting their titles or descriptions.
 

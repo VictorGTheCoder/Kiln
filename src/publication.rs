@@ -88,6 +88,8 @@ pub struct PullRequest {
     pub body: String,
     #[serde(default)]
     pub draft: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequestDraft {
@@ -102,6 +104,8 @@ pub trait PullRequestHost {
     fn find_open(&self, repository: &str, head: &str, base: &str) -> Result<Option<PullRequest>>;
     fn create(&self, repository: &str, draft: &PullRequestDraft) -> Result<PullRequest>;
     fn update(&self, repository: &str, number: u64, draft: &PullRequestDraft) -> Result<()>;
+    /// Convert an existing ready-for-review pull request to draft and confirm the result.
+    fn convert_to_draft(&self, repository: &str, pull_request: &PullRequest) -> Result<bool>;
 }
 
 /// Durable record of the remote effects of publishing a run.
@@ -201,6 +205,7 @@ impl PullRequestHost for FixturePullRequests {
             title: draft.title.clone(),
             body: draft.body.clone(),
             draft: draft.draft,
+            node_id: None,
         };
         state.pull_requests.push(FixturePullRequest {
             repository: repository.into(),
@@ -221,6 +226,17 @@ impl PullRequestHost for FixturePullRequests {
         entry.pull_request.title = draft.title.clone();
         entry.pull_request.body = draft.body.clone();
         self.store(&state)
+    }
+    fn convert_to_draft(&self, repository: &str, pull_request: &PullRequest) -> Result<bool> {
+        let mut state = self.load()?;
+        let entry = state
+            .pull_requests
+            .iter_mut()
+            .find(|p| p.repository == repository && p.pull_request.number == pull_request.number)
+            .context("pull request missing from fixture")?;
+        entry.pull_request.draft = true;
+        self.store(&state)?;
+        Ok(true)
     }
 }
 
@@ -280,6 +296,7 @@ impl GitHubPullRequests {
             title: value["title"].as_str().unwrap_or_default().into(),
             body: value["body"].as_str().unwrap_or_default().into(),
             draft: value["draft"].as_bool().unwrap_or(false),
+            node_id: value["node_id"].as_str().map(String::from),
         })
     }
 }
@@ -338,6 +355,34 @@ impl PullRequestHost for GitHubPullRequests {
             Some(&serde_json::json!({"title": draft.title, "body": draft.body})),
         )?;
         Ok(())
+    }
+    fn convert_to_draft(&self, _repository: &str, pull_request: &PullRequest) -> Result<bool> {
+        let node_id = pull_request
+            .node_id
+            .as_deref()
+            .context("GitHub response omitted pull request node_id; refusing to report a non-draft PR as delivered")?;
+        let query = "mutation ConvertPullRequestToDraft($pullRequestId: ID!) { convertPullRequestToDraft(input: {pullRequestId: $pullRequestId}) { pullRequest { id isDraft } } }";
+        let value = self.api(
+            &[
+                "graphql",
+                "-f",
+                &format!("query={query}"),
+                "-F",
+                &format!("pullRequestId={node_id}"),
+            ],
+            None,
+        )?;
+        let converted = &value["data"]["convertPullRequestToDraft"]["pullRequest"];
+        if converted["id"].as_str() != Some(node_id) {
+            bail!("GitHub draft conversion response did not match the selected pull request");
+        }
+        let is_draft = converted["isDraft"]
+            .as_bool()
+            .context("GitHub draft conversion response did not confirm isDraft")?;
+        if !is_draft {
+            bail!("GitHub did not convert the existing pull request to draft");
+        }
+        Ok(true)
     }
 }
 
@@ -580,10 +625,16 @@ impl Engine {
             &branch,
             &settings.target_branch,
         )? {
-            Some(existing) => {
+            Some(mut existing) => {
                 publication.reconciled = true;
                 if existing.body != draft.body || existing.title != draft.title {
                     host.update(&settings.github_repository, existing.number, &draft)?;
+                }
+                if !existing.draft {
+                    if !host.convert_to_draft(&settings.github_repository, &existing)? {
+                        bail!("existing pull request was not confirmed as draft; refusing to report publication as delivered");
+                    }
+                    existing.draft = true;
                 }
                 PullRequest {
                     title: draft.title.clone(),
@@ -595,6 +646,11 @@ impl Engine {
         };
         if pull_request.head != branch || pull_request.base != settings.target_branch {
             bail!("GitHub returned a pull request for a different branch pair");
+        }
+        if !pull_request.draft {
+            bail!(
+                "GitHub pull request is not a draft; refusing to record the issue run as delivered"
+            );
         }
         publication.pull_request = Some(pull_request);
         publication.status = "published".into();

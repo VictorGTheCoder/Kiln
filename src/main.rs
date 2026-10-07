@@ -287,10 +287,35 @@ fn run() -> Result<()> {
                 )?),
                 None => Box::new(kiln::import::GitHubIssues),
             };
-            let run =
-                engine.prepare_backlog_issue(&config, &github_repo, issue, source.as_ref())?;
+            let run = if let Some(path) = &planning_fixture {
+                let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+                engine.prepare_backlog_issue(
+                    &config,
+                    &github_repo,
+                    issue,
+                    source.as_ref(),
+                    &agent,
+                )?
+            } else {
+                let project_config = kiln::ProjectConfig::load(
+                    &engine.repository.join(&config),
+                    &engine.repository,
+                )?;
+                with_planner!(
+                    Provider::select(codex.clone(), claude.clone()),
+                    engine,
+                    project_config,
+                    |agent| engine.prepare_backlog_issue(
+                        &config,
+                        &github_repo,
+                        issue,
+                        source.as_ref(),
+                        &agent
+                    )?
+                )
+            };
             let id = run.id.clone();
-            let mut planned = if let Some(path) = planning_fixture {
+            let mut planned = if let Some(path) = &planning_fixture {
                 let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
                 let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
                 engine.plan(&id, &agent)?

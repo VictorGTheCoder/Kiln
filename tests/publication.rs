@@ -314,19 +314,21 @@ fn existing_open_pull_request_is_adopted_and_its_description_refreshed() {
             {"repository":"acme/widgets","number":41,"url":"https://github.com/acme/widgets/pull/41",
              "head":"unrelated","base":"main","title":"Other","body":"other"},
             {"repository":"acme/widgets","number":42,"url":"https://github.com/acme/widgets/pull/42",
-             "head":branch,"base":"main","title":"Stale","body":"stale"}
+             "head":branch,"base":"main","title":"Stale","body":"stale","draft":false}
         ]}),
     );
     let run = p.ok(&["publish", &id, "--fixture", "github.json"]);
     let prs = p.pull_requests();
     assert_eq!(prs.len(), 2);
     assert_eq!(run["publication"]["pull_request"]["number"], 42);
+    assert_eq!(run["publication"]["pull_request"]["draft"], true);
     assert_eq!(run["publication"]["reconciled"], true);
     assert!(prs[1]["body"]
         .as_str()
         .unwrap()
         .contains("## Validation evidence"));
     assert_eq!(prs[0]["body"], "other");
+    assert_eq!(prs[1]["draft"], true);
 }
 
 #[test]
@@ -403,7 +405,7 @@ fn github_contract_lists_open_pull_requests_then_creates_one() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[]' ;;\n*'--method POST'*) cat > create.json; printf '{{\"number\":7,\"html_url\":\"https://github.com/acme/widgets/pull/7\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}}}}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[]' ;;\n*'--method POST'*) cat > create.json; printf '{{\"number\":7,\"html_url\":\"https://github.com/acme/widgets/pull/7\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}},\"draft\":true}}' ;;\n*) exit 1 ;;\nesac\n",
             d = dir.display(),
             b = branch
         ),
@@ -418,6 +420,7 @@ fn github_contract_lists_open_pull_requests_then_creates_one() {
         run["publication"]["pull_request"]["url"],
         "https://github.com/acme/widgets/pull/7"
     );
+    assert_eq!(run["publication"]["pull_request"]["draft"], true);
     let calls = fs::read_to_string(dir.join("calls.log")).unwrap();
     let calls: Vec<_> = calls.lines().collect();
     assert_eq!(calls.len(), 2, "{calls:?}");
@@ -435,6 +438,7 @@ fn github_contract_lists_open_pull_requests_then_creates_one() {
         serde_json::from_slice(&fs::read(dir.join("create.json")).unwrap()).unwrap();
     assert_eq!(request["head"], branch);
     assert_eq!(request["base"], "main");
+    assert_eq!(request["draft"], true);
     assert!(request["body"]
         .as_str()
         .unwrap()
@@ -451,7 +455,7 @@ fn github_contract_reconciles_listed_pull_request_with_update() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[{{\"number\":9,\"html_url\":\"https://github.com/acme/widgets/pull/9\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}},\"body\":\"old\"}}]' ;;\n*'--method PATCH'*) cat > update.json; printf '{{}}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[{{\"number\":9,\"html_url\":\"https://github.com/acme/widgets/pull/9\",\"node_id\":\"PR_node9\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}},\"body\":\"old\",\"draft\":false}}]' ;;\n*'--method PATCH'*) cat > update.json; printf '{{}}' ;;\n*'graphql'*) printf '{{\"data\":{{\"convertPullRequestToDraft\":{{\"pullRequest\":{{\"id\":\"PR_node9\",\"isDraft\":true}}}}}}}}' ;;\n*) exit 1 ;;\nesac\n",
             d = dir.display(),
             b = branch
         ),
@@ -462,10 +466,14 @@ fn github_contract_reconciles_listed_pull_request_with_update() {
 
     let run = p.ok(&["publish", &id, "--gh", script.to_str().unwrap()]);
     assert_eq!(run["publication"]["pull_request"]["number"], 9);
+    assert_eq!(run["publication"]["pull_request"]["draft"], true);
     assert_eq!(run["publication"]["reconciled"], true);
     let calls = fs::read_to_string(dir.join("calls.log")).unwrap();
     assert!(!calls.contains("POST"), "no duplicate PR: {calls}");
     assert!(calls.contains("api --method PATCH repos/acme/widgets/pulls/9 --input -"));
+    assert!(calls.contains("api graphql"));
+    assert!(calls.contains("convertPullRequestToDraft"));
+    assert!(calls.contains("pullRequestId=PR_node9"));
 }
 
 #[test]

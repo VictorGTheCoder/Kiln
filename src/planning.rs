@@ -64,10 +64,24 @@ pub trait PlanningAgent {
     fn generate(&self, request: &PlanningRequest) -> Result<Vec<Ticket>>;
     fn verify(&self, request: &VerificationRequest) -> Result<Verification>;
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct AcceptanceCriteriaInferenceRequest {
+    pub issue: crate::import::ImportedIssue,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcceptanceCriteriaInference {
+    pub acceptance_criteria: Vec<String>,
+}
+/// Fresh planning context that turns issue-only prose into observable behavior.
+pub trait AcceptanceCriteriaInferenceAgent {
+    fn infer(&self, request: &AcceptanceCriteriaInferenceRequest) -> Result<Vec<String>>;
+}
 #[derive(Deserialize)]
 pub struct FixtureAgent {
     tickets: Vec<Ticket>,
     verification: Verification,
+    #[serde(default)]
+    inferred_requirements: Vec<String>,
 }
 impl FixtureAgent {
     pub fn load(path: &Path) -> Result<Self> {
@@ -81,6 +95,14 @@ impl PlanningAgent for FixtureAgent {
     }
     fn verify(&self, _: &VerificationRequest) -> Result<Verification> {
         Ok(self.verification.clone())
+    }
+}
+impl AcceptanceCriteriaInferenceAgent for FixtureAgent {
+    fn infer(&self, _: &AcceptanceCriteriaInferenceRequest) -> Result<Vec<String>> {
+        if self.inferred_requirements.is_empty() {
+            bail!("planning fixture has no inferred_requirements for an issue without explicit acceptance bullets");
+        }
+        Ok(self.inferred_requirements.clone())
     }
 }
 /// Requirement identity comes only from the frozen Markdown, never agent output.
