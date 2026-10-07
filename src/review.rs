@@ -13,7 +13,9 @@ use std::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewFinding {
     pub code: String,
+    #[serde(deserialize_with = "text")]
     pub message: String,
+    #[serde(deserialize_with = "text")]
     pub evidence: String,
     #[serde(default = "required")]
     pub required: bool,
@@ -21,13 +23,27 @@ pub struct ReviewFinding {
 fn required() -> bool {
     true
 }
+/// Accepts a string or a list of strings; Codex sometimes itemizes prose fields.
+fn text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Text {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Text::deserialize(deserializer)? {
+        Text::One(text) => text,
+        Text::Many(lines) => lines.join("\n"),
+    })
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewResult {
     pub outcome: String,
     #[serde(default)]
     pub findings: Vec<ReviewFinding>,
+    #[serde(deserialize_with = "text")]
     pub evidence: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "text")]
     pub log: String,
     #[serde(default)]
     pub acceptance_checks: Vec<Vec<String>>,

@@ -148,7 +148,24 @@ impl Engine {
             .iter()
             .rev()
             .find(|c| c.ticket_id == ticket_id)
-            .is_some_and(|c| matches!(c.outcome.as_str(), "no-progress" | "exhausted"))
+            .is_some_and(|c| match c.outcome.as_str() {
+                "exhausted" => true,
+                // A stall is final unless a later review of this session brings new required findings.
+                "no-progress" => !c.review.as_ref().is_some_and(|stalled| {
+                    run.reviews
+                        .iter()
+                        .skip_while(|r| r.id != stalled.id)
+                        .skip(1)
+                        .filter(|r| r.session_id == run.sessions[index].id)
+                        .last()
+                        .is_some_and(|r| {
+                            [&r.standards, &r.spec]
+                                .iter()
+                                .any(|axis| axis.result.findings.iter().any(|f| f.required))
+                        })
+                }),
+                _ => false,
+            })
         {
             return Ok(run);
         }

@@ -171,8 +171,7 @@ fn malformed_structured_response_is_preserved_and_redacted() {
     assert!(failure.contains("not-json [REDACTED]"));
     assert!(!failure.contains("private-auth-value"));
 }
-#[test]
-fn review_process_contract_requires_scalar_evidence_and_log() {
+fn review_via_fake(response: &str) -> kiln::review::ReviewResult {
     use kiln::{
         execution::CheckResult,
         planning::Ticket,
@@ -183,18 +182,12 @@ fn review_process_contract_requires_scalar_evidence_and_log() {
     let cli = dir.path().join("codex");
     fs::write(
         &cli,
-        r##"#!/bin/sh
+        format!(
+            r##"#!/bin/sh
 prompt=$(cat)
-printf '%s\n' '{"type":"thread.started","thread_id":"review-contract"}'
-case "$prompt" in
-  *"evidence MUST be a nonempty string"*)
-    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"approved\",\"findings\":[],\"evidence\":\"Read ui/web/src/components/ChampionCatalog.tsx and verified filter behavior\",\"log\":\"No project commands launched\",\"acceptance_checks\":[]}"}}'
-    ;;
-  *)
-    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"approved\",\"findings\":[],\"evidence\":\"fallback branch\",\"log\":\"checked\",\"acceptance_checks\":[]}"}}'
-    ;;
-esac
-printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":9,"output_tokens":4}}'"##,
+{response}
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":9,"output_tokens":4}}}}'"##
+        ),
     )
     .unwrap();
     fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
@@ -246,11 +239,43 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":9,"output_tokens
         }],
         worktree: dir.path().to_owned(),
     };
-    let result = adapter.review(&request).unwrap();
+    adapter.review(&request).unwrap()
+}
+#[test]
+fn review_process_contract_requires_scalar_evidence_and_log() {
+    let result = review_via_fake(
+        r#"printf '%s\n' '{"type":"thread.started","thread_id":"review-contract"}'
+case "$prompt" in
+  *"evidence MUST be a nonempty string"*)
+    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"approved\",\"findings\":[],\"evidence\":\"Read ui/web/src/components/ChampionCatalog.tsx and verified filter behavior\",\"log\":\"No project commands launched\",\"acceptance_checks\":[]}"}}'
+    ;;
+  *)
+    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"approved\",\"findings\":[],\"evidence\":\"fallback branch\",\"log\":\"checked\",\"acceptance_checks\":[]}"}}'
+    ;;
+esac"#,
+    );
     assert_eq!(result.outcome, "approved");
     assert!(result.evidence.contains("verified filter behavior"));
     assert!(result.log.contains("review-contract"));
     assert!(result.acceptance_checks.is_empty());
+}
+#[test]
+fn review_accepts_list_shaped_evidence_from_codex() {
+    let result = review_via_fake(
+        r#"printf '%s\n' '{"type":"thread.started","thread_id":"review-contract"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"rejected\",\"findings\":[{\"code\":\"CLEAR_RESETS_SORT\",\"message\":\"Clear resets sort\",\"evidence\":[\"ChampionCatalog.tsx:42\",\"sort reset to cost\"],\"required\":true}],\"evidence\":[\"Read ChampionCatalog.tsx\",\"verified filter behavior\"],\"log\":[\"git diff\"],\"acceptance_checks\":[]}"}}'"#,
+    );
+    assert_eq!(result.outcome, "rejected");
+    assert_eq!(
+        result.evidence,
+        "Read ChampionCatalog.tsx\nverified filter behavior"
+    );
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(result.findings[0].code, "CLEAR_RESETS_SORT");
+    assert_eq!(
+        result.findings[0].evidence,
+        "ChampionCatalog.tsx:42\nsort reset to cost"
+    );
 }
 #[test]
 fn malformed_events_and_missing_completion_are_actionable() {
