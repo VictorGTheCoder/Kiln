@@ -13,7 +13,9 @@ use std::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewFinding {
     pub code: String,
+    #[serde(deserialize_with = "text")]
     pub message: String,
+    #[serde(deserialize_with = "text")]
     pub evidence: String,
     #[serde(default = "required")]
     pub required: bool,
@@ -21,13 +23,27 @@ pub struct ReviewFinding {
 fn required() -> bool {
     true
 }
+/// Accepts a string or a list of strings; Codex sometimes itemizes prose fields.
+fn text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Text {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Text::deserialize(deserializer)? {
+        Text::One(text) => text,
+        Text::Many(lines) => lines.join("\n"),
+    })
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewResult {
     pub outcome: String,
     #[serde(default)]
     pub findings: Vec<ReviewFinding>,
+    #[serde(deserialize_with = "text")]
     pub evidence: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "text")]
     pub log: String,
     #[serde(default)]
     pub acceptance_checks: Vec<Vec<String>>,
@@ -235,7 +251,7 @@ impl Engine {
                 context_id: context_id.clone(),
                 axis: axis.into(),
                 author_context_id: session.context_id.clone(),
-                instructions: format!("Independently review {axis} at the exact supplied commit. Observe concrete changes and relevant behavior. Report actionable findings with evidence. Do not edit files, Git metadata, or integrate. Approval cannot substitute for executable evidence. If uncertain return unable-to-verify."),
+                instructions: format!("Independently review {axis} at the exact supplied commit. Inspect the diff, changed files, and relevant documentation; report concrete observed behavior with file and line references. Report only actionable defects as findings. Do not edit files, modify Git metadata, or integrate. If you run project checks, wait for dependency installation to finish and run build, test, and typecheck commands serially; never launch wrappers that install dependencies concurrently in the same worktree. Kiln reruns configured checks itself. If unable to verify, return unable-to-verify with a concrete explanation. Approval cannot substitute for executable evidence."),
                 isolation: run.config.isolation.clone(),
                 ticket: ticket.clone(),
                 specs: specs.clone(),

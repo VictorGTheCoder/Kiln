@@ -171,6 +171,112 @@ fn malformed_structured_response_is_preserved_and_redacted() {
     assert!(failure.contains("not-json [REDACTED]"));
     assert!(!failure.contains("private-auth-value"));
 }
+fn review_via_fake(response: &str) -> kiln::review::ReviewResult {
+    use kiln::{
+        execution::CheckResult,
+        planning::Ticket,
+        review::{ReviewAgent, ReviewRequest},
+        FrozenSpec,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cli = dir.path().join("codex");
+    fs::write(
+        &cli,
+        format!(
+            r##"#!/bin/sh
+prompt=$(cat)
+{response}
+printf '%s\n' '{{"type":"turn.completed","usage":{{"input_tokens":9,"output_tokens":4}}}}'"##
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+    let auth = dir.path().join("auth.json");
+    fs::write(&auth, r#"{"tokens":{"access_token":"private-auth-value"}}"#).unwrap();
+    let config = CodexConfig {
+        installation: cli,
+        auth,
+        model: None,
+        timeout_seconds: 5,
+    };
+    let isolation = IsolationPolicy {
+        network: "allow-all".into(),
+        runtime: "system".into(),
+        commands: vec![config.argv()],
+        secrets: Default::default(),
+    };
+    let adapter = CodexAdapter::new(config);
+    let request = ReviewRequest {
+        context_id: "review-contract".into(),
+        axis: "spec".into(),
+        author_context_id: "implementation".into(),
+        instructions: "Review the supplied change independently.".into(),
+        isolation,
+        ticket: Ticket {
+            id: "pilot-1".into(),
+            title: "Selector".into(),
+            description: "Extract selector behavior".into(),
+            acceptance_criteria: vec!["Filters are combined".into()],
+            covers: vec!["spec.md#ac-1".into()],
+            blocked_by: vec![],
+        },
+        specs: vec![FrozenSpec {
+            path: "spec.md".into(),
+            content: "# Acceptance criteria\n- Filters are combined\n".into(),
+            content_sha256: "hash".into(),
+            source_revision: None,
+        }],
+        repository_standards: "Review concrete behavior".into(),
+        commit: "abc123".into(),
+        diff: "diff --git a/file b/file".into(),
+        implementation_checks: vec![CheckResult {
+            name: "test".into(),
+            command: vec!["npm".into(), "test".into()],
+            exit_code: Some(0),
+            stdout: "passed".into(),
+            stderr: String::new(),
+            passed: true,
+        }],
+        worktree: dir.path().to_owned(),
+    };
+    adapter.review(&request).unwrap()
+}
+#[test]
+fn review_process_contract_requires_scalar_evidence_and_log() {
+    let result = review_via_fake(
+        r#"printf '%s\n' '{"type":"thread.started","thread_id":"review-contract"}'
+case "$prompt" in
+  *"evidence MUST be a nonempty string"*)
+    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"approved\",\"findings\":[],\"evidence\":\"Read ui/web/src/components/ChampionCatalog.tsx and verified filter behavior\",\"log\":\"No project commands launched\",\"acceptance_checks\":[]}"}}'
+    ;;
+  *)
+    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"approved\",\"findings\":[],\"evidence\":\"fallback branch\",\"log\":\"checked\",\"acceptance_checks\":[]}"}}'
+    ;;
+esac"#,
+    );
+    assert_eq!(result.outcome, "approved");
+    assert!(result.evidence.contains("verified filter behavior"));
+    assert!(result.log.contains("review-contract"));
+    assert!(result.acceptance_checks.is_empty());
+}
+#[test]
+fn review_accepts_list_shaped_evidence_from_codex() {
+    let result = review_via_fake(
+        r#"printf '%s\n' '{"type":"thread.started","thread_id":"review-contract"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"rejected\",\"findings\":[{\"code\":\"CLEAR_RESETS_SORT\",\"message\":\"Clear resets sort\",\"evidence\":[\"ChampionCatalog.tsx:42\",\"sort reset to cost\"],\"required\":true}],\"evidence\":[\"Read ChampionCatalog.tsx\",\"verified filter behavior\"],\"log\":[\"git diff\"],\"acceptance_checks\":[]}"}}'"#,
+    );
+    assert_eq!(result.outcome, "rejected");
+    assert_eq!(
+        result.evidence,
+        "Read ChampionCatalog.tsx\nverified filter behavior"
+    );
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(result.findings[0].code, "CLEAR_RESETS_SORT");
+    assert_eq!(
+        result.findings[0].evidence,
+        "ChampionCatalog.tsx:42\nsort reset to cost"
+    );
+}
 #[test]
 fn malformed_events_and_missing_completion_are_actionable() {
     for script in ["echo not-json", "echo '{\"type\":\"thread.started\"}'"] {
