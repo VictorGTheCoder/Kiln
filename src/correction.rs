@@ -26,6 +26,7 @@ pub struct CorrectionCycle {
 #[derive(Debug, Clone, Serialize)]
 pub struct CorrectionRequest {
     pub context_id: String,
+    pub instructions: String,
     pub ticket: Ticket,
     pub specs: Vec<FrozenSpec>,
     pub diff: String,
@@ -71,7 +72,7 @@ impl CorrectionAgent for FixtureCorrectionAgent {
             &crate::execution::ImplementationRequest {
                 context_id: r.context_id.clone(),
                 isolation: r.isolation.clone(),
-                instructions: "Correct unresolved findings".into(),
+                instructions: r.instructions.clone(),
                 ticket: r.ticket.clone(),
                 specs: r.specs.clone(),
                 repository_instructions: r.repository_instructions.clone(),
@@ -227,8 +228,17 @@ impl Engine {
                 .filter(|c| c.ticket_id == ticket_id)
                 .count();
             let cycle_id = format!("{}-correction-{}", before.id, attempt + 1);
+            let mut instructions = "Correct only this ticket's unresolved findings and failing checks using its frozen specs. Use TDD vertical slices. Do not stage, commit, integrate, or modify Git metadata; Kiln owns checks and fresh review.".to_owned();
+            if let Some(backlog) = &run.backlog {
+                instructions.push_str(&format!(
+                    " Pinned Matt Pocock workflow version {}. {}",
+                    backlog.skill_version,
+                    crate::backlog::IMPLEMENTATION_SKILL_INSTRUCTIONS
+                ));
+            }
             let request = CorrectionRequest {
                 context_id: cycle_id.clone(),
+                instructions,
                 ticket,
                 specs,
                 diff: git(&worktree, &["diff", "--binary", &before.base_commit])?,

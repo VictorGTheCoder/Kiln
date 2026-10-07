@@ -169,6 +169,11 @@ fn verified_run_pushes_integration_branch_and_opens_described_pull_request() {
     assert_eq!(pr["head"], branch);
     assert_eq!(pr["base"], "main");
     assert_eq!(pr["repository"], "acme/widgets");
+    assert_eq!(
+        pr["draft"], false,
+        "approved-spec publication remains ready for review"
+    );
+    assert_eq!(run["publication"]["pull_request"]["draft"], false);
     let body = pr["body"].as_str().unwrap();
     for expected in [
         "## Delivered behavior",
@@ -321,14 +326,14 @@ fn existing_open_pull_request_is_adopted_and_its_description_refreshed() {
     let prs = p.pull_requests();
     assert_eq!(prs.len(), 2);
     assert_eq!(run["publication"]["pull_request"]["number"], 42);
-    assert_eq!(run["publication"]["pull_request"]["draft"], true);
+    assert_eq!(run["publication"]["pull_request"]["draft"], false);
     assert_eq!(run["publication"]["reconciled"], true);
     assert!(prs[1]["body"]
         .as_str()
         .unwrap()
         .contains("## Validation evidence"));
     assert_eq!(prs[0]["body"], "other");
-    assert_eq!(prs[1]["draft"], true);
+    assert_eq!(prs[1]["draft"], false);
 }
 
 #[test]
@@ -438,7 +443,7 @@ fn github_contract_lists_open_pull_requests_then_creates_one() {
         serde_json::from_slice(&fs::read(dir.join("create.json")).unwrap()).unwrap();
     assert_eq!(request["head"], branch);
     assert_eq!(request["base"], "main");
-    assert_eq!(request["draft"], true);
+    assert_eq!(request["draft"], false);
     assert!(request["body"]
         .as_str()
         .unwrap()
@@ -466,14 +471,15 @@ fn github_contract_reconciles_listed_pull_request_with_update() {
 
     let run = p.ok(&["publish", &id, "--gh", script.to_str().unwrap()]);
     assert_eq!(run["publication"]["pull_request"]["number"], 9);
-    assert_eq!(run["publication"]["pull_request"]["draft"], true);
+    assert_eq!(run["publication"]["pull_request"]["draft"], false);
     assert_eq!(run["publication"]["reconciled"], true);
     let calls = fs::read_to_string(dir.join("calls.log")).unwrap();
     assert!(!calls.contains("POST"), "no duplicate PR: {calls}");
     assert!(calls.contains("api --method PATCH repos/acme/widgets/pulls/9 --input -"));
-    assert!(calls.contains("api graphql"));
-    assert!(calls.contains("convertPullRequestToDraft"));
-    assert!(calls.contains("pullRequestId=PR_node9"));
+    assert!(
+        !calls.contains("graphql"),
+        "approved-spec publication must not convert PRs to draft: {calls}"
+    );
 }
 
 #[test]

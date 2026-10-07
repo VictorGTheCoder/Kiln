@@ -472,7 +472,7 @@ impl<P: Provider> crate::correction::CorrectionAgent for Adapter<P> {
         Adapter::redact_output(self, s)
     }
     fn correct(&self, r: &crate::correction::CorrectionRequest) -> Result<AgentResult> {
-        let prompt=format!("Correct only this ticket's unresolved findings and failing checks using the frozen specs. Use TDD vertical slices. Do not stage, commit, integrate or modify Git metadata. Rust owns checks and fresh review.\n{}",serde_json::to_string_pretty(r)?);
+        let prompt=format!("{}\nCorrect only this ticket's unresolved findings and failing checks using the frozen specs. Do not stage, commit, integrate or modify Git metadata. Rust owns checks and fresh review.\n{}",r.instructions,serde_json::to_string_pretty(r)?);
         let o = self.invoke(&r.worktree, &r.isolation, &prompt)?;
         Ok(AgentResult {
             outcome: "completed".into(),

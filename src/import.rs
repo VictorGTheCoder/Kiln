@@ -76,6 +76,8 @@ impl IssueSource for FixtureIssues {
 }
 pub struct GitHubIssues;
 impl GitHubIssues {
+    const PAGE_SIZE: usize = 100;
+
     fn get(endpoint: &str) -> Result<serde_json::Value> {
         let output = Command::new("gh")
             .args(["api", "--method", "GET", endpoint])
@@ -88,6 +90,26 @@ impl GitHubIssues {
             );
         }
         serde_json::from_slice(&output.stdout).context("invalid GitHub API response")
+    }
+
+    /// Fetch all pages from a REST collection endpoint whose query includes
+    /// `per_page`. Callers retain endpoint-specific response parsing.
+    fn get_pages(endpoint: &str) -> Result<Vec<serde_json::Value>> {
+        let mut values = Vec::new();
+        let mut page = 1;
+        loop {
+            let response = Self::get(&format!("{endpoint}&page={page}"))?;
+            let response = response
+                .as_array()
+                .context("invalid paginated GitHub API response")?;
+            let count = response.len();
+            values.extend(response.iter().cloned());
+            if count < Self::PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(values)
     }
 }
 impl IssueSource for GitHubIssues {
@@ -127,24 +149,15 @@ impl IssueSource for GitHubIssues {
                     dependency_source: "native".into(),
                 };
                 // Failure is surfaced rather than silently dropping inaccessible native edges.
-                let mut page = 1;
-                loop {
-                    let blockers = Self::get(&format!(
-                        "{endpoint}/dependencies/blocked_by?per_page=100&page={page}"
-                    ))?;
-                    let blockers = blockers
-                        .as_array()
-                        .context("invalid GitHub dependency response")?;
-                    for blocker in blockers {
-                        let url = blocker["html_url"].as_str().context("blocker has no URL")?;
-                        issue
-                            .blocked_by
-                            .push(identity_from_url(url).context("invalid blocker URL")?);
-                    }
-                    if blockers.len() < 100 {
-                        break;
-                    }
-                    page += 1;
+                let blockers = Self::get_pages(&format!(
+                    "{endpoint}/dependencies/blocked_by?per_page={}",
+                    Self::PAGE_SIZE
+                ))?;
+                for blocker in blockers {
+                    let url = blocker["html_url"].as_str().context("blocker has no URL")?;
+                    issue
+                        .blocked_by
+                        .push(identity_from_url(url).context("invalid blocker URL")?);
                 }
                 // The documented body section is also honored, including on older exported backlogs.
                 issue
@@ -153,48 +166,27 @@ impl IssueSource for GitHubIssues {
                 issue.blocked_by.sort();
                 issue.blocked_by.dedup();
                 issue.dependency_source = "native-and-body".into();
-                let mut page = 1;
-                loop {
-                    let comments =
-                        Self::get(&format!("{endpoint}/comments?per_page=100&page={page}"))?;
-                    let comments = comments
-                        .as_array()
-                        .context("invalid GitHub comments response")?;
-                    issue.comments.extend(
-                        comments
-                            .iter()
-                            .filter_map(|comment| comment["body"].as_str().map(String::from)),
-                    );
-                    if comments.len() < 100 {
-                        break;
-                    }
-                    page += 1;
-                }
+                let comments =
+                    Self::get_pages(&format!("{endpoint}/comments?per_page={}", Self::PAGE_SIZE))?;
+                issue.comments.extend(
+                    comments
+                        .iter()
+                        .filter_map(|comment| comment["body"].as_str().map(String::from)),
+                );
                 Ok(issue)
             })
             .collect()
     }
     fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>> {
-        let mut numbers = Vec::new();
-        let mut page = 1;
-        loop {
-            let issues = Self::get(&format!(
-                "repos/{repository}/issues?state=open&per_page=100&page={page}"
-            ))?;
-            let issues = issues
-                .as_array()
-                .context("invalid GitHub open issue response")?;
-            numbers.extend(
-                issues
-                    .iter()
-                    .filter(|issue| issue.get("pull_request").is_none())
-                    .filter_map(|issue| issue["number"].as_u64()),
-            );
-            if issues.len() < 100 {
-                break;
-            }
-            page += 1;
-        }
+        let issues = Self::get_pages(&format!(
+            "repos/{repository}/issues?state=open&per_page={}",
+            Self::PAGE_SIZE
+        ))?;
+        let numbers = issues
+            .iter()
+            .filter(|issue| issue.get("pull_request").is_none())
+            .filter_map(|issue| issue["number"].as_u64())
+            .collect::<Vec<_>>();
         let mut snapshot = self.selected(repository, &numbers)?;
         snapshot.retain(|issue| issue.state.eq_ignore_ascii_case("open"));
         Ok(snapshot)

@@ -90,7 +90,8 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
     }],"verification":{"outcome":"verified","findings":[]}}));
     p.write("scenario.json", json!({"tickets":{"github:example/project#7":{
         "implementation":{"files":{"greeting.txt":"hello\\n"},"outcome":"completed"},
-        "review":{"standards":{"outcome":"approved","findings":[],"evidence":"Observed greeting.txt"},"spec":{"outcome":"approved","findings":[],"evidence":"Matches the issue criterion"}}
+        "review":{"standards":{"outcome":"rejected","findings":[{"code":"format","message":"Use the agreed greeting wording","evidence":"greeting.txt contents","required":true}],"evidence":"Observed greeting.txt"},"spec":{"outcome":"approved","findings":[],"evidence":"Matches the issue criterion"}},
+        "corrections":{"corrections":[{"files":{"greeting.txt":"Hello from the app!\\n"},"outcome":"completed"}],"reviews":[{"standards":{"outcome":"approved","findings":[],"evidence":"Observed corrected greeting"},"spec":{"outcome":"approved","findings":[],"evidence":"Matches the issue criterion"}}]}
     }}}));
     p.write("verifier.json", json!({"acceptance_checks":[]}));
     p.write("github.json", json!({"pull_requests":[]}));
@@ -127,13 +128,14 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
     assert_eq!(run["plan"]["executable"], true);
     assert_eq!(run["plan"]["verification"]["outcome"], "verified");
     assert_eq!(run["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(run["corrections"].as_array().unwrap().len(), 1);
     assert_eq!(run["validation_reports"][0]["outcome"], "verified");
     assert_eq!(run["publication"]["pull_request"]["draft"], true);
     assert!(run["backlog"]["skill_version"].as_str().is_some());
     assert_eq!(run["backlog"]["outcome"], "published");
     let implementation_context = fs::read_to_string(p.repo.join(".kiln/contexts").join(format!(
         "{}.json",
-        run["sessions"][0]["context_id"].as_str().unwrap()
+        run["corrections"][0]["before"]["context_id"].as_str().unwrap()
     )))
     .unwrap();
     assert!(implementation_context.contains("write one behavior test first and observe it fail"));
@@ -143,6 +145,13 @@ fn one_cli_start_snapshots_plans_runs_validates_and_publishes_without_mutating_i
         ))
         .unwrap();
     assert!(review_context.contains("assess standards and spec coverage independently"));
+    let correction_context = fs::read_to_string(p.repo.join(".kiln/contexts").join(format!(
+        "{}.json",
+        run["corrections"][0]["id"].as_str().unwrap()
+    )))
+    .unwrap();
+    assert!(correction_context.contains("kiln-mattpocock-workflow-1.0.0"));
+    assert!(correction_context.contains("write one behavior test first and observe it fail"));
     assert_eq!(
         serde_json::from_slice::<Value>(&fs::read(p.repo.join("issues.json")).unwrap()).unwrap(),
         issue

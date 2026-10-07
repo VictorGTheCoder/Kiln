@@ -613,12 +613,13 @@ impl Engine {
             Ok(latest.clone())
         })?;
 
+        let backlog_draft = run.backlog.is_some();
         let draft = PullRequestDraft {
             title: format!("Kiln verified delivery: run {}", run.id),
             head: branch.clone(),
             base: settings.target_branch.clone(),
             body: describe(&run, &report, &settings),
-            draft: true,
+            draft: backlog_draft,
         };
         let pull_request = match host.find_open(
             &settings.github_repository,
@@ -630,7 +631,7 @@ impl Engine {
                 if existing.body != draft.body || existing.title != draft.title {
                     host.update(&settings.github_repository, existing.number, &draft)?;
                 }
-                if !existing.draft {
+                if backlog_draft && !existing.draft {
                     if !host.convert_to_draft(&settings.github_repository, &existing)? {
                         bail!("existing pull request was not confirmed as draft; refusing to report publication as delivered");
                     }
@@ -647,7 +648,7 @@ impl Engine {
         if pull_request.head != branch || pull_request.base != settings.target_branch {
             bail!("GitHub returned a pull request for a different branch pair");
         }
-        if !pull_request.draft {
+        if backlog_draft && !pull_request.draft {
             bail!(
                 "GitHub pull request is not a draft; refusing to record the issue run as delivered"
             );
