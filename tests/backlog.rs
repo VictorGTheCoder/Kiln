@@ -782,6 +782,7 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         String::from_utf8_lossy(&unresolved.stderr)
     );
     let unresolved: Value = serde_json::from_slice(&unresolved.stdout).unwrap();
+    assert_ne!(unresolved["status"], "completed");
     let group = unresolved["delivery_groups"]
         .as_array()
         .unwrap()
@@ -798,6 +799,15 @@ fn start_backlog_records_partial_results_and_keeps_independent_work_moving() {
         .as_str()
         .unwrap()
         .contains("CI finding"));
+    assert_eq!(
+        unresolved["backlog"]["dispositions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["issue"] == "github:example/project#3")
+            .unwrap()["status"],
+        "failed"
+    );
     let report = project.cli(&["report", run["id"].as_str().unwrap()]);
     assert!(report.status.success());
     let report: Value = serde_json::from_slice(&report.stdout).unwrap();
@@ -951,6 +961,7 @@ fn repeated_start_backlog_skips_completed_open_issues_and_delivers_only_new_issu
         "--repair-fixture",
         "repair.json",
     ]);
+    assert_eq!(resumed["status"], "partial");
     assert_eq!(resumed["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(
         resumed["delivery_groups"][0]["pull_request"]["number"],

@@ -1085,7 +1085,6 @@ impl Engine {
             std::time::Duration::from_secs(settings.required_checks_timeout_seconds.unwrap_or(600));
         let poll_interval =
             std::time::Duration::from_secs(settings.required_checks_poll_seconds.unwrap_or(5));
-        let prior_status = initial.status.clone();
         self.transact(id, |run| {
             run.status = "running".into();
             Ok(())
@@ -1571,7 +1570,97 @@ impl Engine {
             return Ok(latest);
         }
         self.transact(id, |run| {
-            run.status = prior_status.clone();
+            let mut group_results = std::collections::BTreeMap::new();
+            for group in &run.delivery_groups {
+                let (status, reason) = match group.status.as_str() {
+                    "verified" => (
+                        "completed",
+                        "Implementation, independent review, local validation, and required delivery checks passed.".to_owned(),
+                    ),
+                    "failed" | "validation-failed" | "ci-failed" | "repair-failed" => (
+                        "failed",
+                        group.reason.clone().unwrap_or_else(|| {
+                            format!("Delivery group ended with status '{}'.", group.status)
+                        }),
+                    ),
+                    "blocked" | "delivery-blocked" => (
+                        "blocked",
+                        group.reason.clone().unwrap_or_else(|| {
+                            format!("Delivery group ended with status '{}'.", group.status)
+                        }),
+                    ),
+                    _ => (
+                        "unable-to-verify",
+                        group.reason.clone().unwrap_or_else(|| {
+                            format!("Delivery group ended with status '{}'; delivery is not verified.", group.status)
+                        }),
+                    ),
+                };
+                for ticket in &group.tickets {
+                    group_results.insert(ticket.as_str(), (status, reason.clone()));
+                }
+            }
+            if let Some(backlog) = &mut run.backlog {
+                let integrated: std::collections::BTreeSet<_> = run
+                    .scheduler
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|scheduler| &scheduler.tickets)
+                    .filter(|ticket| ticket.state == "integrated")
+                    .map(|ticket| ticket.id.as_str())
+                    .collect();
+                for disposition in &mut backlog.dispositions {
+                    if disposition.kind == "container" {
+                        continue;
+                    }
+                    if let Some((status, reason)) = group_results.get(disposition.issue.as_str()) {
+                        if integrated.contains(disposition.issue.as_str()) {
+                            disposition.status = (*status).into();
+                            disposition.reason = reason.clone();
+                        }
+                    }
+                }
+                let actionable: Vec<_> = backlog
+                    .dispositions
+                    .iter()
+                    .filter(|disposition| disposition.kind != "container")
+                    .collect();
+                run.status = if actionable.iter().all(|disposition| {
+                    matches!(disposition.status.as_str(), "completed" | "skipped")
+                }) {
+                    "completed".into()
+                } else if actionable
+                    .iter()
+                    .any(|disposition| disposition.status == "failed")
+                    && actionable
+                        .iter()
+                        .any(|disposition| disposition.status == "blocked")
+                {
+                    "blocked".into()
+                } else if actionable
+                    .iter()
+                    .any(|disposition| disposition.status == "completed")
+                {
+                    "partial".into()
+                } else if actionable
+                    .iter()
+                    .any(|disposition| disposition.status == "blocked")
+                {
+                    "blocked".into()
+                } else if actionable
+                    .iter()
+                    .any(|disposition| disposition.status == "failed")
+                {
+                    "failed".into()
+                } else {
+                    "unable-to-verify".into()
+                };
+                backlog.outcome = run.status.clone();
+                backlog.evidence.push(format!(
+                    "Delivery verification finalized with run status '{}'.",
+                    run.status
+                ));
+            }
             Ok(())
         })?;
         if let Err(error) = outcome {
