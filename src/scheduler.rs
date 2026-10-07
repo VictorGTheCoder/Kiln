@@ -879,18 +879,20 @@ impl TicketProviders for FixtureScenario {
     }
 }
 
-/// Real providers: a fresh Codex adapter (and therefore context and stop handle)
+/// Real providers: a fresh adapter (and therefore context and stop handle)
 /// for every role of every session. `stop_active` cancels every adapter handed
 /// out, and adapters created afterwards start stopped.
-pub struct CodexProviders {
-    config: crate::codex::CodexConfig,
+pub struct AgentProviders<P: crate::agent::Provider> {
+    config: P,
     stops: Mutex<Vec<std::sync::Arc<AtomicBool>>>,
     stopped: AtomicBool,
     /// Repository and policy for fresh replanning contexts, when enabled.
     replanning: Option<(PathBuf, crate::sandbox::IsolationPolicy)>,
 }
-impl CodexProviders {
-    pub fn new(config: crate::codex::CodexConfig) -> Self {
+pub type CodexProviders = AgentProviders<crate::codex::CodexConfig>;
+pub type ClaudeProviders = AgentProviders<crate::claude::ClaudeConfig>;
+impl<P: crate::agent::Provider> AgentProviders<P> {
+    pub fn new(config: P) -> Self {
         Self {
             config,
             stops: Mutex::new(Vec::new()),
@@ -907,8 +909,8 @@ impl CodexProviders {
         self.replanning = Some((repository, isolation));
         self
     }
-    fn adapter(&self) -> crate::codex::CodexAdapter {
-        let adapter = crate::codex::CodexAdapter::new(self.config.clone());
+    fn adapter(&self) -> crate::agent::Adapter<P> {
+        let adapter = crate::agent::Adapter::new(self.config.clone());
         if self.stopped.load(Ordering::SeqCst) {
             adapter.stop();
         }
@@ -918,7 +920,7 @@ impl CodexProviders {
         adapter
     }
 }
-impl TicketProviders for CodexProviders {
+impl<P: crate::agent::Provider> TicketProviders for AgentProviders<P> {
     fn implementer(&self, _: &str) -> Result<Box<dyn ImplementationAgent + '_>> {
         Ok(Box::new(self.adapter()))
     }
@@ -930,7 +932,7 @@ impl TicketProviders for CodexProviders {
     }
     fn replanner(&self, _: &str) -> Result<Option<Box<dyn Replanner + '_>>> {
         Ok(self.replanning.as_ref().map(|(repository, isolation)| {
-            Box::new(crate::codex::CodexPlanningAgent {
+            Box::new(crate::agent::PlanningContexts {
                 adapter: self.adapter(),
                 repository: repository.clone(),
                 isolation: isolation.clone(),

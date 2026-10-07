@@ -1,0 +1,11 @@
+# Real Claude Code contract smoke, 2026-10-07
+
+Executed `kiln implement RUN a --claude ~/.local/bin/claude` in a disposable Git repository with the installed native Claude Code 2.1.292 (the symlink resolves to `~/.local/share/claude/versions/2.1.292`) and the subscription login from `~/.claude/.credentials.json`. The project configuration referenced that path only; no credential value was copied into the repository, run state or logs. Explicit bwrap isolation with `network=allow-all` applied, and `model` was `haiku` to keep usage minimal.
+
+The single approved ticket, planned through a fixture, asked for `greeting.txt` containing exactly `hello kiln`. The authorized argv was `ClaudeConfig::argv()` plus `--model haiku`; the prompt travelled on stdin.
+
+One invocation was made. Kiln recorded `status=implemented`, `verification_passed=true` and an implementation commit. The engine independently ran `git diff --check` and `sh -c 'test "$(cat greeting.txt)" = "hello kiln"'` inside the sandbox; both passed. The original checkout contained no greeting file: the change stayed in its assigned worktree.
+
+The recorded observation carried the stream-json session id, the final `result` text, usage (`input_tokens` 50, `output_tokens` 1760, `cache_read_input_tokens` 129483), `cost: null` and `cost_estimate: 0.046` (the CLI's API-price estimate, not subscription cost). A search of the CLI stdout, stderr and the whole `.kiln` run directory found neither the access token nor the refresh token.
+
+So the flags, the private credential mount at `/home/kiln/.claude/.credentials.json`, OAuth login inside the namespace and the stream parsing work against the real CLI. The deterministic suite (`tests/claude.rs`, fake `claude` executable) covers session identity, usage and estimate recording, credential narrowing and redaction, stdin prompts, error results despite exit 0 (message kept intact), malformed and fenced structured responses, missing results, timeout, explicit stop, list-shaped review evidence, CLI planning and implementation via `--claude`, and the `--codex`/`--claude` exclusion. It runs without a subscription. This smoke covers one implementation invocation; review, correction and planning reuse the same invocation boundary and were exercised only with the fake.
