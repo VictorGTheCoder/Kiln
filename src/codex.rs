@@ -15,6 +15,8 @@ pub type CodexPlanningAgent = crate::agent::PlanningContexts<CodexConfig>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodexConfig {
+    /// Optional when the executable is found on PATH or passed on the command line.
+    #[serde(default)]
     pub installation: PathBuf,
     pub auth: PathBuf,
     #[serde(default)]

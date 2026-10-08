@@ -164,4 +164,97 @@ impl Run {
             .max()
             .unwrap_or(0)
     }
+    /// The delivery group that delivers `ticket`, if one was formed.
+    pub fn delivery_group_of(&self, ticket: &str) -> Option<&crate::delivery::DeliveryGroup> {
+        self.delivery_groups
+            .iter()
+            .find(|g| g.tickets.iter().any(|t| t == ticket))
+    }
+    /// Where `ticket` is in the pipeline, from recorded state only. Every view
+    /// of ticket stages (`kiln status`, the dashboard kanban) derives from it.
+    pub fn ticket_progress(&self, ticket: &str) -> TicketProgress {
+        let state = self
+            .scheduler
+            .iter()
+            .flat_map(|s| &s.tickets)
+            .find(|t| t.id == ticket)
+            .map_or("planned", |t| t.state.as_str());
+        let stage = match state {
+            "planned" | "waiting" => Stage::Planned,
+            "implementing" => match self.sessions.iter().rev().find(|s| s.ticket_id == ticket) {
+                // The latest implementation finished: the ticket is in review.
+                Some(s) if s.status == "implemented" => Stage::Review,
+                _ => Stage::Implementing,
+            },
+            "awaiting_integration" | "integrating" => Stage::Integrating,
+            "integrated" => {
+                let group = self.delivery_group_of(ticket);
+                // Single-issue runs record one publication for the run.
+                let pull_request = match group {
+                    Some(g) => g.pull_request.as_ref(),
+                    None => self
+                        .publication
+                        .as_ref()
+                        .and_then(|p| p.pull_request.as_ref()),
+                };
+                match (group, pull_request) {
+                    (Some(g), _) if g.status == "verified" => Stage::Delivered,
+                    (_, None) => Stage::Integrated,
+                    (Some(g), Some(_))
+                        if !g.ci_attempts.is_empty()
+                            || matches!(
+                                g.status.as_str(),
+                                "awaiting-ci" | "ci-pending" | "ci-failed"
+                            ) =>
+                    {
+                        Stage::Ci
+                    }
+                    _ => Stage::PullRequest,
+                }
+            }
+            // Blocked or stopped tickets stay where their evidence ends.
+            _ => {
+                if self.integrations.iter().any(|i| i.ticket_id == ticket) {
+                    Stage::Integrating
+                } else if self.reviews.iter().any(|r| r.ticket_id == ticket) {
+                    Stage::Review
+                } else if self.sessions.iter().any(|s| s.ticket_id == ticket) {
+                    Stage::Implementing
+                } else {
+                    Stage::Planned
+                }
+            }
+        };
+        TicketProgress {
+            state: state.to_owned(),
+            stage,
+        }
+    }
+}
+
+/// A ticket's recorded scheduler state and the furthest pipeline stage it
+/// reached (see [`Run::ticket_progress`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketProgress {
+    /// Scheduler state (`waiting`, `implementing`, `integrated`, `blocked`, …),
+    /// or `planned` before scheduling.
+    pub state: String,
+    pub stage: Stage,
+}
+
+/// Pipeline stages of a ticket, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+    Planned,
+    Implementing,
+    Review,
+    Integrating,
+    /// Integrated; no pull request yet.
+    Integrated,
+    /// Its pull request is open; CI not observed yet.
+    PullRequest,
+    /// Its pull request is awaiting, pending or failing CI.
+    Ci,
+    /// Its delivery group is verified.
+    Delivered,
 }

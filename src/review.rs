@@ -302,7 +302,9 @@ impl Engine {
             )?;
             let mut failure = None;
             let mut provider_limit = None;
-            let mut result = match agent.review(&request) {
+            let mut result = match self
+                .with_agent_log(id, Some(ticket_id), "review", || agent.review(&request))
+            {
                 Ok(r) => r,
                 Err(e) => {
                     provider_limit = crate::limits::ProviderLimit::in_error(&e).cloned();

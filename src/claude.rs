@@ -12,6 +12,8 @@ pub type ClaudePlanningAgent = crate::agent::PlanningContexts<ClaudeConfig>;
 #[serde(deny_unknown_fields)]
 pub struct ClaudeConfig {
     /// Pinned Claude Code executable (e.g. `~/.local/share/claude/versions/X.Y.Z`).
+    /// Optional when the executable is found on PATH or passed on the command line.
+    #[serde(default)]
     pub installation: PathBuf,
     /// Authenticated `.credentials.json`; only a private copy reaches the session.
     pub credentials: PathBuf,

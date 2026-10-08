@@ -50,10 +50,13 @@ Kiln currently builds from source.
 
 You need Rust and Git. On Linux, workflow execution also uses `bubblewrap` (`bwrap`) for process isolation.
 
+Install the `kiln` command from a checkout, so it is available from any directory:
+
 ```sh
-cargo build
-cargo test
+cargo install --path .
 ```
+
+For development, `cargo build` and `cargo test` build and test it in place.
 
 A target repository defines its build, test, startup, acceptance, and isolation policy in `kiln.json`.
 
@@ -79,6 +82,42 @@ For example:
   }
 }
 ```
+
+### Plan the backlog with no flags
+
+From inside the target repository, plan its open GitHub issues:
+
+```sh
+cd /path/to/project
+kiln plan
+```
+
+`kiln plan` freezes the open issue graph, plans and independently verifies it, prints a readable summary, then stops before delivery. `kiln plan --json` prints the recorded run as JSON instead. Kiln infers every input, and each has an override flag:
+
+| Input | Inferred from | Override |
+|-------|---------------|----------|
+| Repository | the current directory | `--repo PATH` |
+| Project configuration | `kiln.json` in the repository | `--config PATH` |
+| GitHub repository | the `origin` remote (`https://github.com/OWNER/REPO.git` or `git@github.com:OWNER/REPO.git`) | `--github-repo OWNER/REPO` |
+| Provider | the optional `"agent": "codex"` or `"claude"` field of `kiln.json`, found on `PATH`; without it, `codex` then `claude` on `PATH` | `--codex PATH` or `--claude PATH` |
+
+The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus `timeout_seconds`) is still required; its `installation` may be omitted when the executable is on `PATH`.
+
+Deliver the backlog with `kiln start`, which takes the same inputs and overrides. It plans the open issue graph, runs the tickets, opens the delivery pull requests and waits for CI, then prints a readable outcome (`--json` prints the recorded run). When the latest backlog run was planned by `kiln plan` and not started, and the open issues have not changed since, `kiln start` delivers that plan instead of planning again; `kiln start --fresh` always plans anew.
+
+Press Ctrl-C during `kiln start` to pause: Kiln lets active ticket work reach a safe point, records the run as paused and exits; pressing Ctrl-C again does not stop it sooner. `kiln resume` continues the latest paused or interrupted run with the same inferred inputs, without repeating completed commits, pull requests or comments. From another terminal, `kiln pause` and `kiln cancel` act on the latest active run. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
+
+Check on the latest run at any time:
+
+```sh
+kiln status            # latest run of this repository
+kiln status RUN_ID     # a specific run
+kiln status --json     # machine-readable summary (null when there is no run)
+```
+
+The summary shows the run status, how many tickets are in each stage (planned, waiting, implementing, integrating, integrated, delivering, delivered, blocked, stopped), the active ticket, and each pull request with its CI status.
+
+Watch runs in the browser with `kiln dashboard`, which serves a dashboard of the repository's runs without starting one. `kiln start` serves the same dashboard for as long as it runs. Both print the URL (`Kiln web view: http://127.0.0.1:3000`, or the next free port when 3000 is taken; `kiln dashboard --bind ADDR` picks another loopback address). The page lists the runs with their status and shows the selected run's tickets on a kanban by stage (planned, implementing, review, integrating, PR, CI), built from the recorded run state, so earlier runs appear too. Its data comes from `/api/dashboard/runs` and `/api/dashboard/runs/RUN_ID`. The server binds to loopback only and rejects foreign `Host` headers. While it runs, `kiln status` shows its URL.
 
 Prepare a run from one or more approved Markdown specs:
 

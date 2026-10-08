@@ -275,12 +275,16 @@ impl<P: Provider> Adapter<P> {
         let mut failure = None;
         let mut completed = false;
         let mut limit: Option<crate::limits::ProviderLimit> = None;
+        let mut sink = crate::activity::Sink::current();
         let mut observe_line =
             |line: std::io::Result<String>,
              result: &mut Observation,
              failure: &mut Option<String>| match line {
                 Ok(line) => {
                     let safe = redact(&line);
+                    if let Some(sink) = &mut sink {
+                        sink.line(&self.redact_output(&safe));
+                    }
                     result.log.push_str(&safe);
                     result.log.push('\n');
                     match serde_json::from_str::<Value>(&safe) {
@@ -292,7 +296,8 @@ impl<P: Provider> Adapter<P> {
                                 *failure = Some(error)
                             }
                         },
-                        Err(_) => *failure = Some(format!("{name} emitted malformed JSONL event")),
+                        // Malformed lines stay in the log and never end the session.
+                        Err(_) => (),
                     }
                 }
                 Err(error) => *failure = Some(format!("observe {name} stdout: {error}")),

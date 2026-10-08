@@ -1253,6 +1253,15 @@ impl Engine {
                     current.status = "awaiting-ci".into();
                     Ok(latest.clone())
                 })?;
+                for ticket in &group.tickets {
+                    self.journal(
+                        id,
+                        Some(ticket),
+                        "pull-request",
+                        "opened",
+                        format!("#{} {}", pull_request.number, pull_request.url),
+                    );
+                }
                 let mut head_commit = commit;
                 let mut group_validation = validation;
                 let mut pr = pull_request;
@@ -1289,6 +1298,15 @@ impl Engine {
                         current.status = "awaiting-ci".into();
                         Ok(())
                     })?;
+                    for ticket in &group.tickets {
+                        self.journal(
+                            id,
+                            Some(ticket),
+                            "ci",
+                            "pending",
+                            format!("waiting for required checks on #{}", pr.number),
+                        );
+                    }
                     let _observed = crate::publication::wait_for_required_checks_observed(
                         host,
                         &settings.github_repository,
@@ -1375,6 +1393,16 @@ impl Engine {
                         })
                         .cloned()
                         .context("CI attempt disappeared")?;
+                    let (ci, detail) = match attempt.status.as_str() {
+                        "passed" => ("passed", String::new()),
+                        "no-required-checks" => ("passed", "no required checks".into()),
+                        "failed" => ("failed", attempt.failure.clone().unwrap_or_default()),
+                        "timed-out" => ("pending", "timed out waiting for checks".into()),
+                        other => (other, attempt.failure.clone().unwrap_or_default()),
+                    };
+                    for ticket in &group.tickets {
+                        self.journal(id, Some(ticket), "ci", ci, detail.clone());
+                    }
                     let updated_group = run
                         .delivery_groups
                         .iter()
@@ -1705,7 +1733,9 @@ impl Engine {
         if let Err(error) = outcome {
             return Err(error);
         }
-        self.inspect(id)
+        let run = self.inspect(id)?;
+        self.journal(id, None, "run", &run.status, "delivery finished");
+        Ok(run)
     }
 
     /// Push the verified integration branch and open (or reconcile) its pull request.

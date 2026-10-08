@@ -9,9 +9,14 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
+    time::Duration,
 };
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 
 /// Seconds between automatic reloads of a run that is still recorded as running.
 const REFRESH_SECONDS: u32 = 3;
@@ -32,6 +37,102 @@ pub struct BacklogLaunch {
     pub repair_fixture: Option<PathBuf>,
 }
 
+/// Number of successive ports tried after a taken one.
+const PORT_ATTEMPTS: u16 = 100;
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+/// What a web server shows at `/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Home {
+    /// The server-rendered runs list (`kiln serve`).
+    Runs,
+    /// The dashboard page (`kiln dashboard`, `kiln start`); the runs list
+    /// stays at `/runs`.
+    Dashboard,
+}
+
+/// A bound loopback web server, not yet serving requests.
+pub struct WebServer {
+    server: Server,
+    address: SocketAddr,
+    actions: Option<crate::actions::Fixtures>,
+}
+impl WebServer {
+    /// Bind exactly `bind`, which must be a loopback address.
+    pub fn bind(bind: SocketAddr) -> Result<Self> {
+        Self::bind_with(bind, 1)
+    }
+    /// Bind `bind`, or the next free port after it when it is taken.
+    pub fn bind_next_free(bind: SocketAddr) -> Result<Self> {
+        Self::bind_with(bind, PORT_ATTEMPTS)
+    }
+    fn bind_with(bind: SocketAddr, attempts: u16) -> Result<Self> {
+        if !bind.ip().is_loopback() {
+            bail!("the local web view must bind to a loopback address");
+        }
+        let mut address = bind;
+        let mut tried = 0;
+        loop {
+            match Server::http(address) {
+                Ok(server) => {
+                    let address = server.server_addr().to_ip().unwrap_or(address);
+                    return Ok(Self {
+                        server,
+                        address,
+                        actions: None,
+                    });
+                }
+                Err(error) => {
+                    tried += 1;
+                    let in_use = error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse);
+                    if !in_use || tried >= attempts || address.port() == 0 {
+                        bail!("cannot start local web view: {error}");
+                    }
+                    let Some(next) = address.port().checked_add(1) else {
+                        bail!("cannot start local web view: no free port after {bind}");
+                    };
+                    address.set_port(next);
+                }
+            }
+        }
+    }
+    pub fn url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+    /// Enable the dashboard action buttons; launched commands get `fixtures`.
+    pub fn with_actions(mut self, fixtures: crate::actions::Fixtures) -> Self {
+        self.actions = Some(fixtures);
+        self
+    }
+    /// Handle requests until `stop` is set (checked at least every 200 ms).
+    pub fn serve(
+        self,
+        engine: Engine,
+        backlog: Option<BacklogLaunch>,
+        home: Home,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let site = Site {
+            actions: self
+                .actions
+                .map(|fixtures| crate::actions::Actions::new(engine.clone(), fixtures)),
+            engine,
+            backlog,
+            home,
+            port: self.address.port(),
+            streams: Arc::default(),
+        };
+        while !stop.load(Ordering::Relaxed) {
+            if let Some(request) = self.server.recv_timeout(Duration::from_millis(200))? {
+                site.handle(request);
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn serve(engine: Engine, bind: SocketAddr) -> Result<()> {
     serve_with_backlog(engine, bind, None)
 }
@@ -41,32 +142,127 @@ pub fn serve_with_backlog(
     bind: SocketAddr,
     backlog: Option<BacklogLaunch>,
 ) -> Result<()> {
-    if !bind.ip().is_loopback() {
-        bail!("the local web view must bind to a loopback address");
-    }
-    let server =
-        Server::http(bind).map_err(|e| anyhow::anyhow!("cannot start local web view: {e}"))?;
-    let bound = server.server_addr().to_ip().unwrap_or(bind);
-    println!("Kiln web view: http://{}", server.server_addr());
+    let server = WebServer::bind(bind)?;
+    println!("Kiln web view: {}", server.url());
     std::io::stdout().flush()?;
-    for request in server.incoming_requests() {
+    let _announcement = crate::dashboard::Announcement::new(&engine.repository, &server.url())?;
+    server.serve(engine, backlog, Home::Runs, &AtomicBool::new(false))
+}
+
+/// Request routing shared by every request of one server.
+struct Site {
+    engine: Engine,
+    backlog: Option<BacklogLaunch>,
+    home: Home,
+    port: u16,
+    /// Dashboard action buttons, when enabled.
+    actions: Option<crate::actions::Actions>,
+    /// Event streams being served, each on its own thread.
+    streams: Arc<AtomicUsize>,
+}
+
+/// Most event streams served at once; each holds a thread until its run ends.
+const MAX_EVENT_STREAMS: usize = 32;
+
+/// One of the [`MAX_EVENT_STREAMS`] stream slots, released when dropped.
+struct StreamSlot(Arc<AtomicUsize>);
+impl StreamSlot {
+    fn take(streams: &Arc<AtomicUsize>) -> Option<Self> {
+        streams
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |open| {
+                (open < MAX_EVENT_STREAMS).then_some(open + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(streams)))
+    }
+}
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl Site {
+    /// Answer one request. Requests are answered one at a time on the server
+    /// thread, except event streams, which move to their own thread.
+    fn handle(&self, request: Request) {
+        if let Some(stream) = self.event_stream(&request) {
+            let cursor = crate::event_stream::Cursor::parse(
+                request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Last-Event-ID"))
+                    .map(|h| h.value.as_str()),
+            );
+            let Some(slot) = StreamSlot::take(&self.streams) else {
+                let body = serde_json::json!({"error": format!(
+                    "too many open event streams (at most {MAX_EVENT_STREAMS}); close a dashboard tab and retry"
+                )});
+                self.reply(request, 503, "application/json", body.to_string());
+                return;
+            };
+            let out = request.into_writer();
+            thread::spawn(move || {
+                let _slot = slot;
+                let headers = [
+                    ("Cache-Control", "no-store"),
+                    ("X-Content-Type-Options", "nosniff"),
+                    ("Content-Security-Policy", CONTENT_SECURITY_POLICY),
+                ];
+                let _ = stream.serve(out, cursor, &headers, redact_for_web);
+            });
+            return;
+        }
+        let (status, content_type, body) = self.respond(&request);
+        self.reply(request, status, content_type, body);
+    }
+    fn reply(&self, request: Request, status: u16, content_type: &str, body: String) {
+        let response = Response::from_string(body)
+            .with_status_code(status)
+            .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
+            .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+            .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap())
+            .with_header(
+                Header::from_bytes("Content-Security-Policy", CONTENT_SECURITY_POLICY).unwrap(),
+            );
+        let _ = request.respond(response);
+    }
+    /// The event stream a valid `GET /api/dashboard/runs/<id>/events` asks
+    /// for; `None` for any other request, which [`Self::respond`] answers
+    /// (with 400 or 404 for an invalid stream request).
+    fn event_stream(&self, request: &Request) -> Option<crate::event_stream::EventStream> {
+        let path = request.url().split('?').next().unwrap_or("/");
+        let id = path
+            .strip_prefix("/api/dashboard/runs/")?
+            .strip_suffix("/events")?;
+        if request.method() != &Method::Get || !self.valid_host(request) {
+            return None;
+        }
+        validate_id(id).ok()?;
+        crate::event_stream::EventStream::open(&self.engine, id).ok()
+    }
+    fn valid_host(&self, request: &Request) -> bool {
         let expected_hosts = [
-            format!("localhost:{}", bound.port()),
-            format!("127.0.0.1:{}", bound.port()),
-            format!("[::1]:{}", bound.port()),
+            format!("localhost:{}", self.port),
+            format!("127.0.0.1:{}", self.port),
+            format!("[::1]:{}", self.port),
         ];
-        let valid_host = request.headers().iter().any(|header| {
+        request.headers().iter().any(|header| {
             header.field.equiv("Host")
                 && expected_hosts
                     .iter()
                     .any(|host| header.value.as_str().eq_ignore_ascii_case(host))
-        });
+        })
+    }
+    fn respond(&self, request: &Request) -> (u16, &'static str, String) {
+        let engine = &self.engine;
+        let backlog = self.backlog.as_ref();
+        let valid_host = self.valid_host(request);
         let request_host = request
             .headers()
             .iter()
             .find(|header| header.field.equiv("Host"))
             .map(|h| h.value.as_str());
-        let (status, content_type, body) = if !valid_host {
+        if !valid_host {
             (
                 400,
                 "text/plain; charset=utf-8",
@@ -108,8 +304,10 @@ pub fn serve_with_backlog(
                     "text/plain; charset=utf-8",
                     "Invalid request body".to_owned(),
                 )
+            } else if let Some((status, body)) = self.act(request.url()) {
+                (status, "application/json", body.to_string())
             } else {
-                match mutate(&engine, backlog.as_ref(), request.url().split('?').next().unwrap_or("/")) {
+                match mutate(engine, backlog, request.url().split('?').next().unwrap_or("/")) {
                     Ok(body) => (200, "text/html; charset=utf-8", body),
                     Err(error) => (409, "text/html; charset=utf-8", format!("<!doctype html><title>Action unavailable</title><p>{}</p><p><a href=\"/\">Back to runs</a></p>", esc(&format!("{error:#}")))),
                 }
@@ -122,26 +320,72 @@ pub fn serve_with_backlog(
             )
         } else {
             let path = request.url().split('?').next().unwrap_or("/");
-            match render(&engine, path, backlog.as_ref()) {
+            let offered = (path == "/api/dashboard/actions").then(|| match &self.actions {
+                Some(actions) => actions
+                    .offered()
+                    .map(|offered| ("application/json", offered.to_string())),
+                None => Ok((
+                    "application/json",
+                    serde_json::json!({"available": [], "runs": {}, "last": null}).to_string(),
+                )),
+            });
+            let rendered = match offered.or_else(|| dashboard_route(engine, self.home, path)) {
+                Some(result) => result,
+                None => render(engine, path, backlog),
+            };
+            match rendered {
                 Ok((kind, body)) => (200, kind, body),
                 Err(error) => (404, "text/plain; charset=utf-8", format!("Kiln: {error:#}")),
             }
-        };
-        let response = Response::from_string(body)
-            .with_status_code(status)
-            .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
-            .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
-            .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap())
-            .with_header(
-                Header::from_bytes(
-                    "Content-Security-Policy",
-                    "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
-                )
-                .unwrap(),
-            );
-        let _ = request.respond(response);
+        }
     }
-    Ok(())
+    /// A dashboard action POST, answered with JSON; `None` for other paths.
+    fn act(&self, url: &str) -> Option<(u16, serde_json::Value)> {
+        let path = url.split('?').next().unwrap_or("/");
+        if !path.starts_with("/api/dashboard/") {
+            return None;
+        }
+        Some(match &self.actions {
+            Some(actions) => actions.perform(path).unwrap_or_else(|| {
+                (
+                    404,
+                    serde_json::json!({"error": "unknown dashboard action"}),
+                )
+            }),
+            None => (
+                409,
+                serde_json::json!({"error": "dashboard actions are not enabled on this server; run `kiln dashboard`"}),
+            ),
+        })
+    }
+}
+
+/// Dashboard page, script and JSON endpoints; `None` for other paths.
+fn dashboard_route(
+    engine: &Engine,
+    home: Home,
+    path: &str,
+) -> Option<Result<(&'static str, String)>> {
+    use crate::dashboard;
+    let page = || Ok(("text/html; charset=utf-8", dashboard::PAGE.to_owned()));
+    Some(match path {
+        "/dashboard" => page(),
+        "/" if home == Home::Dashboard => page(),
+        "/dashboard.js" => Ok((
+            "text/javascript; charset=utf-8",
+            dashboard::SCRIPT.to_owned(),
+        )),
+        "/api/dashboard/runs" => dashboard::runs(engine)
+            .and_then(|runs| Ok(("application/json", serde_json::to_string(&runs)?))),
+        _ => {
+            let id = path.strip_prefix("/api/dashboard/runs/")?;
+            validate_id(id).and_then(|()| {
+                let run = engine.inspect(id)?;
+                let body = serde_json::to_string(&dashboard::Board::of(&run))?;
+                Ok(("application/json", redact_for_web(&run, &body)))
+            })
+        }
+    })
 }
 fn render(
     engine: &Engine,
@@ -164,7 +408,7 @@ fn render(
         }
         return Ok(("application/json", format!("[{}]", values.join(","))));
     }
-    let (title, refresh, content) = if path == "/" {
+    let (title, refresh, content) = if path == "/" || path == "/runs" {
         let mut content = "<h1>Kiln workflow runs</h1><ul>".to_owned();
         if backlog.is_some() {
             content = "<h1>Kiln workflow runs</h1><form method=\"post\" action=\"/actions/start\"><button type=\"submit\">Start backlog run</button><p class=\"muted\">Plans and runs all open issues using the configured local workflow.</p></form><ul>".to_owned();
@@ -236,6 +480,10 @@ fn should_refresh(run: &Run) -> bool {
 fn web_worker_active(engine: &Engine) -> bool {
     let dir = engine.repository.join(".kiln");
     dir.join("web-backlog-start.lock").exists() || dir.join("web-backlog-resume.lock").exists()
+}
+
+pub(crate) fn validate_run_id(id: &str) -> Result<()> {
+    validate_id(id)
 }
 
 fn validate_id(id: &str) -> Result<()> {

@@ -18,6 +18,7 @@ impl ProjectConfig {
     pub fn load(path: &Path, repository: &Path) -> Result<Self> {
         let config: Self = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("read project configuration {}", path.display()))?)
             .context("configuration must be JSON with build, test, startup argv arrays and acceptance_criteria")?;
+        config.agent()?;
         for name in ["correction_cycles", "implementation_concurrency"] {
             if let Some(limit) = config.extensions.get(name) {
                 if limit.as_u64().is_none_or(|n| n == 0) {
@@ -71,6 +72,27 @@ impl ProjectConfig {
         }
         config.isolation.validate(repository)?;
         Ok(config)
+    }
+
+    /// The optional `agent` field naming the provider family, validated.
+    pub fn agent(&self) -> Result<Option<crate::defaults::Agent>> {
+        match self.extensions.get("agent") {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(value) => value
+                .as_str()
+                .and_then(crate::defaults::Agent::parse)
+                .map(Some)
+                .with_context(|| format!("agent must be \"codex\" or \"claude\", found {value}")),
+        }
+    }
+
+    /// The `installation` pinned in a provider section (`codex` / `claude`), if any.
+    pub fn provider_installation(&self, agent: crate::defaults::Agent) -> Option<&Path> {
+        self.extensions
+            .get(agent.name())?
+            .get("installation")?
+            .as_str()
+            .map(Path::new)
     }
 }
 fn executable(path: &Path) -> bool {

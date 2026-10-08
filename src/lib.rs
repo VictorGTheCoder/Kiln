@@ -1,11 +1,18 @@
+pub mod actions;
+pub mod activity;
 mod config;
 pub mod control;
+pub mod dashboard;
+pub mod defaults;
 mod engine;
+mod event_stream;
+pub mod journal;
 mod state;
+pub mod status;
 pub mod web;
 pub use config::ProjectConfig;
-pub use engine::Engine;
-pub use state::{BacklogRun, FrozenSpec, Run, SpecRevision};
+pub use engine::{Engine, RunActiveElsewhere};
+pub use state::{BacklogRun, FrozenSpec, Run, SpecRevision, Stage, TicketProgress};
 
 pub mod import;
 pub mod planning;

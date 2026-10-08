@@ -5,6 +5,10 @@ use crate::Engine;
 use anyhow::{bail, Context, Result};
 use std::{fs, io::Write, path::PathBuf};
 
+/// Error of `kiln resume` (and the dashboard Resume) when nothing can continue.
+pub const NOTHING_TO_RESUME: &str =
+    "no paused or interrupted run to resume; start one with `kiln start`";
+
 fn path(engine: &Engine, id: &str) -> PathBuf {
     engine
         .repository
@@ -22,13 +26,8 @@ impl Engine {
         if run.status != "running" {
             bail!("run '{id}' is not active (status: {})", run.status);
         }
-        match self.own_run(id) {
-            Ok(owner) => {
-                drop(owner);
-                bail!("run '{id}' has no active scheduler process");
-            }
-            Err(error) if error.to_string().contains("active in another process") => {}
-            Err(error) => return Err(error),
+        if !self.is_owned_elsewhere(id)? {
+            bail!("run '{id}' has no active scheduler process");
         }
         let target = path(self, id);
         let mut staging =
@@ -42,6 +41,56 @@ impl Engine {
             bail!("run '{id}' finished before the control request was applied");
         }
         Ok(())
+    }
+
+    /// The most recently created run matching `keep`.
+    fn latest_run_where(
+        &self,
+        keep: impl Fn(&crate::Run) -> Result<bool>,
+    ) -> Result<Option<crate::Run>> {
+        let mut latest: Option<crate::Run> = None;
+        for id in self.list()? {
+            let run = self.inspect(&id)?;
+            if latest
+                .as_ref()
+                .is_none_or(|old| old.created_unix_ms < run.created_unix_ms)
+                && keep(&run)?
+            {
+                latest = Some(run);
+            }
+        }
+        Ok(latest)
+    }
+
+    /// Id of the latest run whose scheduler is live in another process: the
+    /// target of `kiln pause` and `kiln cancel` without an id.
+    pub fn latest_active_run(&self) -> Result<Option<String>> {
+        Ok(self
+            .latest_run_where(|run| {
+                Ok(run.status == "running" && self.is_owned_elsewhere(&run.id)?)
+            })?
+            .map(|run| run.id))
+    }
+
+    /// The latest backlog run that can continue: paused, stopped by a limit, or
+    /// left `running` by a process that is gone. The target of `kiln resume`.
+    pub fn latest_resumable_run(&self) -> Result<Option<crate::Run>> {
+        self.latest_run_where(|run| self.is_resumable(run))
+    }
+
+    /// Whether `kiln resume` may continue `run`: a backlog run that is paused,
+    /// stopped by a limit, or recorded `running` with no live scheduler.
+    pub fn is_resumable(&self, run: &crate::Run) -> Result<bool> {
+        let backlog = run
+            .backlog
+            .as_ref()
+            .is_some_and(|backlog| backlog.mode == "issue-graph");
+        Ok(backlog
+            && match run.status.as_str() {
+                "paused" | "limit_exhausted" => true,
+                "running" => !self.is_owned_elsewhere(&run.id)?,
+                _ => false,
+            })
     }
 
     pub(crate) fn requested_control(&self, id: &str) -> Result<Option<String>> {

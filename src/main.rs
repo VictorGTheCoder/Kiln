@@ -1,11 +1,16 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use kiln::Engine;
 use std::path::PathBuf;
+mod interrupt;
 
 #[derive(Parser)]
-#[command(name = "kiln", about = "Prepare and inspect durable workflow runs")]
+#[command(
+    name = "kiln",
+    about = "Plan and deliver the open GitHub issues of a repository with coding agents"
+)]
 struct Cli {
+    /// Target repository (any directory inside its Git worktree).
     #[arg(long, global = true, default_value = ".")]
     repo: PathBuf,
     #[command(subcommand)]
@@ -14,6 +19,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Snapshot open issues and take one independent issue through planning, delivery gates and draft PR publication.
+    #[command(hide = true)]
     StartIssue {
         #[arg(long)]
         config: PathBuf,
@@ -40,6 +46,7 @@ enum Commands {
         gh: Option<PathBuf>,
     },
     /// Freeze and plan the open issue graph, schedule it, then deliver verified groups and wait for CI.
+    #[command(hide = true)]
     StartBacklog {
         #[arg(long)]
         config: PathBuf,
@@ -65,6 +72,7 @@ enum Commands {
         plan_only: bool,
     },
     /// Read selected GitHub issues and independently verify against frozen specs.
+    #[command(hide = true)]
     Import {
         id: String,
         #[arg(long)]
@@ -83,25 +91,92 @@ enum Commands {
         claude: Option<PathBuf>,
     },
     /// Validate configuration and freeze approved Markdown specs. No commands are executed.
+    #[command(hide = true)]
     Prepare {
         #[arg(long)]
         config: PathBuf,
         #[arg(long, required = true)]
         spec: Vec<PathBuf>,
     },
-    /// Generate and independently verify tickets using fresh provider contexts.
+    /// Freeze and plan the open issue graph of this repository, then stop before delivery.
     Plan {
-        id: String,
-        #[arg(long)]
-        #[arg(required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
+        /// Plan an already prepared spec run instead (internal pipeline step; JSON output).
+        #[arg(hide = true)]
+        id: Option<String>,
+        /// Planning fixture for a prepared spec run (internal).
+        #[arg(long, hide = true, requires = "id", conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
+        /// Project configuration [default: kiln.json in the repository].
+        #[arg(long, conflicts_with = "id")]
+        config: Option<PathBuf>,
+        /// GitHub repository OWNER/REPO [default: parsed from the `origin` remote].
+        #[arg(long, conflicts_with = "id")]
+        github_repo: Option<String>,
+        /// Codex executable [default: the config `agent`, else codex then claude on PATH].
         #[arg(long)]
         codex: Option<PathBuf>,
         /// Claude Code executable; mutually exclusive with --codex.
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with = "id")]
+        issue_fixture: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with_all = ["id", "codex", "claude"])]
+        planning_fixture: Option<PathBuf>,
+        /// Print the recorded run as JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan the open issue graph (or reuse an unchanged plan), deliver it and wait for CI.
+    Start {
+        /// Project configuration [default: kiln.json in the repository].
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// GitHub repository OWNER/REPO [default: parsed from the `origin` remote].
+        #[arg(long)]
+        github_repo: Option<String>,
+        /// Codex executable [default: the config `agent`, else codex then claude on PATH].
+        #[arg(long)]
+        codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
+        /// Plan anew even when the latest plan matches the open issues.
+        #[arg(long)]
+        fresh: bool,
+        /// Print the recorded run as JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+        /// Also print a readable summary of provider activity (commands run,
+        /// files edited, messages). Full provider output is always written to
+        /// .kiln/runs/<id>/agents/<ticket>-<stage>.log.
+        #[arg(short, long)]
+        verbose: bool,
+        #[arg(long, hide = true)]
+        issue_fixture: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
+        planning_fixture: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
+        run_fixture: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with = "gh")]
+        publication_fixture: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        gh: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
+        repair_fixture: Option<PathBuf>,
+        /// Do not serve the dashboard (a dashboard action already shows the run).
+        #[arg(long, hide = true)]
+        no_dashboard: bool,
+    },
+    /// Print the event journal of the latest run (or of a given run).
+    Logs {
+        /// Run id [default: the latest run].
+        id: Option<String>,
+        /// Keep printing new events until the run finishes.
+        #[arg(short, long)]
+        follow: bool,
     },
     /// Execute one eligible ticket in an isolated worktree.
+    #[command(hide = true)]
     Implement {
         id: String,
         ticket: String,
@@ -115,6 +190,7 @@ enum Commands {
         claude: Option<PathBuf>,
     },
     /// Review an exact implementation commit in independent contexts.
+    #[command(hide = true)]
     Review {
         id: String,
         ticket: String,
@@ -126,6 +202,7 @@ enum Commands {
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
     },
+    #[command(hide = true)]
     Correct {
         id: String,
         ticket: String,
@@ -139,6 +216,7 @@ enum Commands {
     },
     /// Resolve an ambiguity autonomously by the decision hierarchy (product
     /// objectives > architectural decisions > specs) and record the decision.
+    #[command(hide = true)]
     Decide {
         id: String,
         /// Ambiguity description: {id, question, positions:[{source, reference, statement}]}.
@@ -155,6 +233,7 @@ enum Commands {
     /// Apply revised approved specs explicitly: capture them as a new input version,
     /// independently reverify the revised plan, invalidate affected work and evidence,
     /// and keep unaffected work. Spec edits never reach a run without this operation.
+    #[command(hide = true)]
     Replan {
         id: String,
         /// Approved spec (a frozen input of the run) whose current content to apply.
@@ -169,6 +248,7 @@ enum Commands {
         claude: Option<PathBuf>,
     },
     /// Integrate an exact reviewed change and verify the combined result.
+    #[command(hide = true)]
     Integrate {
         id: String,
         ticket: String,
@@ -182,6 +262,7 @@ enum Commands {
     },
     /// Schedule every accepted ticket: concurrent independent sessions, prerequisite
     /// ordering across specs, serialized verified integration.
+    #[command(hide = true)]
     Run {
         id: String,
         #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
@@ -192,30 +273,48 @@ enum Commands {
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
     },
-    /// Reopen an interrupted run: reconcile recorded state with observed Git and process
-    /// state, record each recovery decision, then continue scheduling without
-    /// repeating completed effects.
+    /// Continue the latest paused or interrupted run without repeating completed work.
     Resume {
-        id: String,
-        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
+        /// Resume this run instead (internal pipeline form; JSON output).
+        #[arg(hide = true)]
+        id: Option<String>,
+        #[arg(long, hide = true, alias = "run-fixture", conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
         /// Claude Code executable; mutually exclusive with --codex.
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
-        #[arg(long, conflicts_with = "gh")]
+        #[arg(long, hide = true, conflicts_with = "gh")]
         publication_fixture: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         gh: Option<PathBuf>,
-        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
         repair_fixture: Option<PathBuf>,
+        /// Print the recorded run as JSON instead of a readable summary.
+        #[arg(long, conflicts_with = "id")]
+        json: bool,
+        /// Also print a readable summary of provider activity (commands run,
+        /// files edited, messages). Full provider output is always written to
+        /// .kiln/runs/<id>/agents/<ticket>-<stage>.log.
+        #[arg(short, long, conflicts_with = "id")]
+        verbose: bool,
+        /// Do not serve the dashboard (a dashboard action already shows the run).
+        #[arg(long, hide = true)]
+        no_dashboard: bool,
     },
-    /// Let active ticket work settle, then pause before starting more work.
-    Pause { id: String },
-    /// Stop active work safely and prevent any more tickets from starting.
-    Cancel { id: String },
+    /// Pause the latest active run once its active ticket work settles.
+    Pause {
+        #[arg(hide = true)]
+        id: Option<String>,
+    },
+    /// Stop the latest active run's work safely; no further tickets start.
+    Cancel {
+        #[arg(hide = true)]
+        id: Option<String>,
+    },
     /// Validate the integrated revision against acceptance workflows per criterion.
+    #[command(hide = true)]
     Validate {
         id: String,
         /// Independent verifier acceptance tests: {"acceptance_checks":[{criterion, command}]}.
@@ -224,6 +323,7 @@ enum Commands {
     },
     /// Push the verified integration branch and open or reconcile its pull request.
     /// Merging and deployment stay disabled unless the project configures them.
+    #[command(hide = true)]
     Publish {
         id: String,
         /// Simulated GitHub state file (no network access).
@@ -244,6 +344,7 @@ enum Commands {
     },
     /// Reflect recorded, verified progress in a Kiln progress comment on each imported
     /// issue. Issue titles, bodies and other comments are never modified.
+    #[command(hide = true)]
     Sync {
         id: String,
         /// Simulated GitHub state file (no network access).
@@ -254,10 +355,29 @@ enum Commands {
         gh: Option<PathBuf>,
     },
     /// Show verified, failed and unable-to-verify criteria of the latest validation.
+    #[command(hide = true)]
     Report { id: String },
+    /// Summarise the latest run of this repository, or the run with the given id.
+    Status {
+        /// Run to summarise [default: the latest run].
+        id: Option<String>,
+        /// Print the summary as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Serve the dashboard of this repository's runs on a loopback address, without starting a run.
+    Dashboard {
+        /// Address to serve on; the next free port is used when it is taken.
+        #[arg(long, default_value = DASHBOARD_BIND)]
+        bind: std::net::SocketAddr,
+        #[command(flatten)]
+        fixtures: ActionFixtures,
+    },
     /// Read a recorded run, or list all run identities.
+    #[command(hide = true)]
     Inspect { id: Option<String> },
     /// Show recorded state on a loopback-only local web server.
+    #[command(hide = true)]
     Serve {
         #[arg(long, default_value = "127.0.0.1:3000")]
         bind: std::net::SocketAddr,
@@ -284,6 +404,35 @@ enum Commands {
         #[arg(long, requires = "backlog_config", conflicts_with_all = ["codex", "claude"])]
         repair_fixture: Option<PathBuf>,
     },
+}
+/// Hidden `kiln dashboard` flags: stand-ins for the provider and GitHub that
+/// the dashboard's action buttons hand to the commands they launch.
+#[derive(clap::Args, Debug, Clone, Default)]
+struct ActionFixtures {
+    #[arg(long, hide = true)]
+    issue_fixture: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    planning_fixture: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    run_fixture: Option<PathBuf>,
+    #[arg(long, hide = true, conflicts_with = "gh")]
+    publication_fixture: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    gh: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    repair_fixture: Option<PathBuf>,
+}
+impl From<ActionFixtures> for kiln::actions::Fixtures {
+    fn from(f: ActionFixtures) -> Self {
+        Self {
+            issue_fixture: f.issue_fixture,
+            planning_fixture: f.planning_fixture,
+            run_fixture: f.run_fixture,
+            publication_fixture: f.publication_fixture,
+            gh: f.gh,
+            repair_fixture: f.repair_fixture,
+        }
+    }
 }
 /// Real provider selected by `--codex PATH` or `--claude PATH` (mutually exclusive).
 enum Provider {
@@ -329,6 +478,513 @@ macro_rules! with_planner {
             $body
         })
     };
+}
+/// How a command prints the run it recorded.
+enum Report {
+    /// The recorded run as pretty JSON (hidden commands and `--json`).
+    Json,
+    /// Readable summary of a planned backlog run.
+    Plan { provider: Option<&'static str> },
+    /// Readable summary of a delivered (or stopped) backlog run.
+    Start { provider: Option<&'static str> },
+}
+impl Report {
+    fn emit(&self, run: &kiln::Run) -> Result<()> {
+        match self {
+            Self::Json => println!("{}", serde_json::to_string_pretty(run)?),
+            Self::Plan { provider } => print!("{}", plan_summary(run, *provider)),
+            Self::Start { provider } => print!("{}", start_summary(run, *provider)),
+        }
+        Ok(())
+    }
+}
+/// Human-readable summary of a backlog run that was planned and not delivered.
+fn plan_summary(run: &kiln::Run, provider: Option<&str>) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let repository = run
+        .backlog
+        .as_ref()
+        .map_or("the repository", |b| b.github_repository.as_str());
+    let open = run.backlog.as_ref().map_or(0, |b| b.issue_snapshot.len());
+    let by = provider.map(|p| format!(" with {p}")).unwrap_or_default();
+    let _ = writeln!(out, "Run {} for {repository}{by}", run.id);
+    match &run.plan {
+        Some(plan) if plan.executable => {
+            let _ = writeln!(
+                out,
+                "Planned {} ticket(s) from {open} open issue(s):",
+                plan.tickets.len()
+            );
+            for ticket in &plan.tickets {
+                let after = if ticket.blocked_by.is_empty() {
+                    String::new()
+                } else {
+                    format!("  (after {})", ticket.blocked_by.join(", "))
+                };
+                let _ = writeln!(out, "  {}  {}{after}", ticket.id, ticket.title);
+            }
+        }
+        Some(plan) => {
+            let _ = writeln!(out, "Plan rejected:");
+            for finding in &plan.findings {
+                let _ = writeln!(out, "  {}: {}", finding.code, finding.message);
+            }
+        }
+        None if run.status == "completed" => {
+            let _ = writeln!(
+                out,
+                "No new actionable open issues among {open}; nothing to plan."
+            );
+        }
+        None => {
+            let _ = writeln!(out, "No plan was recorded (status: {}).", run.status);
+        }
+    }
+    let unplanned: Vec<_> = run
+        .backlog
+        .iter()
+        .flat_map(|b| &b.dispositions)
+        .filter(|d| !d.plan_candidate && d.status != "completed")
+        .collect();
+    if !unplanned.is_empty() {
+        let _ = writeln!(out, "Not planned:");
+        for d in unplanned {
+            let _ = writeln!(out, "  {}  {}: {}", d.issue, d.status, d.reason);
+        }
+    }
+    if run.plan.as_ref().is_some_and(|plan| plan.executable) {
+        let _ = writeln!(
+            out,
+            "Delivery was not started. Run `kiln start` to deliver this plan."
+        );
+    }
+    out
+}
+/// Human-readable outcome of a backlog delivery run.
+fn start_summary(run: &kiln::Run, provider: Option<&str>) -> String {
+    use std::fmt::Write;
+    let Some(scheduler) = &run.scheduler else {
+        // Nothing was delivered: no actionable issues, or a rejected plan.
+        return plan_summary(run, provider).replace(
+            "Delivery was not started. Run `kiln start` to deliver this plan.\n",
+            "",
+        );
+    };
+    let mut out = String::new();
+    let repository = run
+        .backlog
+        .as_ref()
+        .map_or("the repository", |b| b.github_repository.as_str());
+    let by = provider.map(|p| format!(" with {p}")).unwrap_or_default();
+    let _ = writeln!(out, "Run {} for {repository}{by}: {}", run.id, run.status);
+    let titles: std::collections::BTreeMap<_, _> = run
+        .plan
+        .iter()
+        .flat_map(|plan| &plan.tickets)
+        .map(|ticket| (ticket.id.as_str(), ticket.title.as_str()))
+        .collect();
+    let _ = writeln!(out, "Tickets:");
+    for ticket in &scheduler.tickets {
+        let title = titles.get(ticket.id.as_str()).copied().unwrap_or_default();
+        let blocker = ticket
+            .blocker
+            .as_ref()
+            .map(|b| format!(" ({b})"))
+            .unwrap_or_default();
+        let _ = writeln!(out, "  {}  {title}: {}{blocker}", ticket.id, ticket.state);
+    }
+    if !run.delivery_groups.is_empty() {
+        let _ = writeln!(out, "Delivery:");
+        for group in &run.delivery_groups {
+            let pull_request = group
+                .pull_request
+                .as_ref()
+                .map(|pr| format!("  {}", pr.url))
+                .unwrap_or_default();
+            let reason = group
+                .reason
+                .as_ref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "  {}: {}{reason}{pull_request}",
+                group.tickets.join(", "),
+                group.status
+            );
+        }
+    }
+    out
+}
+/// Inputs of a whole-graph backlog run (`start-backlog`, `plan`, `start`).
+struct BacklogArgs {
+    config: PathBuf,
+    github_repo: String,
+    issue_fixture: Option<PathBuf>,
+    planning_fixture: Option<PathBuf>,
+    codex: Option<PathBuf>,
+    claude: Option<PathBuf>,
+    run_fixture: Option<PathBuf>,
+    publication_fixture: Option<PathBuf>,
+    gh: Option<PathBuf>,
+    repair_fixture: Option<PathBuf>,
+    plan_only: bool,
+    /// Deliver the latest planned-but-not-started run when the open issues are unchanged.
+    reuse_plan: bool,
+}
+/// Issue source that serves one snapshot taken up front, so the reuse check
+/// and planning see the same open issues.
+struct FrozenIssues(
+    Vec<kiln::import::ImportedIssue>,
+    Box<dyn kiln::import::IssueSource>,
+);
+impl kiln::import::IssueSource for FrozenIssues {
+    fn selected(
+        &self,
+        repository: &str,
+        numbers: &[u64],
+    ) -> Result<Vec<kiln::import::ImportedIssue>> {
+        self.1.selected(repository, numbers)
+    }
+    fn snapshot_open(&self, _repository: &str) -> Result<Vec<kiln::import::ImportedIssue>> {
+        Ok(self.0.clone())
+    }
+}
+/// Freeze and plan the open issue graph, schedule it, then deliver verified groups
+/// and wait for CI (or stop after planning when `plan_only`).
+fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<()> {
+    let BacklogArgs {
+        config,
+        github_repo,
+        issue_fixture,
+        planning_fixture,
+        codex,
+        claude,
+        run_fixture,
+        publication_fixture,
+        gh,
+        repair_fixture,
+        plan_only,
+        reuse_plan,
+    } = args;
+    let completed_issues = engine.completed_backlog_issues(&github_repo)?;
+    let source: Box<dyn kiln::import::IssueSource> = match issue_fixture {
+        Some(path) => Box::new(kiln::import::FixtureIssues::load(
+            &engine.repository.join(path),
+        )?),
+        None => Box::new(kiln::import::GitHubIssues),
+    };
+    let source: Box<dyn kiln::import::IssueSource> = if reuse_plan {
+        let snapshot = source.snapshot_open(&github_repo)?;
+        Box::new(FrozenIssues(snapshot, source))
+    } else {
+        source
+    };
+    let reused = if reuse_plan {
+        let snapshot = source.snapshot_open(&github_repo)?;
+        engine.planned_backlog_run_for_snapshot(&github_repo, &snapshot)?
+    } else {
+        None
+    };
+    let run = if let Some(run) = reused {
+        eprintln!(
+            "Open issues are unchanged since run {} was planned; delivering that plan (pass --fresh to plan again).",
+            run.id
+        );
+        run
+    } else {
+        let mut run = if let Some(path) = &planning_fixture {
+            let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+            engine.prepare_backlog_graph(
+                &config,
+                &github_repo,
+                source.as_ref(),
+                &agent,
+                &completed_issues,
+            )?
+        } else {
+            let project_config =
+                kiln::ProjectConfig::load(&engine.repository.join(&config), &engine.repository)?;
+            with_planner!(
+                Provider::select(codex.clone(), claude.clone()),
+                engine,
+                project_config,
+                |agent| {
+                    engine.prepare_backlog_graph(
+                        &config,
+                        &github_repo,
+                        source.as_ref(),
+                        &agent,
+                        &completed_issues,
+                    )?
+                }
+            )
+        };
+        if run.plan.is_some()
+            && run
+                .backlog
+                .as_ref()
+                .is_some_and(|backlog| backlog.mode == "issue-graph")
+        {
+            report.emit(&run)?;
+            return Ok(());
+        }
+        if run.backlog.as_ref().is_some_and(|backlog| {
+            backlog.mode == "issue-graph"
+                && backlog.dispositions.iter().any(|d| d.status == "completed")
+                && backlog
+                    .dispositions
+                    .iter()
+                    .all(|d| matches!(d.status.as_str(), "completed" | "skipped"))
+        }) {
+            if let Some(backlog) = &mut run.backlog {
+                backlog.outcome = "completed".into();
+                backlog.decisions.push("No new actionable open issues were present; planning, execution, and delivery were skipped.".into());
+            }
+            run.status = "completed".into();
+            engine.save(&run)?;
+            engine.journal(
+                &run.id,
+                None,
+                "run",
+                "completed",
+                "no new actionable open issues",
+            );
+            report.emit(&run)?;
+            return Ok(());
+        }
+        let id = run.id.clone();
+        run = if let Some(path) = &planning_fixture {
+            let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+            let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+            engine.plan(&id, &agent)?
+        } else {
+            let config = engine.inspect(&id)?.config;
+            with_planner!(
+                Provider::select(codex.clone(), claude.clone()),
+                engine,
+                config,
+                |agent| {
+                    let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+                    engine.plan(&id, &agent)?
+                }
+            )
+        };
+        engine.record_backlog_plan(&id, &mut run)?;
+        if !run.plan.as_ref().is_some_and(|plan| plan.executable) {
+            report.emit(&run)?;
+            anyhow::bail!("backlog graph plan rejected; inspect durable per-issue findings");
+        }
+        if plan_only {
+            report.emit(&run)?;
+            return Ok(());
+        }
+        run
+    };
+    let id = run.id.clone();
+    if interrupt::requested() {
+        // Planning finished: the first safe point of a foreground delivery. The
+        // paused plan is delivered by `kiln resume`.
+        let run = engine.transact(&id, |stored| {
+            stored.status = "paused".into();
+            Ok(stored.clone())
+        })?;
+        return paused(&run, report);
+    }
+    deliver(
+        engine,
+        &id,
+        Delivery {
+            run_fixture,
+            codex,
+            claude,
+            publication_fixture,
+            gh,
+            repair_fixture,
+            resume: false,
+        },
+        report,
+    )
+}
+/// Inputs of the delivery phase of a backlog run: scheduling then publication.
+struct Delivery {
+    run_fixture: Option<PathBuf>,
+    codex: Option<PathBuf>,
+    claude: Option<PathBuf>,
+    publication_fixture: Option<PathBuf>,
+    gh: Option<PathBuf>,
+    repair_fixture: Option<PathBuf>,
+    /// Reconcile and continue an interrupted or paused run instead of starting it.
+    resume: bool,
+}
+/// Report a run stopped by a pause request (Ctrl-C, `kiln pause`) and exit cleanly.
+fn paused(run: &kiln::Run, report: &Report) -> Result<()> {
+    report.emit(run)?;
+    eprintln!(
+        "Run {} paused; nothing was left half-applied. Run `kiln resume` to continue it.",
+        run.id
+    );
+    Ok(())
+}
+/// Schedule (or resume) the tickets of a planned backlog run, then publish its
+/// verified delivery groups and wait for CI. A pause or cancellation stops
+/// before publication.
+fn deliver(engine: &Engine, id: &str, args: Delivery, report: &Report) -> Result<()> {
+    let Delivery {
+        run_fixture,
+        codex,
+        claude,
+        publication_fixture,
+        gh,
+        repair_fixture,
+        resume,
+    } = args;
+    let id = id.to_owned();
+    interrupt::watch(&id);
+    let providers: Box<dyn kiln::scheduler::TicketProviders> = match run_fixture {
+        Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
+            &engine.repository.join(path),
+            &engine.repository,
+        )?),
+        None => {
+            let config = engine.inspect(&id)?.config;
+            let repository = engine.repository.clone();
+            let isolation = config.isolation.clone();
+            match Provider::select(codex.clone(), claude.clone()) {
+                Provider::Codex(path) => Box::new(
+                    kiln::scheduler::CodexProviders::new(kiln::codex::CodexConfig::from_project(
+                        &config, path,
+                    )?)
+                    .with_replanning(repository, isolation),
+                ),
+                Provider::Claude(path) => Box::new(
+                    kiln::scheduler::ClaudeProviders::new(
+                        kiln::claude::ClaudeConfig::from_project(&config, path)?,
+                    )
+                    .with_replanning(repository, isolation),
+                ),
+            }
+        }
+    };
+    let mut run = if resume {
+        engine.resume(&id, providers.as_ref())?
+    } else {
+        engine.run_tickets(&id, providers.as_ref())?
+    };
+    match run.status.as_str() {
+        "paused" => return paused(&run, report),
+        "cancelled" => {
+            report.emit(&run)?;
+            anyhow::bail!(
+                "run cancelled; active work was stopped and no further tickets were started"
+            );
+        }
+        _ => {}
+    }
+    engine.record_backlog_results(&id, &mut run)?;
+    if interrupt::requested() {
+        // Scheduling settled before the pause request reached it: stop here,
+        // before publication starts.
+        run = engine.transact(&id, |stored| {
+            stored.status = "paused".into();
+            Ok(stored.clone())
+        })?;
+        return paused(&run, report);
+    }
+    if kiln::publication::PublicationSettings::from_config(&run.config)?.is_some() {
+        let host: Box<dyn kiln::publication::PullRequestHost> = match publication_fixture {
+            Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
+                &engine.repository.join(path),
+            )),
+            None => Box::new(kiln::publication::GitHubPullRequests {
+                program: gh.unwrap_or_else(|| "gh".into()),
+            }),
+        };
+        let published = if let Some(path) = repair_fixture {
+            let repair =
+                kiln::correction::FixtureCorrectionAgent::load(&engine.repository.join(path))?;
+            engine.publish_delivery_groups_with_repair(&id, host.as_ref(), Some((&repair, &repair)))
+        } else {
+            with_adapter!(
+                Provider::select(codex.clone(), claude.clone()),
+                &run.config,
+                |agent| {
+                    engine.publish_delivery_groups_with_repair(
+                        &id,
+                        host.as_ref(),
+                        Some((&agent, &agent)),
+                    )
+                }
+            )
+        };
+        run = match published {
+            Ok(run) => run,
+            Err(error) => {
+                let stored = engine.inspect(&id)?;
+                match stored.status.as_str() {
+                    "paused" => return paused(&stored, report),
+                    "cancelled" => {
+                        report.emit(&stored)?;
+                        anyhow::bail!(
+                            "run cancelled during delivery; published pull requests were kept"
+                        );
+                    }
+                    _ => return Err(error),
+                }
+            }
+        };
+    } else if run
+        .delivery_groups
+        .iter()
+        .any(|group| group.status == "integrated")
+    {
+        run = engine.block_delivery_groups(
+            &id,
+            "publication is not configured; set publication.github_repository and publication.target_branch to deliver verified groups",
+        )?;
+        report.emit(&run)?;
+        anyhow::bail!("backlog delivery is blocked because publication is not configured");
+    }
+    report.emit(&run)?;
+    Ok(())
+}
+/// `kiln logs [id] [-f]`: print a run's journal, optionally following it
+/// until no process appends to it any more.
+fn logs(engine: &Engine, id: Option<String>, follow: bool) -> Result<()> {
+    use std::io::Write;
+    let id = match id {
+        Some(id) => id,
+        None => match kiln::status::latest(engine)? {
+            Some(run) => run.id,
+            None => {
+                println!("No runs yet in this repository; `kiln start` begins one.");
+                return Ok(());
+            }
+        },
+    };
+    engine.inspect(&id)?;
+    let journal = kiln::journal::Journal::of(engine, &id);
+    if !journal.exists() {
+        println!("Run {id} has no journal: no events were recorded for it.");
+        return Ok(());
+    }
+    let mut offset = 0;
+    let mut stdout = std::io::stdout();
+    loop {
+        // Check liveness before draining so the last events are never missed.
+        let live = follow && journal.has_writer();
+        let (events, next) = journal.read_from(offset)?;
+        offset = next;
+        for event in events {
+            writeln!(stdout, "{}", event.line())?;
+        }
+        stdout.flush()?;
+        if !live {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -504,166 +1160,24 @@ fn run() -> Result<()> {
             repair_fixture,
             plan_only,
         } => {
-            let completed_issues = engine.completed_backlog_issues(&github_repo)?;
-            let source: Box<dyn kiln::import::IssueSource> = match issue_fixture {
-                Some(path) => Box::new(kiln::import::FixtureIssues::load(
-                    &engine.repository.join(path),
-                )?),
-                None => Box::new(kiln::import::GitHubIssues),
-            };
-            let mut run = if let Some(path) = &planning_fixture {
-                let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
-                engine.prepare_backlog_graph(
-                    &config,
-                    &github_repo,
-                    source.as_ref(),
-                    &agent,
-                    &completed_issues,
-                )?
-            } else {
-                let project_config = kiln::ProjectConfig::load(
-                    &engine.repository.join(&config),
-                    &engine.repository,
-                )?;
-                with_planner!(
-                    Provider::select(codex.clone(), claude.clone()),
-                    engine,
-                    project_config,
-                    |agent| {
-                        engine.prepare_backlog_graph(
-                            &config,
-                            &github_repo,
-                            source.as_ref(),
-                            &agent,
-                            &completed_issues,
-                        )?
-                    }
-                )
-            };
-            if run.plan.is_some()
-                && run
-                    .backlog
-                    .as_ref()
-                    .is_some_and(|backlog| backlog.mode == "issue-graph")
-            {
-                println!("{}", serde_json::to_string_pretty(&run)?);
-                return Ok(());
-            }
-            if run.backlog.as_ref().is_some_and(|backlog| {
-                backlog.mode == "issue-graph"
-                    && backlog.dispositions.iter().any(|d| d.status == "completed")
-                    && backlog
-                        .dispositions
-                        .iter()
-                        .all(|d| matches!(d.status.as_str(), "completed" | "skipped"))
-            }) {
-                if let Some(backlog) = &mut run.backlog {
-                    backlog.outcome = "completed".into();
-                    backlog.decisions.push("No new actionable open issues were present; planning, execution, and delivery were skipped.".into());
-                }
-                run.status = "completed".into();
-                engine.save(&run)?;
-                println!("{}", serde_json::to_string_pretty(&run)?);
-                return Ok(());
-            }
-            let id = run.id.clone();
-            run = if let Some(path) = &planning_fixture {
-                let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
-                let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
-                engine.plan(&id, &agent)?
-            } else {
-                let config = engine.inspect(&id)?.config;
-                with_planner!(
-                    Provider::select(codex.clone(), claude.clone()),
-                    engine,
+            return start_backlog(
+                &engine,
+                BacklogArgs {
                     config,
-                    |agent| {
-                        let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
-                        engine.plan(&id, &agent)?
-                    }
-                )
-            };
-            engine.record_backlog_plan(&id, &mut run)?;
-            if !run.plan.as_ref().is_some_and(|plan| plan.executable) {
-                println!("{}", serde_json::to_string_pretty(&run)?);
-                anyhow::bail!("backlog graph plan rejected; inspect durable per-issue findings");
-            }
-            if plan_only {
-                println!("{}", serde_json::to_string_pretty(&run)?);
-                return Ok(());
-            }
-            let providers: Box<dyn kiln::scheduler::TicketProviders> = match run_fixture {
-                Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
-                    &engine.repository.join(path),
-                    &engine.repository,
-                )?),
-                None => {
-                    let config = engine.inspect(&id)?.config;
-                    let repository = engine.repository.clone();
-                    let isolation = config.isolation.clone();
-                    match Provider::select(codex.clone(), claude.clone()) {
-                        Provider::Codex(path) => Box::new(
-                            kiln::scheduler::CodexProviders::new(
-                                kiln::codex::CodexConfig::from_project(&config, path)?,
-                            )
-                            .with_replanning(repository, isolation),
-                        ),
-                        Provider::Claude(path) => Box::new(
-                            kiln::scheduler::ClaudeProviders::new(
-                                kiln::claude::ClaudeConfig::from_project(&config, path)?,
-                            )
-                            .with_replanning(repository, isolation),
-                        ),
-                    }
-                }
-            };
-            let mut run = engine.run_tickets(&id, providers.as_ref())?;
-            engine.record_backlog_results(&id, &mut run)?;
-            if kiln::publication::PublicationSettings::from_config(&run.config)?.is_some() {
-                let host: Box<dyn kiln::publication::PullRequestHost> = match publication_fixture {
-                    Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
-                        &engine.repository.join(path),
-                    )),
-                    None => Box::new(kiln::publication::GitHubPullRequests {
-                        program: gh.unwrap_or_else(|| "gh".into()),
-                    }),
-                };
-                if let Some(path) = repair_fixture {
-                    let repair = kiln::correction::FixtureCorrectionAgent::load(
-                        &engine.repository.join(path),
-                    )?;
-                    run = engine.publish_delivery_groups_with_repair(
-                        &id,
-                        host.as_ref(),
-                        Some((&repair, &repair)),
-                    )?;
-                } else {
-                    run = with_adapter!(
-                        Provider::select(codex.clone(), claude.clone()),
-                        &run.config,
-                        |agent| {
-                            engine.publish_delivery_groups_with_repair(
-                                &id,
-                                host.as_ref(),
-                                Some((&agent, &agent)),
-                            )?
-                        }
-                    );
-                }
-            } else if run
-                .delivery_groups
-                .iter()
-                .any(|group| group.status == "integrated")
-            {
-                run = engine.block_delivery_groups(
-                    &id,
-                    "publication is not configured; set publication.github_repository and publication.target_branch to deliver verified groups",
-                )?;
-                println!("{}", serde_json::to_string_pretty(&run)?);
-                anyhow::bail!("backlog delivery is blocked because publication is not configured");
-            }
-            println!("{}", serde_json::to_string_pretty(&run)?);
-            return Ok(());
+                    github_repo,
+                    issue_fixture,
+                    planning_fixture,
+                    codex,
+                    claude,
+                    run_fixture,
+                    publication_fixture,
+                    gh,
+                    repair_fixture,
+                    plan_only,
+                    reuse_plan: false,
+                },
+                &Report::Json,
+            );
         }
         Commands::Import {
             id,
@@ -708,10 +1222,142 @@ fn run() -> Result<()> {
             serde_json::to_value(engine.prepare(&config, &spec)?)?
         }
         Commands::Plan {
-            id,
+            id: None,
+            config,
+            github_repo,
+            codex,
+            claude,
+            issue_fixture,
+            planning_fixture,
+            json,
+            ..
+        } => {
+            let defaults = kiln::defaults::Defaults::infer(
+                &engine.repository,
+                kiln::defaults::Overrides {
+                    config,
+                    github_repo,
+                    codex,
+                    claude,
+                },
+            )?;
+            let (provider, codex, claude) = if planning_fixture.is_some() {
+                (None, None, None)
+            } else {
+                let choice = defaults.provider()?;
+                let name = choice.agent.name();
+                let (codex, claude) = choice.into_flags();
+                (Some(name), codex, claude)
+            };
+            let report = if json {
+                Report::Json
+            } else {
+                Report::Plan { provider }
+            };
+            return start_backlog(
+                &engine,
+                BacklogArgs {
+                    config: defaults.config,
+                    github_repo: defaults.github_repo,
+                    issue_fixture,
+                    planning_fixture,
+                    codex,
+                    claude,
+                    run_fixture: None,
+                    publication_fixture: None,
+                    gh: None,
+                    repair_fixture: None,
+                    plan_only: true,
+                    reuse_plan: false,
+                },
+                &report,
+            );
+        }
+        Commands::Start {
+            config,
+            github_repo,
+            codex,
+            claude,
+            fresh,
+            json,
+            verbose,
+            issue_fixture,
+            planning_fixture,
+            run_fixture,
+            publication_fixture,
+            gh,
+            repair_fixture,
+            no_dashboard,
+        } => {
+            let defaults = kiln::defaults::Defaults::infer(
+                &engine.repository,
+                kiln::defaults::Overrides {
+                    config,
+                    github_repo,
+                    codex,
+                    claude,
+                },
+            )?;
+            interrupt::install(&engine)?;
+            // Fixtures stand in for every agent call, so no provider is needed.
+            let (provider, codex, claude) = if planning_fixture.is_some()
+                && run_fixture.is_some()
+                && repair_fixture.is_some()
+            {
+                (None, None, None)
+            } else {
+                let choice = defaults.provider()?;
+                let name = choice.agent.name();
+                let (codex, claude) = choice.into_flags();
+                (Some(name), codex, claude)
+            };
+            let report = if json {
+                Report::Json
+            } else {
+                Report::Start { provider }
+            };
+            let _dashboard = observe(
+                &engine,
+                Observation {
+                    json,
+                    verbose,
+                    dashboard: !no_dashboard,
+                    fixtures: kiln::actions::Fixtures {
+                        issue_fixture: issue_fixture.clone(),
+                        planning_fixture: planning_fixture.clone(),
+                        run_fixture: run_fixture.clone(),
+                        publication_fixture: publication_fixture.clone(),
+                        gh: gh.clone(),
+                        repair_fixture: repair_fixture.clone(),
+                    },
+                },
+            );
+            return start_backlog(
+                &engine,
+                BacklogArgs {
+                    config: defaults.config,
+                    github_repo: defaults.github_repo,
+                    issue_fixture,
+                    planning_fixture,
+                    codex,
+                    claude,
+                    run_fixture,
+                    publication_fixture,
+                    gh,
+                    repair_fixture,
+                    plan_only: false,
+                    reuse_plan: !fresh,
+                },
+                &report,
+            );
+        }
+        Commands::Logs { id, follow } => return logs(&engine, id, follow),
+        Commands::Plan {
+            id: Some(id),
             fixture,
             codex,
             claude,
+            ..
         } => {
             let agent: Box<dyn kiln::planning::PlanningAgent> = if let Some(path) = fixture {
                 Box::new(kiln::planning::FixtureAgent::load(
@@ -887,7 +1533,78 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
-        command @ (Commands::Run { .. } | Commands::Resume { .. }) => {
+        Commands::Resume {
+            id: None,
+            fixture,
+            codex,
+            claude,
+            publication_fixture,
+            gh,
+            repair_fixture,
+            json,
+            verbose,
+            no_dashboard,
+        } => {
+            let run = engine
+                .latest_resumable_run()?
+                .context(kiln::control::NOTHING_TO_RESUME)?;
+            // Fixtures stand in for every agent call, so no provider is needed.
+            let (provider, codex, claude) = if fixture.is_some() && repair_fixture.is_some() {
+                (None, None, None)
+            } else {
+                let defaults = kiln::defaults::Defaults::infer(
+                    &engine.repository,
+                    kiln::defaults::Overrides {
+                        config: None,
+                        github_repo: run.backlog.as_ref().map(|b| b.github_repository.clone()),
+                        codex,
+                        claude,
+                    },
+                )?;
+                let choice = defaults.provider()?;
+                let name = choice.agent.name();
+                let (codex, claude) = choice.into_flags();
+                (Some(name), codex, claude)
+            };
+            let report = if json {
+                Report::Json
+            } else {
+                Report::Start { provider }
+            };
+            eprintln!("Resuming run {} (status: {}).", run.id, run.status);
+            interrupt::install(&engine)?;
+            let _dashboard = observe(
+                &engine,
+                Observation {
+                    json,
+                    verbose,
+                    dashboard: !no_dashboard,
+                    fixtures: kiln::actions::Fixtures {
+                        issue_fixture: None,
+                        planning_fixture: None,
+                        run_fixture: fixture.clone(),
+                        publication_fixture: publication_fixture.clone(),
+                        gh: gh.clone(),
+                        repair_fixture: repair_fixture.clone(),
+                    },
+                },
+            );
+            return deliver(
+                &engine,
+                &run.id,
+                Delivery {
+                    run_fixture: fixture,
+                    codex,
+                    claude,
+                    publication_fixture,
+                    gh,
+                    repair_fixture,
+                    resume: true,
+                },
+                &report,
+            );
+        }
+        command @ (Commands::Run { .. } | Commands::Resume { id: Some(_), .. }) => {
             let (resume, id, fixture, codex, claude, publication_fixture, gh, repair_fixture) =
                 match command {
                     Commands::Run {
@@ -897,13 +1614,14 @@ fn run() -> Result<()> {
                         claude,
                     } => (false, id, fixture, codex, claude, None, None, None),
                     Commands::Resume {
-                        id,
+                        id: Some(id),
                         fixture,
                         codex,
                         claude,
                         publication_fixture,
                         gh,
                         repair_fixture,
+                        ..
                     } => (
                         true,
                         id,
@@ -1123,13 +1841,33 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
-        Commands::Pause { id } => {
+        Commands::Pause { id: Some(id) } => {
             engine.request_control(&id, "pause")?;
             serde_json::json!({"id": id, "requested": "pause"})
         }
-        Commands::Cancel { id } => {
+        Commands::Cancel { id: Some(id) } => {
             engine.request_control(&id, "cancel")?;
             serde_json::json!({"id": id, "requested": "cancel"})
+        }
+        Commands::Pause { id: None } => {
+            let id = engine
+                .latest_active_run()?
+                .context("no active run to pause; `kiln status` shows the latest run")?;
+            engine.request_control(&id, "pause")?;
+            println!(
+                "Pause requested for run {id}; it pauses once active ticket work settles. Run `kiln resume` to continue it."
+            );
+            return Ok(());
+        }
+        Commands::Cancel { id: None } => {
+            let id = engine
+                .latest_active_run()?
+                .context("no active run to cancel; `kiln status` shows the latest run")?;
+            engine.request_control(&id, "cancel")?;
+            println!(
+                "Cancellation requested for run {id}; active work is stopped and no further tickets start."
+            );
+            return Ok(());
         }
         Commands::Report { id } => {
             let run = engine.inspect(&id)?;
@@ -1153,6 +1891,7 @@ fn run() -> Result<()> {
                 report.summary(&run.id)
             }
         }
+        Commands::Status { id, json } => return status(&engine, id.as_deref(), json),
         Commands::Inspect { id: Some(id) } => {
             let run = engine.inspect(&id)?;
             let mut value = serde_json::to_value(&run)?;
@@ -1167,6 +1906,7 @@ fn run() -> Result<()> {
             }
             value
         }
+        Commands::Dashboard { bind, fixtures } => return dashboard(engine, bind, fixtures.into()),
         Commands::Inspect { id: None } => serde_json::to_value(engine.list()?)?,
         Commands::Serve {
             bind,
@@ -1210,6 +1950,140 @@ fn run() -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+/// `kiln status [id] [--json]`.
+fn status(engine: &Engine, id: Option<&str>, json: bool) -> Result<()> {
+    let run = match id {
+        Some(id) => Some(engine.inspect(id)?),
+        None => kiln::status::latest(engine)?,
+    };
+    let summary = run.as_ref().map(|run| kiln::status::RunSummary {
+        dashboard_url: kiln::dashboard::running_url(&engine.repository),
+        ..kiln::status::RunSummary::of(run)
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+    match summary {
+        None => println!(
+            "No Kiln runs in {} yet. Run `kiln plan` or `kiln start` to begin.",
+            engine.repository.display()
+        ),
+        Some(summary) => print!("{}", summary.render()),
+    }
+    Ok(())
+}
+/// Default dashboard address of `kiln dashboard` and `kiln start`.
+const DASHBOARD_BIND: &str = "127.0.0.1:3000";
+
+/// Serve the dashboard until SIGINT or SIGTERM, recording its URL meanwhile.
+fn dashboard(
+    engine: Engine,
+    bind: std::net::SocketAddr,
+    fixtures: kiln::actions::Fixtures,
+) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    extern "C" fn stop(_: libc::c_int) {
+        STOP.store(true, Ordering::Relaxed);
+    }
+    let server = kiln::web::WebServer::bind_next_free(bind)?.with_actions(fixtures);
+    let url = server.url();
+    let _announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
+    }
+    println!("Kiln web view: {url}");
+    use std::io::Write as _;
+    std::io::stdout().flush()?;
+    server.serve(engine, None, kiln::web::Home::Dashboard, &STOP)
+}
+
+/// Serve the dashboard in the background for the life of `kiln start`. Its URL
+/// goes to stdout, or to stderr when stdout carries JSON. A dashboard that
+/// cannot start is reported and does not stop the run.
+/// How a foreground delivery (`kiln start`, `kiln resume`) shows its progress.
+struct Observation {
+    /// stdout carries only the final JSON; progress goes to stderr.
+    json: bool,
+    /// Also print a readable summary of provider activity.
+    verbose: bool,
+    /// Serve the embedded dashboard (not when a dashboard action launched us).
+    dashboard: bool,
+    /// Stand-ins handed to the dashboard's launched actions.
+    fixtures: kiln::actions::Fixtures,
+}
+/// Echo journal events (and, with `verbose`, provider activity) as they
+/// happen and serve the embedded dashboard; the returned record of the
+/// dashboard is removed when dropped.
+fn observe(engine: &Engine, observation: Observation) -> Option<kiln::dashboard::Announcement> {
+    let Observation {
+        json,
+        verbose,
+        dashboard,
+        fixtures,
+    } = observation;
+    let announcement = if dashboard {
+        embedded_dashboard(engine, json, fixtures)
+    } else {
+        None
+    };
+    // One readable line per journal event as it happens; stdout stays pure
+    // JSON under --json.
+    kiln::journal::echo(move |event| {
+        if json {
+            eprintln!("{}", event.line());
+        } else {
+            println!("{}", event.line());
+        }
+    });
+    if verbose {
+        kiln::activity::echo(move |activity| {
+            if json {
+                eprintln!("{}", activity.line());
+            } else {
+                println!("{}", activity.line());
+            }
+        });
+    }
+    announcement
+}
+fn embedded_dashboard(
+    engine: &Engine,
+    json: bool,
+    fixtures: kiln::actions::Fixtures,
+) -> Option<kiln::dashboard::Announcement> {
+    let bind = DASHBOARD_BIND
+        .parse()
+        .expect("valid default dashboard address");
+    let started = kiln::web::WebServer::bind_next_free(bind).and_then(|server| {
+        let server = server.with_actions(fixtures);
+        let url = server.url();
+        let announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let _ = server.serve(engine, None, kiln::web::Home::Dashboard, &NEVER);
+        });
+        Ok((url, announcement))
+    });
+    match started {
+        Ok((url, announcement)) => {
+            if json {
+                eprintln!("Kiln web view: {url}");
+            } else {
+                println!("Kiln web view: {url}");
+            }
+            Some(announcement)
+        }
+        Err(error) => {
+            eprintln!("Kiln: dashboard unavailable: {error:#}");
+            None
+        }
+    }
 }
 fn main() {
     if let Err(error) = run() {

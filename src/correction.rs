@@ -268,7 +268,9 @@ impl Engine {
             after.failure = None;
             after.status = "failed".into();
             let attempt = (|| -> Result<()> {
-                let result = agent.correct(&request);
+                let result = self.with_agent_log(id, Some(ticket_id), "correction", || {
+                    agent.correct(&request)
+                });
                 git(&worktree, &["add", "-A", "--", "."])?;
                 after.diff = git(
                     &worktree,

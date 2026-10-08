@@ -204,17 +204,19 @@ impl Engine {
         let number = run.decisions.len() + 1;
         let decision_id = format!("{}-decision-{number}", run.id);
         let context_id = format!("{decision_id}-context");
-        let proposal = agent.decide(&DecisionRequest {
-            context_id: context_id.clone(),
-            instructions: DECISION_INSTRUCTIONS.into(),
-            question: ambiguity.question.clone(),
-            positions: positions.clone(),
-            specs: run.effective_specs(),
-            tickets: run
-                .plan
-                .as_ref()
-                .map(|p| p.tickets.clone())
-                .unwrap_or_default(),
+        let proposal = self.with_agent_log(id, None, "decision", || {
+            agent.decide(&DecisionRequest {
+                context_id: context_id.clone(),
+                instructions: DECISION_INSTRUCTIONS.into(),
+                question: ambiguity.question.clone(),
+                positions: positions.clone(),
+                specs: run.effective_specs(),
+                tickets: run
+                    .plan
+                    .as_ref()
+                    .map(|p| p.tickets.clone())
+                    .unwrap_or_default(),
+            })
         })?;
         let mut findings = Vec::new();
         let top = positions[0].rank;

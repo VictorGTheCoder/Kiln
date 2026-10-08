@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiln dashboard</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--text:#1f2328;--muted:#656d76;--line:#d8dee4;--accent:#174a8b;--good:#1a7f37;--bad:#cf222e;--warn:#9a6700}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#161b22;--text:#e6edf3;--muted:#8d96a0;--line:#30363d;--accent:#58a6ff;--good:#3fb950;--bad:#f85149;--warn:#d29922}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 system-ui,sans-serif;color:var(--text);background:var(--bg)}
+header{display:flex;align-items:baseline;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0}
+header .muted{font-size:12px}
+main{display:grid;grid-template-columns:minmax(220px,280px) 1fr;min-height:calc(100vh - 49px)}
+@media (max-width:760px){main{grid-template-columns:1fr}}
+#runs{border-right:1px solid var(--line);background:var(--panel);overflow:auto}
+#runs h2,#board h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:12px 16px 8px}
+#runs ul{list-style:none;margin:0;padding:0}
+#runs button{display:block;width:100%;text-align:left;border:0;border-left:3px solid transparent;background:none;color:inherit;font:inherit;padding:8px 13px;cursor:pointer}
+#runs button:hover{background:var(--bg)}
+#runs button[aria-current=true]{border-left-color:var(--accent);background:var(--bg)}
+.id{font:12px ui-monospace,monospace;overflow-wrap:anywhere}
+.muted{color:var(--muted)}
+.status{display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;border:1px solid var(--line)}
+.status.good{color:var(--good);border-color:var(--good)}
+.status.bad{color:var(--bad);border-color:var(--bad)}
+.status.warn{color:var(--warn);border-color:var(--warn)}
+#board{padding:0 16px 16px;overflow:auto}
+#title{margin:12px 0 4px;font-size:15px}
+.columns{display:grid;grid-template-columns:repeat(6,minmax(170px,1fr));gap:10px;min-width:1060px}
+.column{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px;min-height:120px}
+.column h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);display:flex;justify-content:space-between}
+.card{border:1px solid var(--line);border-radius:5px;padding:6px 8px;margin-bottom:6px;background:var(--bg)}
+.card .title{font-weight:600}
+.card .meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.card.blocked{border-color:var(--bad)}
+a{color:var(--accent)}
+#actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-left:auto}
+#actions button{font:inherit;font-size:13px;padding:3px 10px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--text);cursor:pointer}
+#actions button:hover:not(:disabled){border-color:var(--accent)}
+#actions button:disabled{opacity:.45;cursor:not-allowed}
+#actions .sep{width:1px;height:18px;background:var(--line);margin:0 4px}
+#action-status{margin:0;padding:6px 16px;font-size:13px;border-bottom:1px solid var(--line)}
+#action-status:empty{display:none}
+#action-status.bad{color:var(--bad)}
+.empty{color:var(--muted);padding:16px}
+#detail{min-width:0;overflow:auto}
+#attention{margin:10px 0;padding:0;list-style:none}
+#attention li{border:1px solid var(--line);border-left:5px solid var(--warn);border-radius:5px;padding:6px 10px;margin-bottom:6px;background:var(--panel);overflow-wrap:anywhere}
+#attention li.failure{border-left-color:var(--bad)}
+#attention li.decision{border-left-color:var(--accent)}
+#attention .kind{font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.05em;margin-right:6px}
+#attention li.failure .kind{color:var(--bad)}
+#attention li.divergence .kind{color:var(--warn)}
+#attention li.decision .kind{color:var(--accent)}
+.card.flagged{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn)}
+.card.blocked{box-shadow:0 0 0 1px var(--bad)}
+.card .flag{font-size:11px;font-weight:700;color:var(--warn)}
+.card.blocked .flag{color:var(--bad)}
+#events{padding:0 16px 16px}
+#events h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:4px 0 8px}
+#activity{list-style:none;margin:0;padding:0;max-height:16em;overflow:auto;font:12px ui-monospace,monospace;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+#activity li{padding:3px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+#activity li.bad{color:var(--bad);font-weight:600}
+#activity:empty::before{content:'No journal events.';display:block;padding:8px;color:var(--muted)}
+#provider{padding:0 16px 16px}
+#provider h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:4px 0 8px;display:flex;gap:8px;align-items:baseline}
+#provider .toggle{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:400;font-size:12px;color:var(--text);cursor:pointer}
+#provider-lines{list-style:none;margin:0;padding:0;max-height:20em;overflow:auto;font:12px ui-monospace,monospace;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+#provider-lines:empty{display:none}
+#provider-lines li{padding:3px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere;white-space:pre-wrap}
+#provider-lines .who{color:var(--muted)}
+#provider-lines li.raw{display:none}
+#provider.raw #provider-lines li.raw{display:list-item}
+#provider.raw #provider-lines li.summary{display:none}
+#provider-empty{margin:0;padding:8px;border:1px dashed var(--line);border-radius:6px}
+#provider .toggle+.toggle{margin-left:12px}
+#provider:not(.all) #provider-lines li.other{display:none}
+</style>
+</head>
+<body>
+<header><h1>Kiln</h1><span class="muted" id="updated">Loading…</span>
+<div id="actions" role="toolbar" aria-label="Run actions">
+<button type="button" data-action="plan" disabled title="Plan the open issues; nothing is delivered">Plan</button>
+<button type="button" data-action="start" disabled title="Deliver the open issues, reusing an unchanged plan">Start</button>
+<span class="sep" aria-hidden="true"></span>
+<button type="button" data-action="pause" disabled title="Pause the selected run once active work settles">Pause</button>
+<button type="button" data-action="resume" disabled title="Continue the selected paused or interrupted run">Resume</button>
+<button type="button" data-action="cancel" disabled title="Stop the selected run; no further tickets start">Cancel</button>
+</div></header>
+<p id="action-status" role="status" aria-live="polite"></p>
+<main>
+<nav id="runs" aria-label="Runs"><h2>Runs</h2><ul id="run-list"></ul></nav>
+<div id="detail">
+<section id="board" aria-live="polite"><p class="empty" id="placeholder">Select a run to see its tickets.</p></section>
+<section id="events" aria-label="Run events"><h2>Run events <span class="muted" id="live"></span></h2><ol id="activity"></ol></section>
+<section id="provider" aria-label="Provider activity"><h2>Provider activity <span class="muted" id="provider-active"></span>
+<label class="toggle"><input type="checkbox" id="provider-all"> All tickets</label>
+<label class="toggle"><input type="checkbox" id="provider-raw"> Raw events</label></h2>
+<ol id="provider-lines" aria-live="polite"></ol><p class="empty" id="provider-empty">No provider activity for this run.</p></section>
+</div>
+</main>
+<script src="/dashboard.js"></script>
+</body>
+</html>

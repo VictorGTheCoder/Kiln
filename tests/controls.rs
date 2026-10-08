@@ -179,3 +179,33 @@ fn cancel_stops_active_work_and_prevents_new_issue_starts() {
         "cancelled work must not silently restart"
     );
 }
+
+#[test]
+fn probing_for_an_owner_never_makes_taking_ownership_fail() {
+    let repo = Repo::new();
+    let id = repo.planned();
+    let engine = kiln::Engine::open(&repo.path).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let prober = {
+        let engine = kiln::Engine::open(&repo.path).unwrap();
+        let (id, stop) = (id.clone(), stop.clone());
+        thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                engine.is_owned_elsewhere(&id).unwrap();
+            }
+        })
+    };
+    let mut failures = 0;
+    for _ in 0..3000 {
+        match engine.own_run(&id) {
+            Ok(owner) => drop(owner),
+            Err(_) => failures += 1,
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    prober.join().unwrap();
+    assert_eq!(
+        failures, 0,
+        "a status probe made a scheduler fail to own its run"
+    );
+}
