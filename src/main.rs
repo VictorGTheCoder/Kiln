@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use kiln::Engine;
 use std::path::PathBuf;
+mod interrupt;
 
 #[derive(Parser)]
 #[command(
@@ -269,29 +270,38 @@ enum Commands {
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
     },
-    /// Reopen an interrupted run: reconcile recorded state with observed Git and process
-    /// state, record each recovery decision, then continue scheduling without
-    /// repeating completed effects.
+    /// Continue the latest paused or interrupted run without repeating completed work.
     Resume {
-        id: String,
-        #[arg(long, required_unless_present_any = ["codex", "claude"], conflicts_with_all = ["codex", "claude"])]
+        /// Resume this run instead (internal pipeline form; JSON output).
+        #[arg(hide = true)]
+        id: Option<String>,
+        #[arg(long, hide = true, alias = "run-fixture", conflicts_with_all = ["codex", "claude"])]
         fixture: Option<PathBuf>,
         #[arg(long)]
         codex: Option<PathBuf>,
         /// Claude Code executable; mutually exclusive with --codex.
         #[arg(long, conflicts_with = "codex")]
         claude: Option<PathBuf>,
-        #[arg(long, conflicts_with = "gh")]
+        #[arg(long, hide = true, conflicts_with = "gh")]
         publication_fixture: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         gh: Option<PathBuf>,
-        #[arg(long, conflicts_with_all = ["codex", "claude"])]
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
         repair_fixture: Option<PathBuf>,
+        /// Print the recorded run as JSON instead of a readable summary.
+        #[arg(long, conflicts_with = "id")]
+        json: bool,
     },
-    /// Let active ticket work settle, then pause before starting more work.
-    Pause { id: String },
-    /// Stop active work safely and prevent any more tickets from starting.
-    Cancel { id: String },
+    /// Pause the latest active run once its active ticket work settles.
+    Pause {
+        #[arg(hide = true)]
+        id: Option<String>,
+    },
+    /// Stop the latest active run's work safely; no further tickets start.
+    Cancel {
+        #[arg(hide = true)]
+        id: Option<String>,
+    },
     /// Validate the integrated revision against acceptance workflows per criterion.
     #[command(hide = true)]
     Validate {
@@ -343,6 +353,12 @@ enum Commands {
         /// Print the summary as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Serve the dashboard of this repository's runs on a loopback address, without starting a run.
+    Dashboard {
+        /// Address to serve on; the next free port is used when it is taken.
+        #[arg(long, default_value = DASHBOARD_BIND)]
+        bind: std::net::SocketAddr,
     },
     /// Read a recorded run, or list all run identities.
     #[command(hide = true)]
@@ -725,6 +741,65 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
         run
     };
     let id = run.id.clone();
+    if interrupt::requested() {
+        // Planning finished: the first safe point of a foreground delivery. The
+        // paused plan is delivered by `kiln resume`.
+        let run = engine.transact(&id, |stored| {
+            stored.status = "paused".into();
+            Ok(stored.clone())
+        })?;
+        return paused(&run, report);
+    }
+    deliver(
+        engine,
+        &id,
+        Delivery {
+            run_fixture,
+            codex,
+            claude,
+            publication_fixture,
+            gh,
+            repair_fixture,
+            resume: false,
+        },
+        report,
+    )
+}
+/// Inputs of the delivery phase of a backlog run: scheduling then publication.
+struct Delivery {
+    run_fixture: Option<PathBuf>,
+    codex: Option<PathBuf>,
+    claude: Option<PathBuf>,
+    publication_fixture: Option<PathBuf>,
+    gh: Option<PathBuf>,
+    repair_fixture: Option<PathBuf>,
+    /// Reconcile and continue an interrupted or paused run instead of starting it.
+    resume: bool,
+}
+/// Report a run stopped by a pause request (Ctrl-C, `kiln pause`) and exit cleanly.
+fn paused(run: &kiln::Run, report: &Report) -> Result<()> {
+    report.emit(run)?;
+    eprintln!(
+        "Run {} paused; nothing was left half-applied. Run `kiln resume` to continue it.",
+        run.id
+    );
+    Ok(())
+}
+/// Schedule (or resume) the tickets of a planned backlog run, then publish its
+/// verified delivery groups and wait for CI. A pause or cancellation stops
+/// before publication.
+fn deliver(engine: &Engine, id: &str, args: Delivery, report: &Report) -> Result<()> {
+    let Delivery {
+        run_fixture,
+        codex,
+        claude,
+        publication_fixture,
+        gh,
+        repair_fixture,
+        resume,
+    } = args;
+    let id = id.to_owned();
+    interrupt::watch(&id);
     let providers: Box<dyn kiln::scheduler::TicketProviders> = match run_fixture {
         Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
             &engine.repository.join(path),
@@ -750,8 +825,31 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
             }
         }
     };
-    let mut run = engine.run_tickets(&id, providers.as_ref())?;
+    let mut run = if resume {
+        engine.resume(&id, providers.as_ref())?
+    } else {
+        engine.run_tickets(&id, providers.as_ref())?
+    };
+    match run.status.as_str() {
+        "paused" => return paused(&run, report),
+        "cancelled" => {
+            report.emit(&run)?;
+            anyhow::bail!(
+                "run cancelled; active work was stopped and no further tickets were started"
+            );
+        }
+        _ => {}
+    }
     engine.record_backlog_results(&id, &mut run)?;
+    if interrupt::requested() {
+        // Scheduling settled before the pause request reached it: stop here,
+        // before publication starts.
+        run = engine.transact(&id, |stored| {
+            stored.status = "paused".into();
+            Ok(stored.clone())
+        })?;
+        return paused(&run, report);
+    }
     if kiln::publication::PublicationSettings::from_config(&run.config)?.is_some() {
         let host: Box<dyn kiln::publication::PullRequestHost> = match publication_fixture {
             Some(path) => Box::new(kiln::publication::FixturePullRequests::new(
@@ -761,16 +859,12 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
                 program: gh.unwrap_or_else(|| "gh".into()),
             }),
         };
-        if let Some(path) = repair_fixture {
+        let published = if let Some(path) = repair_fixture {
             let repair =
                 kiln::correction::FixtureCorrectionAgent::load(&engine.repository.join(path))?;
-            run = engine.publish_delivery_groups_with_repair(
-                &id,
-                host.as_ref(),
-                Some((&repair, &repair)),
-            )?;
+            engine.publish_delivery_groups_with_repair(&id, host.as_ref(), Some((&repair, &repair)))
         } else {
-            run = with_adapter!(
+            with_adapter!(
                 Provider::select(codex.clone(), claude.clone()),
                 &run.config,
                 |agent| {
@@ -778,10 +872,26 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
                         &id,
                         host.as_ref(),
                         Some((&agent, &agent)),
-                    )?
+                    )
                 }
-            );
-        }
+            )
+        };
+        run = match published {
+            Ok(run) => run,
+            Err(error) => {
+                let stored = engine.inspect(&id)?;
+                match stored.status.as_str() {
+                    "paused" => return paused(&stored, report),
+                    "cancelled" => {
+                        report.emit(&stored)?;
+                        anyhow::bail!(
+                            "run cancelled during delivery; published pull requests were kept"
+                        );
+                    }
+                    _ => return Err(error),
+                }
+            }
+        };
     } else if run
         .delivery_groups
         .iter()
@@ -1145,6 +1255,7 @@ fn run() -> Result<()> {
                     claude,
                 },
             )?;
+            interrupt::install(&engine);
             // Fixtures stand in for every agent call, so no provider is needed.
             let (provider, codex, claude) = if planning_fixture.is_some()
                 && run_fixture.is_some()
@@ -1162,6 +1273,7 @@ fn run() -> Result<()> {
             } else {
                 Report::Start { provider }
             };
+            let _dashboard = embedded_dashboard(&engine, json);
             // One readable line per journal event as it happens; stdout stays
             // pure JSON under --json.
             kiln::journal::echo(move |event| {
@@ -1381,7 +1493,60 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
-        command @ (Commands::Run { .. } | Commands::Resume { .. }) => {
+        Commands::Resume {
+            id: None,
+            fixture,
+            codex,
+            claude,
+            publication_fixture,
+            gh,
+            repair_fixture,
+            json,
+        } => {
+            let run = engine
+                .latest_resumable_run()?
+                .context("no paused or interrupted run to resume; start one with `kiln start`")?;
+            // Fixtures stand in for every agent call, so no provider is needed.
+            let (provider, codex, claude) = if fixture.is_some() && repair_fixture.is_some() {
+                (None, None, None)
+            } else {
+                let defaults = kiln::defaults::Defaults::infer(
+                    &engine.repository,
+                    kiln::defaults::Overrides {
+                        config: None,
+                        github_repo: run.backlog.as_ref().map(|b| b.github_repository.clone()),
+                        codex,
+                        claude,
+                    },
+                )?;
+                let choice = defaults.provider()?;
+                let name = choice.agent.name();
+                let (codex, claude) = choice.into_flags();
+                (Some(name), codex, claude)
+            };
+            let report = if json {
+                Report::Json
+            } else {
+                Report::Start { provider }
+            };
+            eprintln!("Resuming run {} (status: {}).", run.id, run.status);
+            interrupt::install(&engine);
+            return deliver(
+                &engine,
+                &run.id,
+                Delivery {
+                    run_fixture: fixture,
+                    codex,
+                    claude,
+                    publication_fixture,
+                    gh,
+                    repair_fixture,
+                    resume: true,
+                },
+                &report,
+            );
+        }
+        command @ (Commands::Run { .. } | Commands::Resume { id: Some(_), .. }) => {
             let (resume, id, fixture, codex, claude, publication_fixture, gh, repair_fixture) =
                 match command {
                     Commands::Run {
@@ -1391,13 +1556,14 @@ fn run() -> Result<()> {
                         claude,
                     } => (false, id, fixture, codex, claude, None, None, None),
                     Commands::Resume {
-                        id,
+                        id: Some(id),
                         fixture,
                         codex,
                         claude,
                         publication_fixture,
                         gh,
                         repair_fixture,
+                        ..
                     } => (
                         true,
                         id,
@@ -1617,13 +1783,33 @@ fn run() -> Result<()> {
             }
             return Ok(());
         }
-        Commands::Pause { id } => {
+        Commands::Pause { id: Some(id) } => {
             engine.request_control(&id, "pause")?;
             serde_json::json!({"id": id, "requested": "pause"})
         }
-        Commands::Cancel { id } => {
+        Commands::Cancel { id: Some(id) } => {
             engine.request_control(&id, "cancel")?;
             serde_json::json!({"id": id, "requested": "cancel"})
+        }
+        Commands::Pause { id: None } => {
+            let id = engine
+                .latest_active_run()?
+                .context("no active run to pause; `kiln status` shows the latest run")?;
+            engine.request_control(&id, "pause")?;
+            println!(
+                "Pause requested for run {id}; it pauses once active ticket work settles. Run `kiln resume` to continue it."
+            );
+            return Ok(());
+        }
+        Commands::Cancel { id: None } => {
+            let id = engine
+                .latest_active_run()?
+                .context("no active run to cancel; `kiln status` shows the latest run")?;
+            engine.request_control(&id, "cancel")?;
+            println!(
+                "Cancellation requested for run {id}; active work is stopped and no further tickets start."
+            );
+            return Ok(());
         }
         Commands::Report { id } => {
             let run = engine.inspect(&id)?;
@@ -1662,6 +1848,7 @@ fn run() -> Result<()> {
             }
             value
         }
+        Commands::Dashboard { bind } => return dashboard(engine, bind),
         Commands::Inspect { id: None } => serde_json::to_value(engine.list()?)?,
         Commands::Serve {
             bind,
@@ -1712,19 +1899,78 @@ fn status(engine: &Engine, id: Option<&str>, json: bool) -> Result<()> {
         Some(id) => Some(engine.inspect(id)?),
         None => kiln::status::latest(engine)?,
     };
+    let summary = run.as_ref().map(|run| kiln::status::RunSummary {
+        dashboard_url: kiln::dashboard::running_url(&engine.repository),
+        ..kiln::status::RunSummary::of(run)
+    });
     if json {
-        let summary = run.as_ref().map(kiln::status::RunSummary::of);
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
-    match run {
+    match summary {
         None => println!(
             "No Kiln runs in {} yet. Run `kiln plan` or `kiln start` to begin.",
             engine.repository.display()
         ),
-        Some(run) => print!("{}", kiln::status::RunSummary::of(&run).render()),
+        Some(summary) => print!("{}", summary.render()),
     }
     Ok(())
+}
+/// Default dashboard address of `kiln dashboard` and `kiln start`.
+const DASHBOARD_BIND: &str = "127.0.0.1:3000";
+
+/// Serve the dashboard until SIGINT or SIGTERM, recording its URL meanwhile.
+fn dashboard(engine: Engine, bind: std::net::SocketAddr) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    extern "C" fn stop(_: libc::c_int) {
+        STOP.store(true, Ordering::Relaxed);
+    }
+    let server = kiln::web::WebServer::bind_next_free(bind)?;
+    let url = server.url();
+    let _announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
+    }
+    println!("Kiln web view: {url}");
+    use std::io::Write as _;
+    std::io::stdout().flush()?;
+    server.serve(engine, None, kiln::web::Home::Dashboard, &STOP)
+}
+
+/// Serve the dashboard in the background for the life of `kiln start`. Its URL
+/// goes to stdout, or to stderr when stdout carries JSON. A dashboard that
+/// cannot start is reported and does not stop the run.
+fn embedded_dashboard(engine: &Engine, json: bool) -> Option<kiln::dashboard::Announcement> {
+    let bind = DASHBOARD_BIND
+        .parse()
+        .expect("valid default dashboard address");
+    let started = kiln::web::WebServer::bind_next_free(bind).and_then(|server| {
+        let url = server.url();
+        let announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let _ = server.serve(engine, None, kiln::web::Home::Dashboard, &NEVER);
+        });
+        Ok((url, announcement))
+    });
+    match started {
+        Ok((url, announcement)) => {
+            if json {
+                eprintln!("Kiln web view: {url}");
+            } else {
+                println!("Kiln web view: {url}");
+            }
+            Some(announcement)
+        }
+        Err(error) => {
+            eprintln!("Kiln: dashboard unavailable: {error:#}");
+            None
+        }
+    }
 }
 fn main() {
     if let Err(error) = run() {
