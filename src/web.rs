@@ -9,7 +9,10 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
     time::Duration,
 };
@@ -119,6 +122,7 @@ impl WebServer {
             backlog,
             home,
             port: self.address.port(),
+            streams: Arc::default(),
         };
         while !stop.load(Ordering::Relaxed) {
             if let Some(request) = self.server.recv_timeout(Duration::from_millis(200))? {
@@ -153,6 +157,29 @@ struct Site {
     port: u16,
     /// Dashboard action buttons, when enabled.
     actions: Option<crate::actions::Actions>,
+    /// Event streams being served, each on its own thread.
+    streams: Arc<AtomicUsize>,
+}
+
+/// Most event streams served at once; each holds a thread until its run ends.
+const MAX_EVENT_STREAMS: usize = 32;
+
+/// One of the [`MAX_EVENT_STREAMS`] stream slots, released when dropped.
+struct StreamSlot(Arc<AtomicUsize>);
+impl StreamSlot {
+    fn take(streams: &Arc<AtomicUsize>) -> Option<Self> {
+        streams
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |open| {
+                (open < MAX_EVENT_STREAMS).then_some(open + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(streams)))
+    }
+}
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 impl Site {
     /// Answer one request. Requests are answered one at a time on the server
@@ -166,8 +193,16 @@ impl Site {
                     .find(|h| h.field.equiv("Last-Event-ID"))
                     .map(|h| h.value.as_str()),
             );
+            let Some(slot) = StreamSlot::take(&self.streams) else {
+                let body = serde_json::json!({"error": format!(
+                    "too many open event streams (at most {MAX_EVENT_STREAMS}); close a dashboard tab and retry"
+                )});
+                self.reply(request, 503, "application/json", body.to_string());
+                return;
+            };
             let out = request.into_writer();
             thread::spawn(move || {
+                let _slot = slot;
                 let headers = [
                     ("Cache-Control", "no-store"),
                     ("X-Content-Type-Options", "nosniff"),
@@ -178,6 +213,9 @@ impl Site {
             return;
         }
         let (status, content_type, body) = self.respond(&request);
+        self.reply(request, status, content_type, body);
+    }
+    fn reply(&self, request: Request, status: u16, content_type: &str, body: String) {
         let response = Response::from_string(body)
             .with_status_code(status)
             .with_header(Header::from_bytes("Content-Type", content_type).unwrap())

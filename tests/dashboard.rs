@@ -525,6 +525,63 @@ fn event_stream_replays_missed_journal_events_then_streams_live_ones_until_the_r
 }
 
 #[test]
+fn event_streams_beyond_the_concurrent_limit_are_refused_until_one_ends() {
+    let repo = Repo::new();
+    let id = repo.planned();
+    let approved = json!({"outcome":"approved","evidence":"Reviewed"});
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{
+            "a":{"implementation":{"files":{"a.txt":"a\n"},"outcome":"completed"},"review":{"standards":approved,"spec":approved},"await_file":".kiln/release"},
+            "b":{"implementation":{"files":{"b.txt":"b\n"},"outcome":"completed"},"review":{"standards":approved,"spec":approved}}
+        }}),
+    );
+    let mut run = repo
+        .command(&["run", &id, "--fixture", "scenario.json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_journal(&repo, &id, "\"implementation\"");
+    let server = repo.dashboard(&["--bind", "127.0.0.1:0"]);
+
+    // 32 open streams of a live run are served...
+    let mut open: Vec<Stream> = (0..32)
+        .map(|_| {
+            let mut stream = server.events(&id, None);
+            assert_eq!(stream.status, 200, "{}", stream.head);
+            stream.until(|f| f.is(Some("a"), "implementation", "started"));
+            stream
+        })
+        .collect();
+    // ...one more is refused rather than given another thread.
+    let refused = server.events(&id, None);
+    assert_eq!(refused.status, 503, "{}", refused.head);
+    // The rest of the dashboard keeps answering.
+    assert_eq!(server.get("/api/dashboard/runs").status, 200);
+
+    fs::write(repo.path.join(".kiln/release"), "").unwrap();
+    for stream in &mut open {
+        stream.until(|f| f.event == "end");
+    }
+    assert!(run.wait().unwrap().success());
+    drop(open);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut stream = server.events(&id, None);
+        if stream.status == 200 {
+            stream.until(|f| f.event == "end");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "finished streams never freed their slots"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn event_stream_of_a_run_without_a_journal_ends_at_once() {
     let repo = Repo::new();
     record_earlier_run(&repo, "run-earlier");
