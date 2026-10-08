@@ -2,7 +2,7 @@
 //! recorded run state (`.kiln/runs/<id>.json`), so runs recorded by earlier
 //! Kiln versions appear the same way. Also the embedded static page and script,
 //! and the record of where a dashboard server is running.
-use crate::{Engine, Run};
+use crate::{state::Stage, Engine, Run};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -208,10 +208,7 @@ impl Board {
                 .iter()
                 .flat_map(|s| &s.tickets)
                 .find(|t| t.id == id);
-            let group = run
-                .delivery_groups
-                .iter()
-                .find(|g| g.tickets.iter().any(|t| t == id));
+            let group = run.delivery_group_of(id);
             let (pull_request, ci) = match group {
                 Some(g) => (
                     g.pull_request.as_ref(),
@@ -223,27 +220,9 @@ impl Board {
                     None => (None, None),
                 },
             };
-            let state = schedule.map_or("planned", |s| s.state.as_str());
-            let stage = match state {
-                "waiting" | "planned" => "planned",
-                "implementing" => implementing_stage(run, id),
-                "awaiting_integration" | "integrating" => "integrating",
-                "integrated" => match (group, pull_request) {
-                    (_, None) => "integrating",
-                    (Some(g), Some(_))
-                        if !g.ci_attempts.is_empty()
-                            || matches!(
-                                g.status.as_str(),
-                                "awaiting-ci" | "ci-pending" | "ci-failed" | "verified"
-                            ) =>
-                    {
-                        "ci"
-                    }
-                    _ => "pr",
-                },
-                // Blocked or stopped tickets stay where their evidence ends.
-                _ => furthest_stage(run, id),
-            };
+            let progress = run.ticket_progress(id);
+            let stage = column(progress.stage);
+            let state = progress.state.as_str();
             let card = Card {
                 id: id.to_owned(),
                 title: plan.map(|p| p.title.clone()).unwrap_or_default(),
@@ -294,22 +273,15 @@ fn active_tickets(run: &Run) -> Vec<String> {
         .collect()
 }
 
-/// An implementing ticket is in review once its latest implementation finished.
-fn implementing_stage(run: &Run, id: &str) -> &'static str {
-    match run.sessions.iter().rev().find(|s| s.ticket_id == id) {
-        Some(s) if s.status == "implemented" => "review",
-        _ => "implementing",
-    }
-}
-fn furthest_stage(run: &Run, id: &str) -> &'static str {
-    if run.integrations.iter().any(|i| i.ticket_id == id) {
-        "integrating"
-    } else if run.reviews.iter().any(|r| r.ticket_id == id) {
-        "review"
-    } else if run.sessions.iter().any(|s| s.ticket_id == id) {
-        "implementing"
-    } else {
-        "planned"
+/// Kanban column of a pipeline stage.
+fn column(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Planned => "planned",
+        Stage::Implementing => "implementing",
+        Stage::Review => "review",
+        Stage::Integrating | Stage::Integrated => "integrating",
+        Stage::PullRequest => "pr",
+        Stage::Ci | Stage::Delivered => "ci",
     }
 }
 

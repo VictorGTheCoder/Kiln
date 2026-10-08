@@ -5,7 +5,7 @@
 //! journal (`.kiln/runs/<id>/events.jsonl`) can later refine a summary built
 //! here (for example the latest activity of each ticket) without replacing it:
 //! the recorded state stays the source of truth.
-use crate::{Engine, Run};
+use crate::{state::Stage, Engine, Run};
 use anyhow::Result;
 use serde::Serialize;
 use std::fmt::Write;
@@ -101,14 +101,7 @@ impl RunSummary {
                     .find(|t| t.id == id)
                     .map(|t| t.title.clone())
                     .unwrap_or_default(),
-                stage: stage(
-                    run,
-                    id,
-                    scheduled
-                        .iter()
-                        .find(|t| t.id == id)
-                        .map(|t| t.state.as_str()),
-                ),
+                stage: stage(run, id),
             })
             .collect();
         let mut stages: Vec<StageCount> = Vec::new();
@@ -223,22 +216,17 @@ impl RunSummary {
     }
 }
 
-/// Stage of one ticket from its scheduler state and its delivery group.
-fn stage(run: &Run, id: &str, scheduled: Option<&str>) -> String {
-    match scheduled {
-        None => "planned".into(),
-        Some("awaiting_integration" | "integrating") => "integrating".into(),
-        Some("integrated") => {
-            match run
-                .delivery_groups
-                .iter()
-                .find(|g| g.tickets.iter().any(|t| t == id))
-            {
-                Some(g) if g.status == "verified" => "delivered".into(),
-                Some(g) if g.pull_request.is_some() => "delivering".into(),
-                _ => "integrated".into(),
-            }
-        }
-        Some(state) => state.to_owned(),
+/// Stage of one ticket as `kiln status` names it: the scheduler state, with
+/// the delivery of integrated tickets spelled out.
+fn stage(run: &Run, id: &str) -> String {
+    let progress = run.ticket_progress(id);
+    match progress.state.as_str() {
+        "awaiting_integration" | "integrating" => "integrating".into(),
+        "integrated" => match progress.stage {
+            Stage::Delivered => "delivered".into(),
+            Stage::PullRequest | Stage::Ci => "delivering".into(),
+            _ => "integrated".into(),
+        },
+        state => state.to_owned(),
     }
 }

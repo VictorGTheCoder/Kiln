@@ -12,7 +12,7 @@ pub mod status;
 pub mod web;
 pub use config::ProjectConfig;
 pub use engine::{Engine, RunActiveElsewhere};
-pub use state::{BacklogRun, FrozenSpec, Run, SpecRevision};
+pub use state::{BacklogRun, FrozenSpec, Run, SpecRevision, Stage, TicketProgress};
 
 pub mod import;
 pub mod planning;
