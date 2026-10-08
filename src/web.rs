@@ -141,9 +141,27 @@ struct Site {
 }
 impl Site {
     /// Answer one request. Requests are answered one at a time on the server
-    /// thread; a long-lived response (an event stream) must move its
-    /// `Request` into its own thread here instead of blocking the loop.
+    /// thread, except event streams, which move to their own thread.
     fn handle(&self, request: Request) {
+        if let Some(stream) = self.event_stream(&request) {
+            let cursor = crate::event_stream::Cursor::parse(
+                request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Last-Event-ID"))
+                    .map(|h| h.value.as_str()),
+            );
+            let out = request.into_writer();
+            thread::spawn(move || {
+                let headers = [
+                    ("Cache-Control", "no-store"),
+                    ("X-Content-Type-Options", "nosniff"),
+                    ("Content-Security-Policy", CONTENT_SECURITY_POLICY),
+                ];
+                let _ = stream.serve(out, cursor, &headers, redact_for_web);
+            });
+            return;
+        }
         let (status, content_type, body) = self.respond(&request);
         let response = Response::from_string(body)
             .with_status_code(status)
@@ -155,20 +173,37 @@ impl Site {
             );
         let _ = request.respond(response);
     }
-    fn respond(&self, request: &Request) -> (u16, &'static str, String) {
-        let engine = &self.engine;
-        let backlog = self.backlog.as_ref();
+    /// The event stream a valid `GET /api/dashboard/runs/<id>/events` asks
+    /// for; `None` for any other request, which [`Self::respond`] answers
+    /// (with 400 or 404 for an invalid stream request).
+    fn event_stream(&self, request: &Request) -> Option<crate::event_stream::EventStream> {
+        let path = request.url().split('?').next().unwrap_or("/");
+        let id = path
+            .strip_prefix("/api/dashboard/runs/")?
+            .strip_suffix("/events")?;
+        if request.method() != &Method::Get || !self.valid_host(request) {
+            return None;
+        }
+        validate_id(id).ok()?;
+        crate::event_stream::EventStream::open(&self.engine, id).ok()
+    }
+    fn valid_host(&self, request: &Request) -> bool {
         let expected_hosts = [
             format!("localhost:{}", self.port),
             format!("127.0.0.1:{}", self.port),
             format!("[::1]:{}", self.port),
         ];
-        let valid_host = request.headers().iter().any(|header| {
+        request.headers().iter().any(|header| {
             header.field.equiv("Host")
                 && expected_hosts
                     .iter()
                     .any(|host| header.value.as_str().eq_ignore_ascii_case(host))
-        });
+        })
+    }
+    fn respond(&self, request: &Request) -> (u16, &'static str, String) {
+        let engine = &self.engine;
+        let backlog = self.backlog.as_ref();
+        let valid_host = self.valid_host(request);
         let request_host = request
             .headers()
             .iter()

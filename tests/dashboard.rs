@@ -427,3 +427,325 @@ fn dashboard_is_listed_in_help() {
         "{help}"
     );
 }
+
+/// One Server-Sent Events frame.
+#[derive(Debug, Clone)]
+struct Frame {
+    id: Option<String>,
+    event: String,
+    data: String,
+}
+impl Frame {
+    fn json(&self) -> Value {
+        serde_json::from_str(&self.data).unwrap_or_else(|e| panic!("{e}: {}", self.data))
+    }
+    fn is(&self, ticket: Option<&str>, stage: &str, status: &str) -> bool {
+        if self.event != "journal" {
+            return false;
+        }
+        let event = self.json();
+        event["ticket"].as_str() == ticket && event["stage"] == stage && event["status"] == status
+    }
+}
+/// The body of a chunked HTTP/1.1 response; ends at its last chunk.
+struct Dechunk {
+    inner: BufReader<TcpStream>,
+    left: usize,
+    done: bool,
+}
+impl Read for Dechunk {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.done {
+            return Ok(0);
+        }
+        if self.left == 0 {
+            let mut size = String::new();
+            self.inner.read_line(&mut size)?;
+            self.left = usize::from_str_radix(size.trim(), 16)
+                .unwrap_or_else(|_| panic!("chunk size line {size:?}"));
+            if self.left == 0 {
+                self.done = true;
+                return Ok(0);
+            }
+        }
+        let wanted = buf.len().min(self.left);
+        let n = self.inner.read(&mut buf[..wanted])?;
+        self.left -= n;
+        if self.left == 0 {
+            let mut crlf = String::new();
+            self.inner.read_line(&mut crlf)?;
+        }
+        Ok(n)
+    }
+}
+/// A live connection to an event stream.
+struct Stream {
+    status: u16,
+    head: String,
+    reader: BufReader<Dechunk>,
+}
+impl Stream {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.head.lines().find_map(|line| {
+            let (field, value) = line.split_once(':')?;
+            field.eq_ignore_ascii_case(name).then_some(value.trim())
+        })
+    }
+    /// The next frame carrying data; `None` once the server closes the stream.
+    fn next(&mut self) -> Option<Frame> {
+        let (mut id, mut event, mut data) = (None, "message".to_owned(), Vec::new());
+        loop {
+            let mut line = String::new();
+            if self.reader.read_line(&mut line).unwrap() == 0 {
+                return None;
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                if !data.is_empty() {
+                    return Some(Frame {
+                        id,
+                        event,
+                        data: data.join("\n"),
+                    });
+                }
+                continue;
+            }
+            match line.split_once(':') {
+                Some(("", _)) => {} // comment, e.g. a keep-alive
+                Some(("id", v)) => id = Some(v.trim_start().to_owned()),
+                Some(("event", v)) => event = v.trim_start().to_owned(),
+                Some(("data", v)) => data.push(v.strip_prefix(' ').unwrap_or(v).to_owned()),
+                _ => {}
+            }
+        }
+    }
+    /// Frames up to and including the first matching one.
+    fn until(&mut self, mut done: impl FnMut(&Frame) -> bool) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        while let Some(frame) = self.next() {
+            let stop = done(&frame);
+            frames.push(frame);
+            if stop {
+                return frames;
+            }
+        }
+        panic!("stream closed before the expected frame: {frames:#?}");
+    }
+}
+impl Server {
+    fn events(&self, id: &str, last_event_id: Option<&str>) -> Stream {
+        self.events_host(id, last_event_id, &format!("localhost:{}", self.port()))
+    }
+    fn events_host(&self, id: &str, last_event_id: Option<&str>, host: &str) -> Stream {
+        let stream = TcpStream::connect(&self.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let resume = last_event_id
+            .map(|id| format!("Last-Event-ID: {id}\r\n"))
+            .unwrap_or_default();
+        write!(
+            &stream,
+            "GET /api/dashboard/runs/{id}/events HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n{resume}\r\n"
+        )
+        .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            head.push_str(&line);
+        }
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let chunked = head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked");
+        Stream {
+            status,
+            head,
+            reader: BufReader::new(Dechunk {
+                inner: reader,
+                left: 0,
+                done: status != 200 || !chunked,
+            }),
+        }
+    }
+}
+
+/// Wait until the run's journal mentions `needle`.
+fn wait_for_journal(repo: &Repo, id: &str, needle: &str) {
+    let journal = repo.path.join(".kiln/runs").join(id).join("events.jsonl");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if fs::read_to_string(&journal).is_ok_and(|j| j.contains(needle)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    panic!("journal of {id} never mentioned {needle}");
+}
+
+#[test]
+fn event_stream_replays_missed_journal_events_then_streams_live_ones_until_the_run_ends() {
+    let repo = Repo::new();
+    let id = repo.planned();
+    let approved = json!({"outcome":"approved","evidence":"Reviewed"});
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{
+            "a":{"implementation":{"files":{"a.txt":"a\n"},"outcome":"completed"},"review":{"standards":approved,"spec":approved},"await_file":".kiln/release"},
+            "b":{"implementation":{"files":{"b.txt":"b\n"},"outcome":"completed"},"review":{"standards":approved,"spec":approved}}
+        }}),
+    );
+    let mut run = repo
+        .command(&["run", &id, "--fixture", "scenario.json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_journal(&repo, &id, "\"implementation\"");
+    let server = repo.dashboard(&["--bind", "127.0.0.1:0"]);
+
+    // Connecting mid-run first replays what was already journaled.
+    let mut stream = server.events(&id, None);
+    assert_eq!(stream.status, 200, "{}", stream.head);
+    assert!(stream
+        .header("Content-Type")
+        .unwrap()
+        .starts_with("text/event-stream"));
+    assert_eq!(stream.header("Cache-Control"), Some("no-store"));
+    let replayed = stream.until(|f| f.is(Some("a"), "implementation", "started"));
+    assert!(
+        replayed[0].is(None, "run", "running"),
+        "replay starts at the beginning: {replayed:#?}"
+    );
+    assert!(replayed
+        .iter()
+        .all(|f| f.event == "journal" && f.id.is_some()));
+
+    // Then events appended after the client connected arrive live.
+    fs::write(repo.path.join(".kiln/release"), "").unwrap();
+    let live = stream.until(|f| f.event == "end");
+    assert!(
+        live.iter().any(|f| f.is(Some("a"), "review", "passed")),
+        "{live:#?}"
+    );
+    assert!(
+        live.iter()
+            .any(|f| f.is(Some("b"), "integration", "integrated")),
+        "{live:#?}"
+    );
+    assert!(
+        live[live.len() - 2].is(None, "run", "awaiting_validation"),
+        "{live:#?}"
+    );
+    assert_eq!(live[live.len() - 1].json()["status"], "awaiting_validation");
+    assert!(stream.next().is_none(), "the stream closes after its end");
+    assert!(run.wait().unwrap().success());
+
+    // A reconnecting client resumes after the last event it saw.
+    let seen = replayed.last().unwrap().id.clone().unwrap();
+    let journal = |frames: &[Frame]| -> Vec<String> {
+        frames
+            .iter()
+            .filter(|f| f.event == "journal")
+            .map(|f| f.data.clone())
+            .collect()
+    };
+    let rest = server.events(&id, Some(&seen)).until(|f| f.event == "end");
+    assert_eq!(journal(&rest), journal(&live));
+}
+
+#[test]
+fn event_stream_of_a_run_without_a_journal_ends_at_once() {
+    let repo = Repo::new();
+    record_earlier_run(&repo, "run-earlier");
+    let server = repo.dashboard(&["--bind", "127.0.0.1:0"]);
+
+    let mut stream = server.events("run-earlier", None);
+    assert_eq!(stream.status, 200, "{}", stream.head);
+    let frames = stream.until(|f| f.event == "end");
+    assert_eq!(frames.len(), 1, "{frames:#?}");
+    assert_eq!(frames[0].json()["status"], "completed");
+    assert!(stream.next().is_none());
+
+    assert_eq!(
+        server.events("missing-run", None).status,
+        404,
+        "unknown runs have no stream"
+    );
+    assert_eq!(server.events("..%2Fx", None).status, 404);
+    assert_eq!(
+        server
+            .events_host("run-earlier", None, "evil.example:80")
+            .status,
+        400
+    );
+}
+
+#[test]
+fn dashboard_script_follows_the_run_event_stream_and_shows_attention_items() {
+    let repo = Repo::new();
+    let server = repo.dashboard(&["--bind", "127.0.0.1:0"]);
+    let script = server.get("/dashboard.js").body;
+    assert!(script.contains("new EventSource("), "{script}");
+    assert!(script.contains("/events"), "{script}");
+    assert!(script.contains("\"journal\""), "{script}");
+    assert!(script.contains("\"end\""), "{script}");
+    assert!(script.contains(".attention"), "{script}");
+    let page = server.get("/").body;
+    assert!(page.contains("id=\"activity\""), "{page}");
+}
+
+#[test]
+fn board_lists_failures_divergences_and_autonomous_decisions_as_attention_items() {
+    let repo = Repo::new();
+    let planned = repo.planned();
+    let executed = repo.executed();
+    record_earlier_run(&repo, "run-earlier");
+    let state = repo.path.join(".kiln/runs/run-earlier.json");
+    let mut earlier: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    let ticket = json!({"id":"t","title":"T","description":"","acceptance_criteria":[],"covers":[],"blocked_by":[]});
+    let position = json!({"rank":1,"source":"spec","reference":"one.md#ac-1","statement":"Use JSON","source_statement":"Use JSON"});
+    earlier["decisions"] = json!([{"id":"decision-1","ambiguity_id":"amb-1","context_id":"c","question":"Which format?",
+        "positions":[position],"governing":position,"resolution":"Use JSON","rationale":"The spec says so","evidence":[],
+        "outcome":"resolved","findings":[]}]);
+    earlier["replans"] = json!([{"id":"replan-1","ticket_id":"github:example/project#7","attempt":1,"context_id":"c",
+        "failures":["tests failed"],"previous":ticket,"revised":ticket,"verification":null,"findings":[],"outcome":"replanned"}]);
+    earlier["delivery_groups"][0]["status"] = json!("ci-failed");
+    fs::write(&state, earlier.to_string()).unwrap();
+    let server = repo.dashboard(&["--bind", "127.0.0.1:0"]);
+    let attention = |id: &str| -> Vec<Value> {
+        let board = server.get(&format!("/api/dashboard/runs/{id}")).json();
+        board["attention"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no attention list: {board:#}"))
+            .clone()
+    };
+
+    assert_eq!(attention(&planned), Vec::<Value>::new());
+
+    let items = attention(&executed);
+    let failure = items
+        .iter()
+        .find(|i| i["kind"] == "failure" && i["ticket"] == "b")
+        .unwrap_or_else(|| panic!("blocked ticket b needs attention: {items:#?}"));
+    assert!(!failure["message"].as_str().unwrap().is_empty());
+
+    let items = attention("run-earlier");
+    let find = |kind: &str| {
+        items
+            .iter()
+            .find(|i| i["kind"] == kind)
+            .unwrap_or_else(|| panic!("no {kind}: {items:#?}"))
+    };
+    assert!(find("decision")["message"]
+        .as_str()
+        .unwrap()
+        .contains("Use JSON"));
+    assert_eq!(find("divergence")["ticket"], "github:example/project#7");
+    assert!(find("failure")["message"].as_str().unwrap().contains("CI"));
+}

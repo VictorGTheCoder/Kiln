@@ -78,21 +78,29 @@ impl Journal {
     /// last complete line. Lines that do not parse (a truncated or damaged
     /// journal) are skipped.
     pub fn read_from(&self, offset: u64) -> Result<(Vec<Event>, u64)> {
+        let (events, end) = self.read_each_from(offset)?;
+        Ok((events.into_iter().map(|(event, _)| event).collect(), end))
+    }
+    /// Like [`Self::read_from`], with the offset after each event's line, so
+    /// a reader can resume right after any event it has handed on.
+    pub fn read_each_from(&self, offset: u64) -> Result<(Vec<(Event, u64)>, u64)> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
             Err(e) => return Err(e).with_context(|| format!("read {}", self.path.display())),
         };
         let start = (offset as usize).min(bytes.len());
-        let complete = bytes[start..]
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .map_or(start, |i| start + i + 1);
-        let events = String::from_utf8_lossy(&bytes[start..complete])
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        Ok((events, complete as u64))
+        let mut events = Vec::new();
+        let mut position = start;
+        while let Some(newline) = bytes[position..].iter().position(|b| *b == b'\n') {
+            let end = position + newline + 1;
+            let line = String::from_utf8_lossy(&bytes[position..end]);
+            if let Ok(event) = serde_json::from_str(line.trim_end()) {
+                events.push((event, end as u64));
+            }
+            position = end;
+        }
+        Ok((events, position as u64))
     }
     pub fn read(&self) -> Result<Vec<Event>> {
         Ok(self.read_from(0)?.0)

@@ -1,6 +1,8 @@
 // Kiln dashboard: runs list and the selected run's ticket kanban, rendered
-// from /api/dashboard/runs and /api/dashboard/runs/<id>. Text is always set
-// with textContent, never parsed as HTML.
+// from /api/dashboard/runs and /api/dashboard/runs/<id>. The selected run's
+// journal is followed live over /api/dashboard/runs/<id>/events (Server-Sent
+// Events); each event refreshes the kanban without reloading the page. Text is
+// always set with textContent, never parsed as HTML.
 "use strict";
 
 const STAGE_LABELS = {
@@ -11,8 +13,17 @@ const STAGE_LABELS = {
   pr: "PR",
   ci: "CI",
 };
+const ATTENTION_LABELS = { failure: "Failure", divergence: "Divergence", decision: "Decision" };
 const POLL_MS = 3000;
+// A stream that ended is reopened at most this often while its run is still
+// recorded as running (e.g. a run resumed by another process).
+const REOPEN_MS = 10000;
+const MAX_ACTIVITY = 300;
 let selected = decodeURIComponent((location.hash.match(/^#run=(.+)$/) || [])[1] || "");
+let selectedStatus = "";
+// The selected run's event stream: { id, source, open, endedAt }.
+let stream = null;
+let boardTimer = null;
 
 function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
@@ -29,7 +40,7 @@ function el(tag, attrs, ...children) {
 
 function statusClass(status) {
   if (["completed", "verified", "integrated", "published", "passed"].includes(status)) return "good";
-  if (["failed", "blocked", "ci-failed", "cancelled", "limit_exhausted"].includes(status)) return "bad";
+  if (["failed", "blocked", "ci-failed", "cancelled", "limit_exhausted", "rejected", "delivery-blocked"].includes(status)) return "bad";
   if (["paused", "partial", "unable-to-verify", "stopped"].includes(status)) return "warn";
   return "";
 }
@@ -43,6 +54,12 @@ async function getJson(path) {
   return response.json();
 }
 
+function select(id) {
+  selected = id;
+  location.hash = "run=" + encodeURIComponent(id);
+  refresh();
+}
+
 function renderRuns(runs) {
   const list = document.getElementById("run-list");
   list.replaceChildren();
@@ -52,6 +69,7 @@ function renderRuns(runs) {
   }
   if (!selected) selected = runs[0].id;
   for (const run of runs) {
+    if (run.id === selected) selectedStatus = run.status;
     const button = el(
       "button",
       { type: "button", "aria-current": String(run.id === selected), "data-run": run.id },
@@ -60,21 +78,22 @@ function renderRuns(runs) {
         el("span", { class: "muted" }, new Date(Number(run.created_unix_ms)).toLocaleString() +
           " · " + run.tickets + " tickets")),
     );
-    button.addEventListener("click", () => {
-      selected = run.id;
-      location.hash = "run=" + encodeURIComponent(run.id);
-      refresh();
-    });
+    button.addEventListener("click", () => select(run.id));
     list.append(el("li", null, button));
   }
 }
 
-function renderCard(ticket) {
+function renderCard(ticket, flags) {
   const blocked = ticket.state === "blocked" || ticket.state === "stopped";
-  const card = el("div", { class: "card" + (blocked ? " blocked" : ""), "data-ticket": ticket.id },
+  const failing = flags.some((f) => f.kind === "failure");
+  const classes = "card" + (blocked || failing ? " blocked" : "") + (flags.length ? " flagged" : "");
+  const card = el("div", { class: classes, "data-ticket": ticket.id },
     el("div", { class: "title" }, ticket.title || ticket.id),
     el("div", { class: "meta id" }, ticket.id),
     el("div", { class: "meta" }, status(ticket.state)));
+  for (const flag of flags) {
+    card.append(el("div", { class: "flag", title: flag.message }, "⚠ " + (ATTENTION_LABELS[flag.kind] || flag.kind)));
+  }
   if (ticket.blocked_by.length) card.append(el("div", { class: "meta" }, "After: " + ticket.blocked_by.join(", ")));
   if (ticket.blocker) card.append(el("div", { class: "meta" }, "Blocker: " + ticket.blocker));
   if (ticket.pull_request) {
@@ -86,28 +105,108 @@ function renderCard(ticket) {
   return card;
 }
 
+function renderAttention(items) {
+  if (!items.length) return null;
+  const list = el("ul", { id: "attention", "aria-label": "Needs attention" });
+  for (const item of items) {
+    list.append(el("li", { class: item.kind, "data-kind": item.kind },
+      el("span", { class: "kind" }, ATTENTION_LABELS[item.kind] || item.kind),
+      item.ticket ? el("span", { class: "id" }, item.ticket + ": ") : null,
+      item.message));
+  }
+  return el("div", null, el("h2", null, "Needs attention (" + items.length + ")"), list);
+}
+
 function renderBoard(board) {
   const section = document.getElementById("board");
   const repo = board.github_repository ? " · " + board.github_repository : "";
+  const attention = board.attention || [];
   const columns = el("div", { class: "columns" });
   for (const column of board.stages) {
     const box = el("div", { class: "column", "data-stage": column.stage },
       el("h3", null, STAGE_LABELS[column.stage] || column.stage, el("span", null, String(column.tickets.length))));
-    for (const ticket of column.tickets) box.append(renderCard(ticket));
+    for (const ticket of column.tickets) {
+      box.append(renderCard(ticket, attention.filter((a) => a.ticket === ticket.id)));
+    }
     columns.append(box);
   }
   section.replaceChildren(
     el("h2", null, "Run"),
     el("p", { id: "title" }, el("span", { class: "id" }, board.id), repo, " ", status(board.status)),
+    renderAttention(attention),
     columns,
   );
+}
+
+async function refreshBoard() {
+  if (!selected) return;
+  try {
+    renderBoard(await getJson("/api/dashboard/runs/" + encodeURIComponent(selected)));
+  } catch (error) {
+    document.getElementById("updated").textContent = "Cannot reach Kiln: " + error.message;
+  }
+}
+// Coalesce bursts of events into one board request.
+function scheduleBoard() {
+  clearTimeout(boardTimer);
+  boardTimer = setTimeout(refreshBoard, 150);
+}
+
+function addActivity(event) {
+  const list = document.getElementById("activity");
+  const clock = (event.ts || "").slice(11, 19);
+  const text = [clock, event.ticket, event.stage, event.status].filter(Boolean).join("  ") +
+    (event.message ? ": " + event.message : "");
+  list.prepend(el("li", { class: statusClass(event.status) }, text));
+  while (list.children.length > MAX_ACTIVITY) list.lastChild.remove();
+}
+function setLive(text) {
+  document.getElementById("live").textContent = text;
+}
+
+// Follow the selected run's event stream. The server first replays the
+// journal, then sends live events, then `end` when no process writes it.
+function follow() {
+  if (!selected || typeof EventSource === "undefined") return;
+  if (stream && stream.id === selected) {
+    const reopen = !stream.open && selectedStatus === "running" && Date.now() - stream.endedAt > REOPEN_MS;
+    if (!reopen) return;
+  }
+  if (stream && stream.source) stream.source.close();
+  document.getElementById("activity").replaceChildren();
+  const source = new EventSource("/api/dashboard/runs/" + encodeURIComponent(selected) + "/events");
+  const current = { id: selected, source, open: true, endedAt: 0 };
+  stream = current;
+  setLive("· connecting");
+  source.addEventListener("open", () => { if (stream === current) setLive("· live"); });
+  source.addEventListener("journal", (message) => {
+    if (stream !== current) return;
+    try {
+      addActivity(JSON.parse(message.data));
+    } catch (_) {
+      return;
+    }
+    scheduleBoard();
+  });
+  source.addEventListener("end", () => {
+    source.close();
+    if (stream !== current) return;
+    current.open = false;
+    current.endedAt = Date.now();
+    setLive("· not live");
+    scheduleBoard();
+  });
+  // On a network error EventSource reconnects by itself with Last-Event-ID.
+  source.addEventListener("error", () => { if (stream === current && current.open) setLive("· reconnecting"); });
 }
 
 async function refresh() {
   try {
     const runs = await getJson("/api/dashboard/runs");
     renderRuns(runs);
-    if (selected) renderBoard(await getJson("/api/dashboard/runs/" + encodeURIComponent(selected)));
+    // A live stream refreshes the board on every event; poll it otherwise.
+    if (!(stream && stream.id === selected && stream.open)) await refreshBoard();
+    follow();
     document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (error) {
     document.getElementById("updated").textContent = "Cannot reach Kiln: " + error.message;

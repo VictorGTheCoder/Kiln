@@ -37,13 +37,35 @@ main{display:grid;grid-template-columns:minmax(220px,280px) 1fr;min-height:calc(
 .card.blocked{border-color:var(--bad)}
 a{color:var(--accent)}
 .empty{color:var(--muted);padding:16px}
+#detail{min-width:0;overflow:auto}
+#attention{margin:10px 0;padding:0;list-style:none}
+#attention li{border:1px solid var(--line);border-left:5px solid var(--warn);border-radius:5px;padding:6px 10px;margin-bottom:6px;background:var(--panel);overflow-wrap:anywhere}
+#attention li.failure{border-left-color:var(--bad)}
+#attention li.decision{border-left-color:var(--accent)}
+#attention .kind{font-weight:700;text-transform:uppercase;font-size:11px;letter-spacing:.05em;margin-right:6px}
+#attention li.failure .kind{color:var(--bad)}
+#attention li.divergence .kind{color:var(--warn)}
+#attention li.decision .kind{color:var(--accent)}
+.card.flagged{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn)}
+.card.blocked{box-shadow:0 0 0 1px var(--bad)}
+.card .flag{font-size:11px;font-weight:700;color:var(--warn)}
+.card.blocked .flag{color:var(--bad)}
+#events{padding:0 16px 16px}
+#events h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:4px 0 8px}
+#activity{list-style:none;margin:0;padding:0;max-height:16em;overflow:auto;font:12px ui-monospace,monospace;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+#activity li{padding:3px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+#activity li.bad{color:var(--bad);font-weight:600}
+#activity:empty::before{content:'No journal events.';display:block;padding:8px;color:var(--muted)}
 </style>
 </head>
 <body>
 <header><h1>Kiln</h1><span class="muted" id="updated">Loading…</span></header>
 <main>
 <nav id="runs" aria-label="Runs"><h2>Runs</h2><ul id="run-list"></ul></nav>
+<div id="detail">
 <section id="board" aria-live="polite"><p class="empty" id="placeholder">Select a run to see its tickets.</p></section>
+<section id="events" aria-label="Run events"><h2>Run events <span class="muted" id="live"></span></h2><ol id="activity"></ol></section>
+</div>
 </main>
 <script src="/dashboard.js"></script>
 </body>

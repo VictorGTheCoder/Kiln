@@ -3,6 +3,7 @@ pub mod control;
 pub mod dashboard;
 pub mod defaults;
 mod engine;
+mod event_stream;
 pub mod journal;
 mod state;
 pub mod status;
