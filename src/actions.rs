@@ -17,7 +17,7 @@ use std::{
     fs,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     thread,
 };
 
@@ -66,7 +66,7 @@ impl Actions {
     fn busy(&self) -> bool {
         self.last
             .lock()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .is_some_and(|last| last.state == "running")
     }
@@ -114,7 +114,11 @@ impl Actions {
         } else {
             vec!["plan", "start"]
         };
-        let last = self.last.lock().unwrap().clone();
+        let last = self
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         Ok(json!({"available": available, "runs": runs, "last": last}))
     }
 
@@ -218,7 +222,7 @@ impl Actions {
     /// Run `kiln <args>` in the background, one action at a time, and record
     /// how it ends.
     fn launch(&self, action: &str, run: Option<String>, args: Vec<OsString>) -> Result<Reply> {
-        let mut last = self.last.lock().unwrap();
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
         if last.as_ref().is_some_and(|l| l.state == "running") {
             bail!("another dashboard action is still running; wait for it to finish");
         }
@@ -246,7 +250,7 @@ impl Actions {
             let succeeded = child.wait().is_ok_and(|status| status.success());
             let error = (!succeeded)
                 .then(|| reported_error(&fs::read_to_string(&log_path).unwrap_or_default()));
-            *shared.lock().unwrap() = Some(LastAction {
+            *shared.lock().unwrap_or_else(PoisonError::into_inner) = Some(LastAction {
                 action,
                 run,
                 state: if succeeded { "succeeded" } else { "failed" }.into(),

@@ -40,7 +40,7 @@ impl Agent {
             Self::Claude => "claude",
         }
     }
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
@@ -94,7 +94,8 @@ impl Defaults {
     /// PATH, else codex then claude from PATH.
     pub fn provider(&self) -> Result<ProviderChoice> {
         provider(
-            &self.repository.join(&self.config),
+            &self.repository,
+            &self.config,
             self.overrides.codex.clone(),
             self.overrides.claude.clone(),
             std::env::var_os("PATH").as_deref(),
@@ -164,19 +165,8 @@ pub fn parse_github_remote(url: &str) -> Option<String> {
     (valid(owner) && valid(name)).then(|| format!("{owner}/{name}"))
 }
 
-/// The optional `agent` field of a project configuration, validated.
-pub fn configured_agent(config: &serde_json::Value) -> Result<Option<Agent>> {
-    match config.get("agent") {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => value
-            .as_str()
-            .and_then(Agent::parse)
-            .map(Some)
-            .with_context(|| format!("agent must be \"codex\" or \"claude\", found {value}")),
-    }
-}
-
 fn provider(
+    repository: &Path,
     config_path: &Path,
     codex: Option<PathBuf>,
     claude: Option<PathBuf>,
@@ -198,21 +188,18 @@ fn provider(
         }
         (None, None) => (),
     }
-    let config: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(config_path)
-            .with_context(|| format!("read project configuration {}", config_path.display()))?,
-    )
-    .with_context(|| format!("{} must be JSON", config_path.display()))?;
+    let config_path = repository.join(config_path);
+    let config = crate::ProjectConfig::load(&config_path, repository)?;
     let locate = |agent: Agent| -> Option<PathBuf> {
         on_path(agent.name(), path_env).or_else(|| {
             // An installation pinned in the provider section still works without PATH.
-            config[agent.name()]["installation"]
-                .as_str()
-                .map(PathBuf::from)
+            config
+                .provider_installation(agent)
                 .filter(|path| is_executable(path))
+                .map(Path::to_path_buf)
         })
     };
-    if let Some(agent) = configured_agent(&config)? {
+    if let Some(agent) = config.agent()? {
         let executable = locate(agent).with_context(|| {
             format!(
                 "provider `{name}` (\"agent\" in {config}) was not found on PATH; install it, or pass --{name} PATH",

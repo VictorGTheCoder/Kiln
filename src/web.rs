@@ -612,13 +612,13 @@ fn redact_for_web(run: &Run, text: &str) -> String {
 }
 const STYLE: &str = "body{font:15px/1.45 system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 16px;color:#1f1f1f;background:#fff}h1{font-size:1.6em}h2{margin-top:2em;border-bottom:1px solid #ddd;padding-bottom:4px}table{border-collapse:collapse;width:100%}th,td{text-align:left;vertical-align:top;padding:6px 8px;border-bottom:1px solid #eee;overflow-wrap:anywhere}code,pre{font:13px ui-monospace,monospace}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f4f4;padding:12px;max-height:20em;overflow:auto}a{color:#174a8b}.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.85em;font-weight:600;background:#eceff3;color:#333}.good{background:#dff3e4;color:#14532d}.good::before{content:'\\2713  '}.bad{background:#fde2e1;color:#7f1d1d}.bad::before{content:'\\2717  '}.unknown{background:#fff3c4;color:#713f12;border:1px dashed #a16207}.unknown::before{content:'?  '}.notice{padding:8px 12px;border-left:4px solid #a16207;background:#fffbea}.muted{color:#666}";
 
-/// Whether a scheduler process currently holds the run's ownership lock (the
-/// same lock `kiln resume` checks). `None` when the system does not report it.
 /// Whether a scheduler process is known to own the run right now.
 pub(crate) fn is_live(engine: &Engine, id: &str) -> bool {
     liveness(engine, id) == Some(true)
 }
 
+/// Whether a scheduler process currently holds the run's ownership lock (the
+/// same lock `kiln resume` checks). `None` when the system does not report it.
 fn liveness(engine: &Engine, id: &str) -> Option<bool> {
     use std::os::unix::fs::MetadataExt;
     let lock = engine
