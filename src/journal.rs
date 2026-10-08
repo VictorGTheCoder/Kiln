@@ -8,7 +8,8 @@
 //! the journal, and failing to append to it never fails a run.
 //!
 //! Every process that appends to a run's journal holds a shared `flock` on it
-//! until it exits, so a reader can tell whether a writer is still live
+//! until it exits (or, past a bound, until it has written many other journals
+//! since), so a reader can tell whether a writer is still live
 //! ([`Journal::has_writer`]).
 use crate::Engine;
 use anyhow::{Context, Result};
@@ -134,19 +135,47 @@ impl Journal {
 
 type Echo = Box<dyn Fn(&Event) + Send + Sync>;
 static ECHO: OnceLock<Mutex<Option<Echo>>> = OnceLock::new();
-static WRITERS: OnceLock<Mutex<BTreeMap<PathBuf, fs::File>>> = OnceLock::new();
+static WRITERS: OnceLock<Mutex<Writers>> = OnceLock::new();
 
-/// Keep a shared lock on the journal for the rest of this process.
+/// Most journals one process keeps its writer lock on. A Kiln command writes
+/// one run's journal, so only a process embedding Kiln for many runs reaches
+/// it; the journal written least recently is released first.
+const HELD_WRITER_LOCKS: usize = 16;
+
+/// Journals this process appends to, each with the shared lock it holds and
+/// when it was last written.
+#[derive(Default)]
+struct Writers {
+    held: BTreeMap<PathBuf, (u64, fs::File)>,
+    clock: u64,
+}
+
+/// Keep a shared lock on the journal while this process writes it.
 fn hold_writer_lock(path: &Path, file: &fs::File) -> Result<()> {
     let mut writers = WRITERS
         .get_or_init(Default::default)
         .lock()
         .map_err(|_| anyhow::anyhow!("journal lock table poisoned"))?;
-    if !writers.contains_key(path) {
-        let held = file.try_clone()?;
-        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_SH) };
-        writers.insert(path.to_owned(), held);
+    writers.clock += 1;
+    let now = writers.clock;
+    if let Some((last, _)) = writers.held.get_mut(path) {
+        *last = now;
+        return Ok(());
     }
+    if writers.held.len() >= HELD_WRITER_LOCKS {
+        let oldest = writers
+            .held
+            .iter()
+            .min_by_key(|(_, (last, _))| *last)
+            .map(|(path, _)| path.clone());
+        if let Some(oldest) = oldest {
+            // Closing the descriptor releases its lock.
+            writers.held.remove(&oldest);
+        }
+    }
+    let held = file.try_clone()?;
+    unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_SH) };
+    writers.held.insert(path.to_owned(), (now, held));
     Ok(())
 }
 
