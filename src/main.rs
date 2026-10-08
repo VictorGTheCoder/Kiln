@@ -323,6 +323,14 @@ enum Commands {
     /// Show verified, failed and unable-to-verify criteria of the latest validation.
     #[command(hide = true)]
     Report { id: String },
+    /// Summarise the latest run of this repository, or the run with the given id.
+    Status {
+        /// Run to summarise [default: the latest run].
+        id: Option<String>,
+        /// Print the summary as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read a recorded run, or list all run identities.
     #[command(hide = true)]
     Inspect { id: Option<String> },
@@ -1562,6 +1570,7 @@ fn run() -> Result<()> {
                 report.summary(&run.id)
             }
         }
+        Commands::Status { id, json } => return status(&engine, id.as_deref(), json),
         Commands::Inspect { id: Some(id) } => {
             let run = engine.inspect(&id)?;
             let mut value = serde_json::to_value(&run)?;
@@ -1618,6 +1627,26 @@ fn run() -> Result<()> {
         }
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+/// `kiln status [id] [--json]`.
+fn status(engine: &Engine, id: Option<&str>, json: bool) -> Result<()> {
+    let run = match id {
+        Some(id) => Some(engine.inspect(id)?),
+        None => kiln::status::latest(engine)?,
+    };
+    if json {
+        let summary = run.as_ref().map(kiln::status::RunSummary::of);
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+    match run {
+        None => println!(
+            "No Kiln runs in {} yet. Run `kiln plan` or `kiln start` to begin.",
+            engine.repository.display()
+        ),
+        Some(run) => print!("{}", kiln::status::RunSummary::of(&run).render()),
+    }
     Ok(())
 }
 fn main() {
