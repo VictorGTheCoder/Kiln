@@ -1,10 +1,14 @@
 //! Public CLI coverage for live provider logs: `kiln start` with a fake
 //! provider on PATH streams every redacted provider line to
 //! `.kiln/runs/<id>/agents/<ticket>-<stage>.log`, and `--verbose` also prints a
-//! readable summary of the provider's activity.
+//! readable summary of the provider's activity. `kiln dashboard` streams the
+//! same lines, with their summaries, over its run event stream.
+#[path = "support/sse.rs"]
+mod sse;
 use serde_json::{json, Value};
 use std::{
     fs,
+    io::{BufRead, BufReader},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -362,5 +366,135 @@ fn verbose_prints_readable_codex_and_claude_activity_and_is_quiet_without_it() {
                 "{provider}: unexpected {summary:?} in:\n{all}"
             );
         }
+    }
+}
+
+/// `kiln dashboard` serving the target repository.
+struct Dashboard {
+    child: Child,
+    address: String,
+}
+impl Drop for Dashboard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+impl Dashboard {
+    fn start(target: &Target) -> Self {
+        let mut child = target
+            .command(&["dashboard", "--bind", "127.0.0.1:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let address = line
+            .trim()
+            .strip_prefix("Kiln web view: http://")
+            .unwrap_or_else(|| panic!("dashboard announces its URL, got {line:?}"))
+            .to_owned();
+        Self { child, address }
+    }
+    fn events(&self, id: &str, last_event_id: Option<&str>) -> sse::Stream {
+        let port = self.address.rsplit(':').next().unwrap();
+        sse::connect(
+            &self.address,
+            id,
+            last_event_id,
+            &format!("localhost:{port}"),
+        )
+    }
+}
+
+fn provider_events(frames: &[sse::Frame]) -> Vec<Value> {
+    frames
+        .iter()
+        .filter(|f| f.event == "provider")
+        .map(sse::Frame::json)
+        .collect()
+}
+
+#[test]
+fn dashboard_streams_the_active_tickets_provider_activity_live_with_summaries() {
+    for provider in ["codex", "claude"] {
+        let target = Target::new(provider);
+        let mut child = target.spawn_start();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let run_dir = loop {
+            let found = target.run_dirs().into_iter().find(|dir| {
+                read(&dir.join(format!("agents/{TICKET_FILE}-implementation.log")))
+                    .contains(FIRST_LINE)
+            });
+            if let Some(dir) = found {
+                break dir;
+            }
+            assert!(Instant::now() < deadline, "{provider}: no provider line");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let id = run_dir.file_name().unwrap().to_str().unwrap().to_owned();
+        let dashboard = Dashboard::start(&target);
+
+        let mut stream = dashboard.events(&id, None);
+        assert_eq!(stream.status, 200, "{}", stream.head);
+        let mut frames = stream.until(|f| f.event == "provider" && f.data.contains(FIRST_LINE));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{provider}: the first provider line is streamed while the provider runs"
+        );
+        let first = provider_events(&frames).pop().unwrap();
+        assert_eq!(first["ticket"], "github:example/project#1", "{first:#}");
+        assert_eq!(first["stage"], "implementation", "{first:#}");
+        frames.extend(stream.until(|f| f.event == "end"));
+        let _ = child.wait();
+
+        let events = provider_events(&frames);
+        let implementation: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["stage"] == "implementation")
+            .collect();
+        let summaries: Vec<&str> = implementation
+            .iter()
+            .filter_map(|e| e["summary"].as_str())
+            .collect();
+        for summary in [
+            "ran: echo done > first.txt",
+            "edited: first.txt",
+            "message: Implemented ticket one",
+        ] {
+            assert!(
+                summaries.contains(&summary),
+                "{provider}: missing {summary:?} in {summaries:#?}"
+            );
+        }
+        let raw: Vec<&str> = implementation
+            .iter()
+            .map(|e| e["line"].as_str().unwrap())
+            .collect();
+        assert!(raw.contains(&"this line is not json {"), "{raw:#?}");
+        assert!(
+            raw.contains(&"secret [REDACTED] and [REDACTED]"),
+            "{provider}: raw lines are the redacted provider events: {raw:#?}"
+        );
+        assert!(
+            events.iter().any(|e| e["stage"] == "review"),
+            "{provider}: {events:#?}"
+        );
+        for frame in &frames {
+            assert!(
+                !frame.data.contains(SECRET) && !frame.data.contains("private-auth-value"),
+                "{provider}: {frame:#?}"
+            );
+        }
+
+        // A reconnecting client is not sent the provider lines it saw again.
+        let seen = frames.last().unwrap().id.clone().unwrap();
+        let again = dashboard
+            .events(&id, Some(&seen))
+            .until(|f| f.event == "end");
+        assert!(provider_events(&again).is_empty(), "{again:#?}");
     }
 }

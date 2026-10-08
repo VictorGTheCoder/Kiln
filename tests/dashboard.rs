@@ -1,6 +1,9 @@
 //! `kiln dashboard`: the embedded dashboard page and its JSON endpoints,
 //! verified over real HTTP against runs recorded through the CLI.
+#[path = "support/sse.rs"]
+mod sse;
 use serde_json::{json, Value};
+use sse::{Frame, Stream};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -428,150 +431,12 @@ fn dashboard_is_listed_in_help() {
     );
 }
 
-/// One Server-Sent Events frame.
-#[derive(Debug, Clone)]
-struct Frame {
-    id: Option<String>,
-    event: String,
-    data: String,
-}
-impl Frame {
-    fn json(&self) -> Value {
-        serde_json::from_str(&self.data).unwrap_or_else(|e| panic!("{e}: {}", self.data))
-    }
-    fn is(&self, ticket: Option<&str>, stage: &str, status: &str) -> bool {
-        if self.event != "journal" {
-            return false;
-        }
-        let event = self.json();
-        event["ticket"].as_str() == ticket && event["stage"] == stage && event["status"] == status
-    }
-}
-/// The body of a chunked HTTP/1.1 response; ends at its last chunk.
-struct Dechunk {
-    inner: BufReader<TcpStream>,
-    left: usize,
-    done: bool,
-}
-impl Read for Dechunk {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.done {
-            return Ok(0);
-        }
-        if self.left == 0 {
-            let mut size = String::new();
-            self.inner.read_line(&mut size)?;
-            self.left = usize::from_str_radix(size.trim(), 16)
-                .unwrap_or_else(|_| panic!("chunk size line {size:?}"));
-            if self.left == 0 {
-                self.done = true;
-                return Ok(0);
-            }
-        }
-        let wanted = buf.len().min(self.left);
-        let n = self.inner.read(&mut buf[..wanted])?;
-        self.left -= n;
-        if self.left == 0 {
-            let mut crlf = String::new();
-            self.inner.read_line(&mut crlf)?;
-        }
-        Ok(n)
-    }
-}
-/// A live connection to an event stream.
-struct Stream {
-    status: u16,
-    head: String,
-    reader: BufReader<Dechunk>,
-}
-impl Stream {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.head.lines().find_map(|line| {
-            let (field, value) = line.split_once(':')?;
-            field.eq_ignore_ascii_case(name).then_some(value.trim())
-        })
-    }
-    /// The next frame carrying data; `None` once the server closes the stream.
-    fn next(&mut self) -> Option<Frame> {
-        let (mut id, mut event, mut data) = (None, "message".to_owned(), Vec::new());
-        loop {
-            let mut line = String::new();
-            if self.reader.read_line(&mut line).unwrap() == 0 {
-                return None;
-            }
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                if !data.is_empty() {
-                    return Some(Frame {
-                        id,
-                        event,
-                        data: data.join("\n"),
-                    });
-                }
-                continue;
-            }
-            match line.split_once(':') {
-                Some(("", _)) => {} // comment, e.g. a keep-alive
-                Some(("id", v)) => id = Some(v.trim_start().to_owned()),
-                Some(("event", v)) => event = v.trim_start().to_owned(),
-                Some(("data", v)) => data.push(v.strip_prefix(' ').unwrap_or(v).to_owned()),
-                _ => {}
-            }
-        }
-    }
-    /// Frames up to and including the first matching one.
-    fn until(&mut self, mut done: impl FnMut(&Frame) -> bool) -> Vec<Frame> {
-        let mut frames = Vec::new();
-        while let Some(frame) = self.next() {
-            let stop = done(&frame);
-            frames.push(frame);
-            if stop {
-                return frames;
-            }
-        }
-        panic!("stream closed before the expected frame: {frames:#?}");
-    }
-}
 impl Server {
     fn events(&self, id: &str, last_event_id: Option<&str>) -> Stream {
         self.events_host(id, last_event_id, &format!("localhost:{}", self.port()))
     }
     fn events_host(&self, id: &str, last_event_id: Option<&str>, host: &str) -> Stream {
-        let stream = TcpStream::connect(&self.address).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(20)))
-            .unwrap();
-        let resume = last_event_id
-            .map(|id| format!("Last-Event-ID: {id}\r\n"))
-            .unwrap_or_default();
-        write!(
-            &stream,
-            "GET /api/dashboard/runs/{id}/events HTTP/1.1\r\nHost: {host}\r\nAccept: text/event-stream\r\n{resume}\r\n"
-        )
-        .unwrap();
-        let mut reader = BufReader::new(stream);
-        let mut head = String::new();
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" || line.is_empty() {
-                break;
-            }
-            head.push_str(&line);
-        }
-        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-        let chunked = head
-            .to_ascii_lowercase()
-            .contains("transfer-encoding: chunked");
-        Stream {
-            status,
-            head,
-            reader: BufReader::new(Dechunk {
-                inner: reader,
-                left: 0,
-                done: status != 200 || !chunked,
-            }),
-        }
+        sse::connect(&self.address, id, last_event_id, host)
     }
 }
 
@@ -698,6 +563,34 @@ fn dashboard_script_follows_the_run_event_stream_and_shows_attention_items() {
     assert!(script.contains(".attention"), "{script}");
     let page = server.get("/").body;
     assert!(page.contains("id=\"activity\""), "{page}");
+}
+
+#[test]
+fn dashboard_has_a_provider_activity_panel_with_a_raw_toggle_and_an_empty_state() {
+    let repo = Repo::new();
+    record_earlier_run(&repo, "run-earlier");
+    let server = repo.dashboard(&["--bind", "127.0.0.1:0"]);
+    let page = server.get("/").body;
+    assert!(page.contains("id=\"provider\""), "{page}");
+    assert!(
+        page.contains("type=\"checkbox\" id=\"provider-raw\""),
+        "raw toggle: {page}"
+    );
+    assert!(
+        page.contains("No provider activity for this run."),
+        "empty state: {page}"
+    );
+    let script = server.get("/dashboard.js").body;
+    assert!(script.contains("\"provider\""), "{script}");
+    assert!(script.contains(".summary"), "{script}");
+    assert!(script.contains(".line"), "{script}");
+    assert!(script.contains("provider-raw"), "{script}");
+
+    // A run without provider logs streams no provider activity.
+    let frames = server
+        .events("run-earlier", None)
+        .until(|f| f.event == "end");
+    assert!(frames.iter().all(|f| f.event != "provider"), "{frames:#?}");
 }
 
 #[test]

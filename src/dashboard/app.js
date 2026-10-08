@@ -1,7 +1,9 @@
 // Kiln dashboard: runs list and the selected run's ticket kanban, rendered
 // from /api/dashboard/runs and /api/dashboard/runs/<id>. The selected run's
 // journal is followed live over /api/dashboard/runs/<id>/events (Server-Sent
-// Events); each event refreshes the kanban without reloading the page. Text is
+// Events); each event refreshes the kanban without reloading the page. The same
+// stream carries the provider's activity (readable summaries, or the raw
+// redacted events behind a toggle). Text is
 // always set with textContent, never parsed as HTML.
 "use strict";
 
@@ -168,6 +170,51 @@ function setLive(text) {
   document.getElementById("live").textContent = text;
 }
 
+// Provider activity: every provider event of the run arrives as a `provider`
+// frame with its raw (already redacted) line and a readable summary, if any.
+// Each event is kept in both forms; the Raw events toggle picks which shows.
+const MAX_PROVIDER = 500;
+const provider = { lines: 0, summaries: 0 };
+function resetProvider() {
+  provider.lines = 0;
+  provider.summaries = 0;
+  document.getElementById("provider-lines").replaceChildren();
+  document.getElementById("provider-active").textContent = "";
+  updateProviderEmpty();
+}
+function updateProviderEmpty() {
+  const raw = document.getElementById("provider-raw").checked;
+  const empty = document.getElementById("provider-empty");
+  if (provider.lines === 0) {
+    empty.textContent = "No provider activity for this run.";
+    empty.hidden = false;
+  } else if (!raw && provider.summaries === 0) {
+    empty.textContent = "No readable provider activity yet; show the raw events for details.";
+    empty.hidden = false;
+  } else {
+    empty.hidden = true;
+  }
+}
+function addProvider(event) {
+  const list = document.getElementById("provider-lines");
+  const who = el("span", { class: "who" }, event.ticket + " · " + event.stage + "  ");
+  if (event.summary) {
+    list.append(el("li", { class: "summary" }, who.cloneNode(true), event.summary));
+    provider.summaries += 1;
+  }
+  list.append(el("li", { class: "raw" }, who, event.line));
+  provider.lines += 1;
+  while (list.children.length > MAX_PROVIDER) list.firstChild.remove();
+  // The newest session is the active ticket's.
+  document.getElementById("provider-active").textContent = "· " + event.ticket + " · " + event.stage;
+  if (list.scrollHeight - list.scrollTop - list.clientHeight < 80) list.scrollTop = list.scrollHeight;
+  updateProviderEmpty();
+}
+document.getElementById("provider-raw").addEventListener("change", (change) => {
+  document.getElementById("provider").classList.toggle("raw", change.target.checked);
+  updateProviderEmpty();
+});
+
 // Follow the selected run's event stream. The server first replays the
 // journal, then sends live events, then `end` when no process writes it.
 function follow() {
@@ -178,6 +225,7 @@ function follow() {
   }
   if (stream && stream.source) stream.source.close();
   document.getElementById("activity").replaceChildren();
+  resetProvider();
   const source = new EventSource("/api/dashboard/runs/" + encodeURIComponent(selected) + "/events");
   const current = { id: selected, source, open: true, endedAt: 0 };
   stream = current;
@@ -191,6 +239,14 @@ function follow() {
       return;
     }
     scheduleBoard();
+  });
+  source.addEventListener("provider", (message) => {
+    if (stream !== current) return;
+    try {
+      addProvider(JSON.parse(message.data));
+    } catch (_) {
+      // A malformed frame is skipped.
+    }
   });
   source.addEventListener("end", () => {
     source.close();
