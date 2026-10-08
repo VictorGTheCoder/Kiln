@@ -132,12 +132,12 @@ function renderBoard(board) {
     }
     columns.append(box);
   }
-  section.replaceChildren(
+  section.replaceChildren(...[
     el("h2", null, "Run"),
     el("p", { id: "title" }, el("span", { class: "id" }, board.id), repo, " ", status(board.status)),
     renderAttention(attention),
     columns,
-  );
+  ].filter((node) => node != null));
   setActiveTickets(board.active || []);
 }
 
