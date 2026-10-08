@@ -389,6 +389,17 @@ unsuccessfully. Completed integrations, sessions and evidence are preserved for
 resume, and correction cycles not started are not charged. Repeating `kiln run`
 cannot reset cumulative usage.
 
+### Pause and cancel
+
+While `kiln run RUN` is active, `kiln pause RUN` stops dispatching new tickets
+and lets active ticket pipelines finish. The run is saved as `paused`; use
+`kiln resume RUN --fixture scenario.json` (or `--codex`) to reconcile recorded
+Git state and continue without repeating completed integrations. `kiln cancel RUN`
+stops active provider sessions and supervised project checks, prevents new
+tickets from starting, and saves the run as `cancelled`. Cancellation is
+terminal: a cancelled run cannot be started or resumed again. Both controls
+communicate with the owning scheduler and do not acquire its state lock.
+
 ### Provider usage limits
 
 A provider session that fails because the provider account's usage or rate limit

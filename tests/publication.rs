@@ -8,6 +8,33 @@ use std::{
     process::{Command, Output},
 };
 
+fn github_rules_host(
+    rules: &str,
+    fail_rules_read: bool,
+    check_runs: &str,
+) -> (tempfile::TempDir, kiln::publication::GitHubPullRequests) {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("gh");
+    let rules_case = if fail_rules_read {
+        "echo 'rules endpoint unavailable' >&2; exit 1".to_owned()
+    } else {
+        format!("printf '%s' '{}'", rules.replace('\'', "'\\''"))
+    };
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'/calls.log\ncase \"$*\" in\n*'repos/acme/widgets/pulls/7'*) printf '{{\"head\":{{\"sha\":\"sha-123\"}},\"base\":{{\"ref\":\"main\"}}}}' ;;\n*'branches/main/protection/required_status_checks'*) printf '{{\"contexts\":[\"legacy-check\"],\"checks\":[]}}' ;;\n*'rules/branches/main'*) {} ;;\n*'commits/sha-123/check-runs'*) printf '%s' '{}' ;;\n*'commits/sha-123/status'*) printf '{{\"statuses\":[]}}' ;;\n*) echo \"unexpected endpoint: $*\" >&2; exit 2 ;;\nesac\n",
+        temp.path().display(),
+        rules_case,
+        check_runs.replace('\'', "'\\''")
+    );
+    fs::write(&script, body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    (
+        temp,
+        kiln::publication::GitHubPullRequests { program: script },
+    )
+}
+
 struct Project {
     _temp: tempfile::TempDir,
     repo: PathBuf,
@@ -169,6 +196,11 @@ fn verified_run_pushes_integration_branch_and_opens_described_pull_request() {
     assert_eq!(pr["head"], branch);
     assert_eq!(pr["base"], "main");
     assert_eq!(pr["repository"], "acme/widgets");
+    assert_eq!(
+        pr["draft"], false,
+        "approved-spec publication remains ready for review"
+    );
+    assert_eq!(run["publication"]["pull_request"]["draft"], false);
     let body = pr["body"].as_str().unwrap();
     for expected in [
         "## Delivered behavior",
@@ -314,19 +346,21 @@ fn existing_open_pull_request_is_adopted_and_its_description_refreshed() {
             {"repository":"acme/widgets","number":41,"url":"https://github.com/acme/widgets/pull/41",
              "head":"unrelated","base":"main","title":"Other","body":"other"},
             {"repository":"acme/widgets","number":42,"url":"https://github.com/acme/widgets/pull/42",
-             "head":branch,"base":"main","title":"Stale","body":"stale"}
+             "head":branch,"base":"main","title":"Stale","body":"stale","draft":false}
         ]}),
     );
     let run = p.ok(&["publish", &id, "--fixture", "github.json"]);
     let prs = p.pull_requests();
     assert_eq!(prs.len(), 2);
     assert_eq!(run["publication"]["pull_request"]["number"], 42);
+    assert_eq!(run["publication"]["pull_request"]["draft"], false);
     assert_eq!(run["publication"]["reconciled"], true);
     assert!(prs[1]["body"]
         .as_str()
         .unwrap()
         .contains("## Validation evidence"));
     assert_eq!(prs[0]["body"], "other");
+    assert_eq!(prs[1]["draft"], false);
 }
 
 #[test]
@@ -403,7 +437,7 @@ fn github_contract_lists_open_pull_requests_then_creates_one() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[]' ;;\n*'--method POST'*) cat > create.json; printf '{{\"number\":7,\"html_url\":\"https://github.com/acme/widgets/pull/7\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}}}}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[]' ;;\n*'--method POST'*) cat > create.json; printf '{{\"number\":7,\"html_url\":\"https://github.com/acme/widgets/pull/7\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}},\"draft\":true}}' ;;\n*) exit 1 ;;\nesac\n",
             d = dir.display(),
             b = branch
         ),
@@ -418,6 +452,7 @@ fn github_contract_lists_open_pull_requests_then_creates_one() {
         run["publication"]["pull_request"]["url"],
         "https://github.com/acme/widgets/pull/7"
     );
+    assert_eq!(run["publication"]["pull_request"]["draft"], true);
     let calls = fs::read_to_string(dir.join("calls.log")).unwrap();
     let calls: Vec<_> = calls.lines().collect();
     assert_eq!(calls.len(), 2, "{calls:?}");
@@ -435,6 +470,7 @@ fn github_contract_lists_open_pull_requests_then_creates_one() {
         serde_json::from_slice(&fs::read(dir.join("create.json")).unwrap()).unwrap();
     assert_eq!(request["head"], branch);
     assert_eq!(request["base"], "main");
+    assert_eq!(request["draft"], false);
     assert!(request["body"]
         .as_str()
         .unwrap()
@@ -451,7 +487,7 @@ fn github_contract_reconciles_listed_pull_request_with_update() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[{{\"number\":9,\"html_url\":\"https://github.com/acme/widgets/pull/9\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}},\"body\":\"old\"}}]' ;;\n*'--method PATCH'*) cat > update.json; printf '{{}}' ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncd '{d}'\nprintf '%s\\n' \"$*\" >> calls.log\ncase \"$*\" in\n*'--method GET'*) printf '[{{\"number\":9,\"html_url\":\"https://github.com/acme/widgets/pull/9\",\"node_id\":\"PR_node9\",\"head\":{{\"ref\":\"{b}\"}},\"base\":{{\"ref\":\"main\"}},\"body\":\"old\",\"draft\":false}}]' ;;\n*'--method PATCH'*) cat > update.json; printf '{{}}' ;;\n*'graphql'*) printf '{{\"data\":{{\"convertPullRequestToDraft\":{{\"pullRequest\":{{\"id\":\"PR_node9\",\"isDraft\":true}}}}}}}}' ;;\n*) exit 1 ;;\nesac\n",
             d = dir.display(),
             b = branch
         ),
@@ -462,10 +498,96 @@ fn github_contract_reconciles_listed_pull_request_with_update() {
 
     let run = p.ok(&["publish", &id, "--gh", script.to_str().unwrap()]);
     assert_eq!(run["publication"]["pull_request"]["number"], 9);
+    assert_eq!(run["publication"]["pull_request"]["draft"], false);
     assert_eq!(run["publication"]["reconciled"], true);
     let calls = fs::read_to_string(dir.join("calls.log")).unwrap();
     assert!(!calls.contains("POST"), "no duplicate PR: {calls}");
     assert!(calls.contains("api --method PATCH repos/acme/widgets/pulls/9 --input -"));
+    assert!(
+        !calls.contains("graphql"),
+        "approved-spec publication must not convert PRs to draft: {calls}"
+    );
+}
+
+#[test]
+fn effective_branch_rules_add_ruleset_checks_to_classic_protection_checks() {
+    use kiln::publication::wait_for_required_checks;
+    use std::time::Duration;
+    let (temp, host) = github_rules_host(
+        r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"},{"context":"lint"}]}}]"#,
+        false,
+        r#"{"check_runs":[{"name":"build","status":"completed","conclusion":"success","head_sha":"sha-123","id":1},{"name":"lint","status":"completed","conclusion":"success","head_sha":"sha-123","id":2},{"name":"legacy-check","status":"completed","conclusion":"success","head_sha":"sha-123","id":3}]}"#,
+    );
+
+    let outcome = wait_for_required_checks(
+        &host,
+        "acme/widgets",
+        7,
+        "sha-123",
+        Duration::from_millis(10),
+        Duration::ZERO,
+    );
+
+    assert_eq!(outcome.status, "passed");
+    assert_eq!(outcome.checks.len(), 3);
+    assert!(outcome.checks.iter().all(|check| check.commit == "sha-123"));
+    assert_eq!(
+        outcome
+            .checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<Vec<_>>(),
+        ["build", "legacy-check", "lint"]
+    );
+    let calls = fs::read_to_string(temp.path().join("calls.log")).unwrap();
+    assert!(calls.contains("repos/acme/widgets/rules/branches/main"));
+    assert!(calls.contains("repos/acme/widgets/commits/sha-123/check-runs"));
+}
+
+#[test]
+fn failed_ruleset_required_check_fails_the_exact_head_gate() {
+    use kiln::publication::wait_for_required_checks;
+    use std::time::Duration;
+    let (_temp, host) = github_rules_host(
+        r#"[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]"#,
+        false,
+        r#"{"check_runs":[{"name":"build","status":"completed","conclusion":"failure","head_sha":"sha-123","id":1}]}"#,
+    );
+
+    let outcome = wait_for_required_checks(
+        &host,
+        "acme/widgets",
+        7,
+        "sha-123",
+        Duration::from_millis(10),
+        Duration::ZERO,
+    );
+
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.checks[0].name, "build");
+    assert_eq!(outcome.checks[0].commit, "sha-123");
+}
+
+#[test]
+fn unreadable_effective_branch_rules_are_unavailable_not_no_checks() {
+    use kiln::publication::wait_for_required_checks;
+    use std::time::Duration;
+    let (_temp, host) = github_rules_host("[]", true, "{\"check_runs\":[]}");
+
+    let outcome = wait_for_required_checks(
+        &host,
+        "acme/widgets",
+        7,
+        "sha-123",
+        Duration::from_millis(10),
+        Duration::ZERO,
+    );
+
+    assert_eq!(outcome.status, "unavailable");
+    assert!(outcome
+        .failure
+        .unwrap()
+        .contains("rules endpoint unavailable"));
 }
 
 #[test]

@@ -1,15 +1,46 @@
-//! Local, read-only monitoring interface. Every page is rendered from the durable
-//! run state that `kiln inspect` exposes, re-read on each request; the interface
-//! holds no workflow truth of its own and exposes no execution control.
+//! Local monitoring and control interface. Pages are rendered from durable run
+//! state; workflow execution uses the same CLI start/resume orchestration.
 use crate::{Engine, Run};
 use anyhow::{bail, Result};
-use std::{fmt::Write as _, io::Write, net::SocketAddr};
+use std::{
+    fmt::Write as _,
+    fs,
+    io::Write,
+    net::SocketAddr,
+    path::PathBuf,
+    process::{Child, Command, Stdio},
+    thread,
+};
 use tiny_http::{Header, Method, Response, Server};
 
 /// Seconds between automatic reloads of a run that is still recorded as running.
 const REFRESH_SECONDS: u32 = 3;
 
+/// Fixed local configuration for web-launched whole-backlog workflows. Request
+/// data selects only a fixed action and run id; it cannot replace any setting.
+#[derive(Debug, Clone)]
+pub struct BacklogLaunch {
+    pub config: PathBuf,
+    pub github_repo: String,
+    pub issue_fixture: Option<PathBuf>,
+    pub planning_fixture: Option<PathBuf>,
+    pub run_fixture: Option<PathBuf>,
+    pub codex: Option<PathBuf>,
+    pub claude: Option<PathBuf>,
+    pub publication_fixture: Option<PathBuf>,
+    pub gh: Option<PathBuf>,
+    pub repair_fixture: Option<PathBuf>,
+}
+
 pub fn serve(engine: Engine, bind: SocketAddr) -> Result<()> {
+    serve_with_backlog(engine, bind, None)
+}
+
+pub fn serve_with_backlog(
+    engine: Engine,
+    bind: SocketAddr,
+    backlog: Option<BacklogLaunch>,
+) -> Result<()> {
     if !bind.ip().is_loopback() {
         bail!("the local web view must bind to a loopback address");
     }
@@ -30,21 +61,68 @@ pub fn serve(engine: Engine, bind: SocketAddr) -> Result<()> {
                     .iter()
                     .any(|host| header.value.as_str().eq_ignore_ascii_case(host))
         });
+        let request_host = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("Host"))
+            .map(|h| h.value.as_str());
         let (status, content_type, body) = if !valid_host {
             (
                 400,
                 "text/plain; charset=utf-8",
                 "Invalid Host header".to_owned(),
             )
+        } else if request.method() == &Method::Post {
+            let origin_ok = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Origin"))
+                .is_some_and(|h| {
+                    request_host.is_some_and(|host| {
+                        format!("http://{host}").eq_ignore_ascii_case(h.value.as_str())
+                    })
+                });
+            let content_type_ok = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Content-Type"))
+                .is_some_and(|h| {
+                    h.value
+                        .as_str()
+                        .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+                });
+            let empty_body = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Content-Length"))
+                .is_some_and(|h| h.value.as_str() == "0");
+            if !origin_ok {
+                (
+                    403,
+                    "text/plain; charset=utf-8",
+                    "Invalid Origin".to_owned(),
+                )
+            } else if !content_type_ok || !empty_body {
+                (
+                    400,
+                    "text/plain; charset=utf-8",
+                    "Invalid request body".to_owned(),
+                )
+            } else {
+                match mutate(&engine, backlog.as_ref(), request.url().split('?').next().unwrap_or("/")) {
+                    Ok(body) => (200, "text/html; charset=utf-8", body),
+                    Err(error) => (409, "text/html; charset=utf-8", format!("<!doctype html><title>Action unavailable</title><p>{}</p><p><a href=\"/\">Back to runs</a></p>", esc(&format!("{error:#}")))),
+                }
+            }
         } else if request.method() != &Method::Get {
             (
                 405,
                 "text/plain; charset=utf-8",
-                "Only GET is supported".to_owned(),
+                "Only GET and POST are supported".to_owned(),
             )
         } else {
             let path = request.url().split('?').next().unwrap_or("/");
-            match render(&engine, path) {
+            match render(&engine, path, backlog.as_ref()) {
                 Ok((kind, body)) => (200, kind, body),
                 Err(error) => (404, "text/plain; charset=utf-8", format!("Kiln: {error:#}")),
             }
@@ -65,8 +143,13 @@ pub fn serve(engine: Engine, bind: SocketAddr) -> Result<()> {
     }
     Ok(())
 }
-fn render(engine: &Engine, path: &str) -> Result<(&'static str, String)> {
+fn render(
+    engine: &Engine,
+    path: &str,
+    backlog: Option<&BacklogLaunch>,
+) -> Result<(&'static str, String)> {
     if let Some(id) = path.strip_prefix("/api/runs/") {
+        validate_id(id)?;
         let run = engine.inspect(id)?;
         let json = serde_json::to_string_pretty(&run)?;
         return Ok(("application/json", redact_for_web(&run, &json)));
@@ -83,6 +166,9 @@ fn render(engine: &Engine, path: &str) -> Result<(&'static str, String)> {
     }
     let (title, refresh, content) = if path == "/" {
         let mut content = "<h1>Kiln workflow runs</h1><ul>".to_owned();
+        if backlog.is_some() {
+            content = "<h1>Kiln workflow runs</h1><form method=\"post\" action=\"/actions/start\"><button type=\"submit\">Start backlog run</button><p class=\"muted\">Plans and runs all open issues using the configured local workflow.</p></form><ul>".to_owned();
+        }
         for id in engine.list()? {
             let status = engine
                 .inspect(&id)
@@ -96,16 +182,21 @@ fn render(engine: &Engine, path: &str) -> Result<(&'static str, String)> {
             );
         }
         content.push_str("</ul>");
-        ("Kiln workflow runs".to_owned(), false, content)
+        (
+            "Kiln workflow runs".to_owned(),
+            backlog.is_some() && web_worker_active(engine),
+            content,
+        )
     } else if let Some(id) = path.strip_prefix("/runs/") {
+        validate_id(id)?;
         let run = engine.inspect(id)?;
         let live = liveness(engine, &run.id);
         // Recorded state is already redacted; redact again in case a secret was
         // registered after the state was written.
-        let content = redact_for_web(&run, &run_page(&run, live));
+        let content = redact_for_web(&run, &run_page(&run, live, backlog.is_some()));
         (
             format!("Kiln run {}", run.id),
-            run.status == "running",
+            should_refresh(&run) || run.backlog.is_some() && web_worker_active(engine),
             content,
         )
     } else {
@@ -124,6 +215,179 @@ fn render(engine: &Engine, path: &str) -> Result<(&'static str, String)> {
         ),
     ))
 }
+
+fn should_refresh(run: &Run) -> bool {
+    if run.status == "running" {
+        return true;
+    }
+    run.backlog.is_some()
+        && !matches!(
+            run.status.as_str(),
+            "paused"
+                | "cancelled"
+                | "limit_exhausted"
+                | "blocked"
+                | "failed"
+                | "published"
+                | "completed"
+        )
+}
+
+fn web_worker_active(engine: &Engine) -> bool {
+    let dir = engine.repository.join(".kiln");
+    dir.join("web-backlog-start.lock").exists() || dir.join("web-backlog-resume.lock").exists()
+}
+
+fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 100
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        bail!("invalid run id");
+    }
+    Ok(())
+}
+
+fn mutate(engine: &Engine, launch: Option<&BacklogLaunch>, path: &str) -> Result<String> {
+    if path == "/actions/start" {
+        let launch = launch.ok_or_else(|| {
+            anyhow::anyhow!("backlog start is not configured for this web server")
+        })?;
+        let executable = std::env::current_exe()?;
+        let lock_path = engine.repository.join(".kiln/web-backlog-start.lock");
+        fs::create_dir_all(lock_path.parent().unwrap())?;
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .map_err(|error| anyhow::anyhow!("a web backlog start is already active ({error})"))?;
+        let mut command = Command::new(executable);
+        command
+            .arg("--repo")
+            .arg(&engine.repository)
+            .arg("start-backlog")
+            .arg("--config")
+            .arg(&launch.config)
+            .arg("--github-repo")
+            .arg(&launch.github_repo)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        append_opt(
+            &mut command,
+            "--issue-fixture",
+            launch.issue_fixture.as_ref(),
+        );
+        append_opt(
+            &mut command,
+            "--planning-fixture",
+            launch.planning_fixture.as_ref(),
+        );
+        append_opt(&mut command, "--run-fixture", launch.run_fixture.as_ref());
+        append_opt(&mut command, "--codex", launch.codex.as_ref());
+        append_opt(&mut command, "--claude", launch.claude.as_ref());
+        append_opt(
+            &mut command,
+            "--publication-fixture",
+            launch.publication_fixture.as_ref(),
+        );
+        append_opt(&mut command, "--gh", launch.gh.as_ref());
+        append_opt(
+            &mut command,
+            "--repair-fixture",
+            launch.repair_fixture.as_ref(),
+        );
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                drop(lock);
+                let _ = fs::remove_file(lock_path);
+                return Err(error.into());
+            }
+        };
+        reap_start(lock_path, lock, child);
+        return Ok("<!doctype html><meta http-equiv=\"refresh\" content=\"3;url=/\"><title>Backlog run started</title><h1>Backlog run started</h1><p>The complete open-issue graph is being planned and scheduled using the configured Kiln workflow.</p><p><a href=\"/\">View runs</a></p>".into());
+    }
+    if let Some(rest) = path.strip_prefix("/runs/") {
+        let Some((id, action)) = rest.split_once("/control/") else {
+            bail!("unknown action")
+        };
+        validate_id(id)?;
+        match action {
+            "pause" | "cancel" => engine.request_control(id, action)?,
+            "resume" => {
+                let run = engine.inspect(id)?;
+                if run.status == "cancelled"
+                    || run.status == "running" && liveness(engine, id) == Some(true)
+                {
+                    bail!("run cannot be resumed in its current state");
+                }
+                let executable = std::env::current_exe()?;
+                let lock_path = engine.repository.join(".kiln/web-backlog-resume.lock");
+                fs::create_dir_all(lock_path.parent().unwrap())?;
+                let lock = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&lock_path)
+                    .map_err(|error| anyhow::anyhow!("a web resume is already active ({error})"))?;
+                let mut command = Command::new(executable);
+                command
+                    .arg("--repo")
+                    .arg(&engine.repository)
+                    .arg("resume")
+                    .arg(id)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some(launch) = launch {
+                    append_opt(&mut command, "--fixture", launch.run_fixture.as_ref());
+                    append_opt(&mut command, "--codex", launch.codex.as_ref());
+                    append_opt(&mut command, "--claude", launch.claude.as_ref());
+                    append_opt(
+                        &mut command,
+                        "--publication-fixture",
+                        launch.publication_fixture.as_ref(),
+                    );
+                    append_opt(&mut command, "--gh", launch.gh.as_ref());
+                    append_opt(
+                        &mut command,
+                        "--repair-fixture",
+                        launch.repair_fixture.as_ref(),
+                    );
+                }
+                let child = match command.spawn() {
+                    Ok(child) => child,
+                    Err(error) => {
+                        drop(lock);
+                        let _ = fs::remove_file(lock_path);
+                        return Err(error.into());
+                    }
+                };
+                reap_start(lock_path, lock, child);
+            }
+            _ => bail!("unknown run action"),
+        }
+        return Ok(format!("<!doctype html><meta http-equiv=\"refresh\" content=\"3;url=/runs/{}\"><title>Run control requested</title><h1>{}</h1><p>Control sent to the durable Kiln workflow.</p><p><a href=\"/runs/{}\">View run state</a></p>", esc(id), esc(action), esc(id)));
+    }
+    bail!("unknown action")
+}
+
+fn append_opt(command: &mut Command, flag: &str, value: Option<&PathBuf>) {
+    if let Some(value) = value {
+        command.arg(flag).arg(value);
+    }
+}
+
+fn reap_start(lock_path: PathBuf, lock: fs::File, mut child: Child) {
+    thread::spawn(move || {
+        let _lock = lock;
+        let _ = child.wait();
+        let _ = fs::remove_file(lock_path);
+    });
+}
+
 fn redact_for_web(run: &Run, text: &str) -> String {
     let mut result = run.config.isolation.redact(text);
     for name in run.config.isolation.secrets.keys() {
@@ -156,7 +420,7 @@ fn liveness(engine: &Engine, id: &str) -> Option<bool> {
     }))
 }
 
-fn run_page(run: &Run, live: Option<bool>) -> String {
+fn run_page(run: &Run, live: Option<bool>, can_resume: bool) -> String {
     let mut html = String::new();
     let _ = write!(
         html,
@@ -175,6 +439,16 @@ fn run_page(run: &Run, live: Option<bool>) -> String {
         }
         None => "<p class=\"muted\">Process liveness is unknown on this system.</p>".to_owned(),
     });
+    if live == Some(true) && run.status == "running" {
+        html.push_str(&format!("<form method=\"post\" action=\"/runs/{}/control/pause\"><button>Pause run</button></form><form method=\"post\" action=\"/runs/{}/control/cancel\"><button>Cancel run</button></form>", esc(&run.id), esc(&run.id)));
+    } else if can_resume
+        && (matches!(
+            run.status.as_str(),
+            "paused" | "limit_exhausted" | "interrupted"
+        ) || run.status == "running" && live == Some(false))
+    {
+        html.push_str(&format!("<form method=\"post\" action=\"/runs/{}/control/resume\"><button>Resume run</button></form>", esc(&run.id)));
+    }
 
     let _ = write!(
         html,
@@ -295,6 +569,7 @@ fn run_page(run: &Run, live: Option<bool>) -> String {
     }
 
     html.push_str(&tickets(run));
+    html.push_str(&backlog_issues(run));
     html.push_str(&limits(run));
     html.push_str(&sessions(run));
     html.push_str(&reviews(run));
@@ -304,7 +579,59 @@ fn run_page(run: &Run, live: Option<bool>) -> String {
     html.push_str(&decisions(run));
     html.push_str(&validation(run));
     html.push_str(&recoveries(run));
+    html.push_str(&delivery_groups(run));
     html.push_str(&delivery(run));
+    html
+}
+
+fn backlog_issues(run: &Run) -> String {
+    let Some(backlog) = &run.backlog else {
+        return String::new();
+    };
+    let mut html = "<h2>Backlog issues</h2><table><tr><th>Issue</th><th>Disposition</th><th>Dependencies</th><th>Reason and criteria</th></tr>".to_owned();
+    for disposition in &backlog.dispositions {
+        let issue = backlog.issue_snapshot.iter().find(|issue| {
+            format!("github:{}#{}", backlog.github_repository, issue.number) == disposition.issue
+        });
+        let label = issue
+            .map(|issue| format!("{} — {}", disposition.issue, issue.title))
+            .unwrap_or_else(|| disposition.issue.clone());
+        let url = issue.map(|issue| issue.url.as_str()).filter(|url| {
+            url.strip_prefix("https://github.com/")
+                .is_some_and(|rest| !rest.is_empty())
+        });
+        let issue_label = url
+            .map(|url| format!("<a href=\"{}\">{}</a>", esc(url), esc(&label)))
+            .unwrap_or_else(|| esc(&label));
+        let deps = if disposition.dependencies.is_empty() {
+            "None".into()
+        } else {
+            esc(&disposition.dependencies.join(", "))
+        };
+        let criteria = if disposition.inferred_criteria.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<br>Criteria: {}",
+                esc(&disposition.inferred_criteria.join("; "))
+            )
+        };
+        let _ = write!(
+            html,
+            "<tr><td>{issue_label}</td><td>{} · {}</td><td>{deps}</td><td>{}{criteria}</td></tr>",
+            badge(&disposition.kind),
+            badge(&disposition.status),
+            esc(&disposition.reason)
+        );
+    }
+    html.push_str("</table>");
+    if !backlog.evidence.is_empty() {
+        html.push_str("<h3>Backlog evidence</h3><ul>");
+        for evidence in &backlog.evidence {
+            let _ = write!(html, "<li>{}</li>", esc(evidence));
+        }
+        html.push_str("</ul>");
+    }
     html
 }
 
@@ -420,6 +747,175 @@ fn delivery(run: &Run) -> String {
             );
         }
         html.push_str("</table>");
+    }
+    html
+}
+
+fn delivery_groups(run: &Run) -> String {
+    if run.delivery_groups.is_empty() {
+        return String::new();
+    }
+    let mut html = "<h2>Delivery groups and CI</h2>".to_owned();
+    for group in &run.delivery_groups {
+        let _ = write!(
+            html,
+            "<section data-delivery-group=\"{}\"><h3><code>{}</code> {}</h3><p>Tickets: {}</p>",
+            esc(&group.id),
+            esc(&group.id),
+            badge(&group.status),
+            esc(&group.tickets.join(", "))
+        );
+        if !group.prerequisites.is_empty() {
+            let _ = write!(
+                html,
+                "<p>Prerequisite groups: {}</p>",
+                esc(&group.prerequisites.join(", "))
+            );
+        }
+        if let Some(reason) = &group.reason {
+            let _ = write!(html, "<p>Blocker or outcome: {}</p>", esc(reason));
+        }
+        if let Some(branch) = &group.branch {
+            let _ = write!(html, "<p>Branch: <code>{}</code></p>", esc(branch));
+        }
+        if let Some(commit) = &group.commit {
+            let _ = write!(html, "<p>Verified commit: <code>{}</code></p>", esc(commit));
+        }
+        if let Some(validation) = &group.validation {
+            let _ = write!(
+                html,
+                "<p>Group validation {} for <code>{}</code>{}</p>",
+                badge(&validation.outcome),
+                esc(&validation.commit),
+                validation
+                    .failure
+                    .as_ref()
+                    .map(|failure| format!(" — {}", esc(failure)))
+                    .unwrap_or_default()
+            );
+            if !validation.checks.is_empty() {
+                html.push_str("<p>Build and test checks:");
+                html.push_str(&checks(&validation.checks));
+                html.push_str("</p>");
+            }
+            if !validation.criteria.is_empty() {
+                html.push_str("<table><tr><th>Requirement</th><th>Criterion evidence</th><th>Result</th></tr>");
+                for criterion in &validation.criteria {
+                    let _ = write!(
+                        html,
+                        "<tr><td>{}</td><td>{}<br><code>{}</code></td><td>{}</td></tr>",
+                        esc(&criterion.requirement),
+                        esc(&criterion.criterion),
+                        esc(&criterion.check.command.join(" ")),
+                        badge(if criterion.check.passed {
+                            "passed"
+                        } else {
+                            "failed"
+                        })
+                    );
+                }
+                html.push_str("</table>");
+            }
+        }
+        for review in &group.reviews {
+            let _ = write!(
+                html,
+                "<p>Delivery review for <code>{}</code>: {}</p>",
+                esc(&review.commit),
+                badge(if review.passed {
+                    "approved"
+                } else {
+                    "rejected"
+                })
+            );
+        }
+        if let Some(pr) = &group.pull_request {
+            let href = pr
+                .url
+                .strip_prefix("https://github.com/")
+                .filter(|rest| !rest.is_empty());
+            let title = if pr.draft { "Draft PR" } else { "Pull request" };
+            if let Some(href) = href {
+                let _ = write!(html, "<p>{title} #{}: <a href=\"https://github.com/{}\">{}</a> (head <code>{}</code>)</p>", pr.number, esc(href), esc(&pr.url), esc(&pr.head));
+            } else {
+                let _ = write!(
+                    html,
+                    "<p>{title} #{}: {} (head <code>{}</code>)</p>",
+                    pr.number,
+                    esc(&pr.url),
+                    esc(&pr.head)
+                );
+            }
+        }
+        for attempt in &group.ci_attempts {
+            let _ = write!(
+                html,
+                "<h4>CI attempt <code>{}</code> {} on commit <code>{}</code> for PR #{} </h4>",
+                esc(&attempt.id),
+                badge(&attempt.status),
+                esc(&attempt.commit),
+                attempt.pull_request
+            );
+            if let Some(failure) = &attempt.failure {
+                let _ = write!(html, "<p>CI failure: {}</p>", esc(failure));
+            }
+            if !attempt.checks.is_empty() {
+                html.push_str("<table><tr><th>Check</th><th>Status</th><th>Conclusion</th><th>Commit</th></tr>");
+                for check in &attempt.checks {
+                    let name = if let Some(url) = check
+                        .url
+                        .as_deref()
+                        .filter(|url| url.starts_with("https://"))
+                    {
+                        format!("<a href=\"{}\">{}</a>", esc(url), esc(&check.name))
+                    } else {
+                        esc(&check.name)
+                    };
+                    let _ = write!(
+                        html,
+                        "<tr><td>{name}</td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>",
+                        badge(&check.status),
+                        check
+                            .conclusion
+                            .as_deref()
+                            .map(badge)
+                            .unwrap_or_else(|| "—".into()),
+                        esc(&check.commit)
+                    );
+                }
+                html.push_str("</table>");
+            }
+            for observation in &attempt.observations {
+                let checks = observation
+                    .checks
+                    .iter()
+                    .map(|check| {
+                        format!(
+                            "{} {}",
+                            esc(&check.name),
+                            check
+                                .conclusion
+                                .as_deref()
+                                .map(esc)
+                                .unwrap_or_else(|| esc(&check.status))
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = write!(
+                    html,
+                    "<p>CI poll {}: {} {}</p>",
+                    observation.observed_unix_ms,
+                    badge(&observation.status),
+                    if checks.is_empty() {
+                        "no check details"
+                    } else {
+                        &checks
+                    }
+                );
+            }
+        }
+        html.push_str("</section>");
     }
     html
 }

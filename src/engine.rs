@@ -89,6 +89,8 @@ impl Engine {
             status: "prepared".into(),
             config,
             specs,
+            backlog: None,
+            delivery_groups: Vec::new(),
             plan: None,
             imported_issues: Vec::new(),
             integration_branch: None,
@@ -317,6 +319,86 @@ impl Engine {
         }
         ids.sort();
         Ok(ids)
+    }
+
+    /// Return issue identities durably completed by earlier whole-snapshot
+    /// backlog runs for this GitHub repository. These records are the
+    /// reconciliation boundary for a later frozen snapshot.
+    pub fn completed_backlog_issues(
+        &self,
+        github_repository: &str,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        let mut completed = std::collections::BTreeSet::new();
+        for id in self.list()? {
+            let run = self.inspect(&id)?;
+            let Some(backlog) = run.backlog else { continue };
+            if backlog.mode != "issue-graph" || backlog.github_repository != github_repository {
+                continue;
+            }
+            for disposition in backlog
+                .dispositions
+                .into_iter()
+                .filter(|disposition| disposition.status == "completed")
+            {
+                let delivered = run.delivery_groups.iter().any(|group| {
+                    group.status == "verified"
+                        && group.pull_request.is_some()
+                        && group.tickets.contains(&disposition.issue)
+                });
+                if delivered {
+                    completed.insert(disposition.issue);
+                }
+            }
+        }
+        Ok(completed)
+    }
+
+    /// Reuse a fully delivered prior run when the current open snapshot is
+    /// byte-for-byte equivalent and every executable ticket has verified CI
+    /// plus a recorded pull request.
+    pub fn reusable_backlog_run_for_snapshot(
+        &self,
+        github_repository: &str,
+        snapshot: &[crate::import::ImportedIssue],
+    ) -> Result<Option<Run>> {
+        let expected = serde_json::to_value(snapshot)?;
+        let mut reusable: Option<Run> = None;
+        for id in self.list()? {
+            let run = self.inspect(&id)?;
+            let Some(backlog) = &run.backlog else {
+                continue;
+            };
+            if backlog.mode != "issue-graph"
+                || backlog.github_repository != github_repository
+                || serde_json::to_value(&backlog.issue_snapshot)? != expected
+            {
+                continue;
+            }
+            let candidates: Vec<_> = backlog
+                .dispositions
+                .iter()
+                .filter(|disposition| disposition.plan_candidate)
+                .collect();
+            if candidates.is_empty()
+                || candidates.iter().any(|disposition| {
+                    disposition.status != "completed"
+                        || !run.delivery_groups.iter().any(|group| {
+                            group.status == "verified"
+                                && group.pull_request.is_some()
+                                && group.tickets.contains(&disposition.issue)
+                        })
+                })
+            {
+                continue;
+            }
+            if reusable
+                .as_ref()
+                .is_none_or(|old| old.created_unix_ms < run.created_unix_ms)
+            {
+                reusable = Some(run);
+            }
+        }
+        Ok(reusable)
     }
 }
 fn validate_id(id: &str) -> Result<()> {

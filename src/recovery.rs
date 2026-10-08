@@ -78,6 +78,11 @@ impl Engine {
     /// Reopen an interrupted run: reconcile, record decisions, then continue scheduling.
     pub fn resume(&self, id: &str, providers: &dyn TicketProviders) -> Result<Run> {
         let _owner = self.own_run(id)?;
+        let run = self.inspect(id)?;
+        if run.status == "cancelled" {
+            anyhow::bail!("run '{id}' was cancelled and cannot be resumed");
+        }
+        self.clear_control(id)?;
         self.reconcile(id)?;
         self.schedule(id, providers, true)
     }

@@ -14,16 +14,54 @@ pub struct ImportedIssue {
     pub url: String,
     pub title: String,
     pub body: String,
+    /// GitHub's authoritative issue type; REST responses may use a string or
+    /// an object containing `name`.
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "deserialize_issue_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub issue_type: Option<String>,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub comments: Vec<String>,
+    #[serde(default = "open_state")]
+    pub state: String,
     /// Canonical github:owner/repository#number identities, including external blockers.
     #[serde(default)]
     pub blocked_by: Vec<String>,
     #[serde(default)]
     pub dependency_source: String,
 }
+fn deserialize_issue_type<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(issue_type_name(value.as_ref()))
+}
+
+fn issue_type_name(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(name) => Some(name.clone()),
+        serde_json::Value::Object(object) => object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    }
+}
+
 pub trait IssueSource {
     fn selected(&self, repository: &str, numbers: &[u64]) -> Result<Vec<ImportedIssue>>;
+    fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>>;
+}
+fn open_state() -> String {
+    "OPEN".into()
 }
 #[derive(Deserialize)]
 pub struct FixtureIssues {
@@ -47,9 +85,27 @@ impl IssueSource for FixtureIssues {
             })
             .collect()
     }
+    fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>> {
+        let mut issues: Vec<_> = self
+            .issues
+            .iter()
+            .filter(|issue| issue.state.eq_ignore_ascii_case("open"))
+            .cloned()
+            .collect();
+        for issue in &mut issues {
+            issue
+                .blocked_by
+                .extend(body_blockers(repository, &issue.body));
+            issue.blocked_by.sort();
+            issue.blocked_by.dedup();
+        }
+        Ok(issues)
+    }
 }
 pub struct GitHubIssues;
 impl GitHubIssues {
+    const PAGE_SIZE: usize = 100;
+
     fn get(endpoint: &str) -> Result<serde_json::Value> {
         let output = Command::new("gh")
             .args(["api", "--method", "GET", endpoint])
@@ -62,6 +118,26 @@ impl GitHubIssues {
             );
         }
         serde_json::from_slice(&output.stdout).context("invalid GitHub API response")
+    }
+
+    /// Fetch all pages from a REST collection endpoint whose query includes
+    /// `per_page`. Callers retain endpoint-specific response parsing.
+    fn get_pages(endpoint: &str) -> Result<Vec<serde_json::Value>> {
+        let mut values = Vec::new();
+        let mut page = 1;
+        loop {
+            let response = Self::get(&format!("{endpoint}&page={page}"))?;
+            let response = response
+                .as_array()
+                .context("invalid paginated GitHub API response")?;
+            let count = response.len();
+            values.extend(response.iter().cloned());
+            if count < Self::PAGE_SIZE {
+                break;
+            }
+            page += 1;
+        }
+        Ok(values)
     }
 }
 impl IssueSource for GitHubIssues {
@@ -85,34 +161,32 @@ impl IssueSource for GitHubIssues {
                         .context("issue has no title")?
                         .into(),
                     body: value["body"].as_str().unwrap_or("").into(),
+                    issue_type: issue_type_name(value.get("type")),
                     labels: value["labels"]
                         .as_array()
                         .context("issue has no labels")?
                         .iter()
                         .filter_map(|l| l["name"].as_str().map(String::from))
                         .collect(),
+                    assignee: value["assignee"]["login"].as_str().map(String::from),
+                    comments: Vec::new(),
+                    state: value["state"]
+                        .as_str()
+                        .unwrap_or("open")
+                        .to_ascii_uppercase(),
                     blocked_by: Vec::new(),
                     dependency_source: "native".into(),
                 };
                 // Failure is surfaced rather than silently dropping inaccessible native edges.
-                let mut page = 1;
-                loop {
-                    let blockers = Self::get(&format!(
-                        "{endpoint}/dependencies/blocked_by?per_page=100&page={page}"
-                    ))?;
-                    let blockers = blockers
-                        .as_array()
-                        .context("invalid GitHub dependency response")?;
-                    for blocker in blockers {
-                        let url = blocker["html_url"].as_str().context("blocker has no URL")?;
-                        issue
-                            .blocked_by
-                            .push(identity_from_url(url).context("invalid blocker URL")?);
-                    }
-                    if blockers.len() < 100 {
-                        break;
-                    }
-                    page += 1;
+                let blockers = Self::get_pages(&format!(
+                    "{endpoint}/dependencies/blocked_by?per_page={}",
+                    Self::PAGE_SIZE
+                ))?;
+                for blocker in blockers {
+                    let url = blocker["html_url"].as_str().context("blocker has no URL")?;
+                    issue
+                        .blocked_by
+                        .push(identity_from_url(url).context("invalid blocker URL")?);
                 }
                 // The documented body section is also honored, including on older exported backlogs.
                 issue
@@ -121,9 +195,30 @@ impl IssueSource for GitHubIssues {
                 issue.blocked_by.sort();
                 issue.blocked_by.dedup();
                 issue.dependency_source = "native-and-body".into();
+                let comments =
+                    Self::get_pages(&format!("{endpoint}/comments?per_page={}", Self::PAGE_SIZE))?;
+                issue.comments.extend(
+                    comments
+                        .iter()
+                        .filter_map(|comment| comment["body"].as_str().map(String::from)),
+                );
                 Ok(issue)
             })
             .collect()
+    }
+    fn snapshot_open(&self, repository: &str) -> Result<Vec<ImportedIssue>> {
+        let issues = Self::get_pages(&format!(
+            "repos/{repository}/issues?state=open&per_page={}",
+            Self::PAGE_SIZE
+        ))?;
+        let numbers = issues
+            .iter()
+            .filter(|issue| issue.get("pull_request").is_none())
+            .filter_map(|issue| issue["number"].as_u64())
+            .collect::<Vec<_>>();
+        let mut snapshot = self.selected(repository, &numbers)?;
+        snapshot.retain(|issue| issue.state.eq_ignore_ascii_case("open"));
+        Ok(snapshot)
     }
 }
 fn identity_from_url(url: &str) -> Option<String> {
@@ -134,7 +229,7 @@ fn identity_from_url(url: &str) -> Option<String> {
         .ok()
         .map(|n| format!("github:{repo}#{n}"))
 }
-fn section(body: &str, name: &str) -> Vec<String> {
+pub(crate) fn section(body: &str, name: &str) -> Vec<String> {
     let mut active = false;
     let mut result = Vec::new();
     for line in body.lines() {
@@ -160,7 +255,7 @@ fn section(body: &str, name: &str) -> Vec<String> {
     }
     result
 }
-fn body_blockers(repository: &str, body: &str) -> Vec<String> {
+pub(crate) fn body_blockers(repository: &str, body: &str) -> Vec<String> {
     section(body, "Blocked by")
         .into_iter()
         .filter_map(|line| {

@@ -11,10 +11,22 @@ refused before any remote effect.
   "github_repository": "owner/name",
   "target_branch": "main",
   "remote": "origin",
+  "required_checks_timeout_seconds": 600,
+  "required_checks_poll_seconds": 5,
   "merge": false,
   "deploy": false
 }
 ```
+
+For whole-snapshot backlog runs, `publish` creates one draft PR per dependency-connected
+delivery group. It validates only the group's covered criteria and keeps independent
+verified groups moving when another group is blocked or failed. Required GitHub
+checks are discovered from branch protection and polled against the exact pushed
+head commit. A failed check can start a bounded group repair using the run's
+`correction_cycles` allowance; the corrected commit must receive fresh independent
+review, configured local validation, and a new successful check result before its
+group is reported as verified. Every poll observation and failed check remains in
+the run report, and the latest outcome is refreshed in the open draft PR body.
 
 `merge` and `deploy` default to `false`. Opening a pull request never authorizes
 merging into the primary branch or deployment; Kiln only records the explicit
@@ -35,6 +47,10 @@ instead of creating a duplicate, and return immediately once the same commit is
 GitHub access uses `gh api` (`--gh PATH` selects the program). `--fixture github.json`
 simulates GitHub with `{"pull_requests":[...], "interrupt":"before_create"|"after_create"}`
 for offline tests; `interrupt` fails the next publication once at that point.
+Delivery-group check fixtures may add `required_check_names` and exact-head
+`check_runs` entries (`pull_request`, `commit`, `name`, `status`, `conclusion`,
+`id`, `url`). `check_snapshots` supplies successive polling responses; fixture
+`commit: "current"` binds a response to the exact SHA requested by that poll.
 
 ## Synchronizing progress to imported issues
 

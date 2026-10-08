@@ -19,6 +19,14 @@ pub struct Run {
     pub status: String,
     pub config: ProjectConfig,
     pub specs: Vec<FrozenSpec>,
+    /// Frozen open-issue inputs and derived criteria for a one-command backlog run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog: Option<BacklogRun>,
+    /// Dependency-connected delivery units for whole-snapshot backlog runs.
+    /// Group membership is frozen from the verified plan; outcomes track only
+    /// the durable scheduler dispositions for those tickets.
+    #[serde(default)]
+    pub delivery_groups: Vec<crate::delivery::DeliveryGroup>,
     #[serde(default)]
     pub plan: Option<crate::planning::Plan>,
     #[serde(default)]
@@ -56,6 +64,55 @@ pub struct Run {
     /// Progress comments reflected back to imported GitHub issues.
     #[serde(default)]
     pub synchronization: Option<crate::synchronization::Synchronization>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogRun {
+    pub github_repository: String,
+    /// single-issue compatibility mode or whole-snapshot dependency-graph mode.
+    #[serde(default = "single_backlog_mode")]
+    pub mode: String,
+    pub selected_issue: u64,
+    pub snapshot_unix_ms: u128,
+    pub issue_snapshot: Vec<crate::import::ImportedIssue>,
+    /// A durable classification for every issue captured at run start. This is
+    /// separate from the executable plan: containers and issues outside the
+    /// selected one-issue workflow still receive an explicit disposition.
+    #[serde(default)]
+    pub dispositions: Vec<BacklogIssueDisposition>,
+    #[serde(default)]
+    pub inferred_requirements: Vec<String>,
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    pub skill_version: String,
+    pub outcome: String,
+}
+fn single_backlog_mode() -> String {
+    "single-issue".into()
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklogIssueDisposition {
+    pub issue: String,
+    /// actionable | container
+    #[serde(default = "actionable_issue_kind")]
+    pub kind: String,
+    /// Whether this issue was selected by the command that created the run.
+    #[serde(default)]
+    pub selected: bool,
+    /// Whether this actionable issue has enough criteria and actionable
+    /// prerequisites to produce an executable plan ticket.
+    #[serde(default)]
+    pub plan_candidate: bool,
+    /// eligible | blocked | skipped | completed | failed | unable-to-verify
+    pub status: String,
+    pub dependencies: Vec<String>,
+    pub reason: String,
+    #[serde(default)]
+    pub inferred_criteria: Vec<String>,
+}
+fn actionable_issue_kind() -> String {
+    "actionable".into()
 }
 /// A spec revision produced by a decision: an explicit, versioned run artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]

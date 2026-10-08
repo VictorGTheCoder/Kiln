@@ -105,9 +105,23 @@ kiln --repo /path/to/project serve --bind 127.0.0.1:3000
 
 See [configuration and CLI usage](docs/configuration.md) for the complete workflow.
 
+## One-command issue run
+
+For one clear, independent GitHub issue, `start-issue` snapshots the repository's open issues, derives run-scoped requirements from the selected issue and repository, then runs planning, implementation, independent review, configured validation, and draft pull request publication:
+
+```sh
+kiln --repo /path/to/project start-issue \
+  --config kiln.json \
+  --github-repo owner/name \
+  --issue 123 \
+  --codex /path/to/codex
+```
+
+The issue snapshot and generated requirements are recorded with the run. Issue bodies, labels, assignees, comments, and state are read-only. Issues with dependencies or a rejected/unverifiable plan stop before implementation; successful output remains a draft pull request. See [one-issue backlog runs](docs/backlog.md) for deterministic adapter options and the recorded skill version.
+
 ## Planning from specs
 
-Specs are version-controlled Markdown files and remain the source of truth for a run.
+In the approved-spec workflow, version-controlled Markdown files remain the source of truth for a run. The `start-issue` workflow is an explicit exception: it derives run-scoped requirements from one read-only issue and repository context without requiring an approved spec.
 
 Each approved spec contains explicit acceptance criteria. Kiln freezes the supplied files, derives requirement identities from those criteria, and gives the planning agent that fixed input.
 
@@ -178,7 +192,7 @@ The provider interface keeps agent-specific integration separate from orchestrat
 
 ## GitHub integration
 
-Kiln can import existing GitHub issues and use them as implementation tickets while keeping repository specs authoritative.
+The approved-spec import workflow can use GitHub issues as implementation tickets while keeping repository specs authoritative. The `start-issue` workflow instead derives a run-scoped spec from one issue and repository context.
 
 It can synchronize progress back to those issues without rewriting their titles or descriptions.
 
