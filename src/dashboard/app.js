@@ -114,5 +114,77 @@ async function refresh() {
   }
 }
 
+// Action buttons. Plan and Start act on the repository; Pause, Resume and
+// Cancel act on the selected run. The server says which actions make sense
+// now; a POST carries no body, so the server's same-origin checks apply.
+const RUN_ACTIONS = ["pause", "resume", "cancel"];
+let actionPending = false;
+
+function showAction(text, bad) {
+  const node = document.getElementById("action-status");
+  node.textContent = text;
+  node.className = bad ? "bad" : "";
+}
+
+function describeLast(last) {
+  if (!last) return null;
+  const target = last.run ? " of run " + last.run : "";
+  if (last.state === "running") return [last.action + target + " is running…", false];
+  if (last.state === "failed") return [last.action + target + " failed: " + (last.error || "unknown error"), true];
+  return [last.action + target + " finished.", false];
+}
+
+async function refreshActions() {
+  let offered;
+  try {
+    offered = await getJson("/api/dashboard/actions");
+  } catch (error) {
+    return;
+  }
+  const runActions = (selected && offered.runs[selected]) || [];
+  for (const button of document.querySelectorAll("#actions button[data-action]")) {
+    const action = button.dataset.action;
+    const allowed = RUN_ACTIONS.includes(action) ? runActions : offered.available;
+    button.disabled = actionPending || !allowed.includes(action);
+  }
+  const last = describeLast(offered.last);
+  if (last && !actionPending) showAction(last[0], last[1]);
+}
+
+async function act(action) {
+  const path = RUN_ACTIONS.includes(action)
+    ? "/api/dashboard/runs/" + encodeURIComponent(selected) + "/" + action
+    : "/api/dashboard/actions/" + action;
+  actionPending = true;
+  showAction(action + " requested…", false);
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (response.ok) {
+      showAction(action + (body.state === "requested" ? " requested." : " started."), false);
+      if (action === "plan" || action === "start") selected = "";
+    } else {
+      showAction(action + " failed: " + (body.error || response.status), true);
+    }
+  } catch (error) {
+    showAction("Cannot reach Kiln: " + error.message, true);
+  } finally {
+    actionPending = false;
+    refresh();
+    refreshActions();
+  }
+}
+
+for (const button of document.querySelectorAll("#actions button[data-action]")) {
+  button.addEventListener("click", () => act(button.dataset.action));
+}
+
 refresh();
+refreshActions();
 setInterval(refresh, POLL_MS);
+setInterval(refreshActions, POLL_MS);
+// Selecting another run changes which run actions apply.
+window.addEventListener("hashchange", refreshActions);

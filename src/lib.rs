@@ -1,3 +1,4 @@
+pub mod actions;
 mod config;
 pub mod control;
 pub mod dashboard;

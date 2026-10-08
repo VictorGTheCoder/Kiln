@@ -36,11 +36,28 @@ main{display:grid;grid-template-columns:minmax(220px,280px) 1fr;min-height:calc(
 .card .meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .card.blocked{border-color:var(--bad)}
 a{color:var(--accent)}
+#actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-left:auto}
+#actions button{font:inherit;font-size:13px;padding:3px 10px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--text);cursor:pointer}
+#actions button:hover:not(:disabled){border-color:var(--accent)}
+#actions button:disabled{opacity:.45;cursor:not-allowed}
+#actions .sep{width:1px;height:18px;background:var(--line);margin:0 4px}
+#action-status{margin:0;padding:6px 16px;font-size:13px;border-bottom:1px solid var(--line)}
+#action-status:empty{display:none}
+#action-status.bad{color:var(--bad)}
 .empty{color:var(--muted);padding:16px}
 </style>
 </head>
 <body>
-<header><h1>Kiln</h1><span class="muted" id="updated">Loading…</span></header>
+<header><h1>Kiln</h1><span class="muted" id="updated">Loading…</span>
+<div id="actions" role="toolbar" aria-label="Run actions">
+<button type="button" data-action="plan" disabled title="Plan the open issues; nothing is delivered">Plan</button>
+<button type="button" data-action="start" disabled title="Deliver the open issues, reusing an unchanged plan">Start</button>
+<span class="sep" aria-hidden="true"></span>
+<button type="button" data-action="pause" disabled title="Pause the selected run once active work settles">Pause</button>
+<button type="button" data-action="resume" disabled title="Continue the selected paused or interrupted run">Resume</button>
+<button type="button" data-action="cancel" disabled title="Stop the selected run; no further tickets start">Cancel</button>
+</div></header>
+<p id="action-status" role="status" aria-live="polite"></p>
 <main>
 <nav id="runs" aria-label="Runs"><h2>Runs</h2><ul id="run-list"></ul></nav>
 <section id="board" aria-live="polite"><p class="empty" id="placeholder">Select a run to see its tickets.</p></section>

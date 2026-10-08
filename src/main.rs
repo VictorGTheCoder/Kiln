@@ -158,6 +158,9 @@ enum Commands {
         gh: Option<PathBuf>,
         #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
         repair_fixture: Option<PathBuf>,
+        /// Do not serve the dashboard (a dashboard action already shows the run).
+        #[arg(long, hide = true)]
+        no_dashboard: bool,
     },
     /// Print the event journal of the latest run (or of a given run).
     Logs {
@@ -354,6 +357,8 @@ enum Commands {
         /// Address to serve on; the next free port is used when it is taken.
         #[arg(long, default_value = DASHBOARD_BIND)]
         bind: std::net::SocketAddr,
+        #[command(flatten)]
+        fixtures: ActionFixtures,
     },
     /// Read a recorded run, or list all run identities.
     #[command(hide = true)]
@@ -386,6 +391,35 @@ enum Commands {
         #[arg(long, requires = "backlog_config", conflicts_with_all = ["codex", "claude"])]
         repair_fixture: Option<PathBuf>,
     },
+}
+/// Hidden `kiln dashboard` flags: stand-ins for the provider and GitHub that
+/// the dashboard's action buttons hand to the commands they launch.
+#[derive(clap::Args, Debug, Clone, Default)]
+struct ActionFixtures {
+    #[arg(long, hide = true)]
+    issue_fixture: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    planning_fixture: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    run_fixture: Option<PathBuf>,
+    #[arg(long, hide = true, conflicts_with = "gh")]
+    publication_fixture: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    gh: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    repair_fixture: Option<PathBuf>,
+}
+impl From<ActionFixtures> for kiln::actions::Fixtures {
+    fn from(f: ActionFixtures) -> Self {
+        Self {
+            issue_fixture: f.issue_fixture,
+            planning_fixture: f.planning_fixture,
+            run_fixture: f.run_fixture,
+            publication_fixture: f.publication_fixture,
+            gh: f.gh,
+            repair_fixture: f.repair_fixture,
+        }
+    }
 }
 /// Real provider selected by `--codex PATH` or `--claude PATH` (mutually exclusive).
 enum Provider {
@@ -1239,6 +1273,7 @@ fn run() -> Result<()> {
             publication_fixture,
             gh,
             repair_fixture,
+            no_dashboard,
         } => {
             let defaults = kiln::defaults::Defaults::infer(
                 &engine.repository,
@@ -1267,7 +1302,22 @@ fn run() -> Result<()> {
             } else {
                 Report::Start { provider }
             };
-            let _dashboard = embedded_dashboard(&engine, json);
+            let _dashboard = if no_dashboard {
+                None
+            } else {
+                embedded_dashboard(
+                    &engine,
+                    json,
+                    kiln::actions::Fixtures {
+                        issue_fixture: issue_fixture.clone(),
+                        planning_fixture: planning_fixture.clone(),
+                        run_fixture: run_fixture.clone(),
+                        publication_fixture: publication_fixture.clone(),
+                        gh: gh.clone(),
+                        repair_fixture: repair_fixture.clone(),
+                    },
+                )
+            };
             // One readable line per journal event as it happens; stdout stays
             // pure JSON under --json.
             kiln::journal::echo(move |event| {
@@ -1490,7 +1540,7 @@ fn run() -> Result<()> {
         } => {
             let run = engine
                 .latest_resumable_run()?
-                .context("no paused or interrupted run to resume; start one with `kiln start`")?;
+                .context(kiln::control::NOTHING_TO_RESUME)?;
             // Fixtures stand in for every agent call, so no provider is needed.
             let (provider, codex, claude) = if fixture.is_some() && repair_fixture.is_some() {
                 (None, None, None)
@@ -1833,7 +1883,7 @@ fn run() -> Result<()> {
             }
             value
         }
-        Commands::Dashboard { bind } => return dashboard(engine, bind),
+        Commands::Dashboard { bind, fixtures } => return dashboard(engine, bind, fixtures.into()),
         Commands::Inspect { id: None } => serde_json::to_value(engine.list()?)?,
         Commands::Serve {
             bind,
@@ -1905,13 +1955,17 @@ fn status(engine: &Engine, id: Option<&str>, json: bool) -> Result<()> {
 const DASHBOARD_BIND: &str = "127.0.0.1:3000";
 
 /// Serve the dashboard until SIGINT or SIGTERM, recording its URL meanwhile.
-fn dashboard(engine: Engine, bind: std::net::SocketAddr) -> Result<()> {
+fn dashboard(
+    engine: Engine,
+    bind: std::net::SocketAddr,
+    fixtures: kiln::actions::Fixtures,
+) -> Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static STOP: AtomicBool = AtomicBool::new(false);
     extern "C" fn stop(_: libc::c_int) {
         STOP.store(true, Ordering::Relaxed);
     }
-    let server = kiln::web::WebServer::bind_next_free(bind)?;
+    let server = kiln::web::WebServer::bind_next_free(bind)?.with_actions(fixtures);
     let url = server.url();
     let _announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
@@ -1928,11 +1982,16 @@ fn dashboard(engine: Engine, bind: std::net::SocketAddr) -> Result<()> {
 /// Serve the dashboard in the background for the life of `kiln start`. Its URL
 /// goes to stdout, or to stderr when stdout carries JSON. A dashboard that
 /// cannot start is reported and does not stop the run.
-fn embedded_dashboard(engine: &Engine, json: bool) -> Option<kiln::dashboard::Announcement> {
+fn embedded_dashboard(
+    engine: &Engine,
+    json: bool,
+    fixtures: kiln::actions::Fixtures,
+) -> Option<kiln::dashboard::Announcement> {
     let bind = DASHBOARD_BIND
         .parse()
         .expect("valid default dashboard address");
     let started = kiln::web::WebServer::bind_next_free(bind).and_then(|server| {
+        let server = server.with_actions(fixtures);
         let url = server.url();
         let announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
         let engine = engine.clone();
