@@ -145,6 +145,11 @@ enum Commands {
         /// Print the recorded run as JSON instead of a readable summary.
         #[arg(long)]
         json: bool,
+        /// Also print a readable summary of provider activity (commands run,
+        /// files edited, messages). Full provider output is always written to
+        /// .kiln/runs/<id>/agents/<ticket>-<stage>.log.
+        #[arg(short, long)]
+        verbose: bool,
         #[arg(long, hide = true)]
         issue_fixture: Option<PathBuf>,
         #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
@@ -1123,6 +1128,7 @@ fn run() -> Result<()> {
             claude,
             fresh,
             json,
+            verbose,
             issue_fixture,
             planning_fixture,
             run_fixture,
@@ -1165,6 +1171,15 @@ fn run() -> Result<()> {
                     println!("{}", event.line());
                 }
             });
+            if verbose {
+                kiln::activity::echo(move |activity| {
+                    if json {
+                        eprintln!("{}", activity.line());
+                    } else {
+                        println!("{}", activity.line());
+                    }
+                });
+            }
             return start_backlog(
                 &engine,
                 BacklogArgs {

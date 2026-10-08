@@ -288,7 +288,9 @@ impl Engine {
                         .redact(&serde_json::to_string_pretty(&request)?),
                 ),
             )?;
-            let agent_result = agent.implement(&request);
+            let agent_result = self.with_agent_log(id, Some(ticket_id), "implementation", || {
+                agent.implement(&request)
+            });
             crate::recovery::fault("implementation.after_agent", ticket_id);
             // Collect actual changes even when the provider reports failure.
             git(&worktree, &["add", "-A", "--", "."])?;

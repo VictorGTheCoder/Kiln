@@ -288,7 +288,8 @@ fn start_is_listed_in_help() {
     let target = Target::new();
     let help = success(&target.kiln(&["--help"]));
     assert!(
-        help.lines().any(|line| line.trim_start().starts_with("start ")),
+        help.lines()
+            .any(|line| line.trim_start().starts_with("start ")),
         "{help}"
     );
 }

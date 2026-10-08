@@ -175,18 +175,21 @@ impl Engine {
         let requirements = requirements(&run.specs);
         let generation_context = format!("{}-generation", run.id);
         let verification_context = format!("{}-verification", run.id);
-        let tickets = agent.generate(&PlanningRequest {
-            context_id: generation_context.clone(),
-            instructions: TICKET_INSTRUCTIONS.into(),
-            specs: run.specs.clone(),
-            requirements: requirements.clone(),
-        })?;
-        let verification = agent.verify(&VerificationRequest {
-            context_id: verification_context.clone(),
-            instructions: VERIFIER_INSTRUCTIONS.into(),
-            specs: run.specs.clone(),
-            requirements: requirements.clone(),
-            tickets: tickets.clone(),
+        let (tickets, verification) = self.with_agent_log(id, None, "plan", || -> Result<_> {
+            let tickets = agent.generate(&PlanningRequest {
+                context_id: generation_context.clone(),
+                instructions: TICKET_INSTRUCTIONS.into(),
+                specs: run.specs.clone(),
+                requirements: requirements.clone(),
+            })?;
+            let verification = agent.verify(&VerificationRequest {
+                context_id: verification_context.clone(),
+                instructions: VERIFIER_INSTRUCTIONS.into(),
+                specs: run.specs.clone(),
+                requirements: requirements.clone(),
+                tickets: tickets.clone(),
+            })?;
+            Ok((tickets, verification))
         })?;
         let mut plan = validate_plan(
             &run.specs,

@@ -571,7 +571,10 @@ pub fn review_group(
                 implementation_checks: checks.clone(),
                 worktree: path.clone(),
             };
-            let mut result = reviewer.review(&request)?;
+            let mut result =
+                engine.with_agent_log(&run.id, Some(&group.id), "delivery-review", || {
+                    reviewer.review(&request)
+                })?;
             let redact = |value: &str| run.config.isolation.redact(&reviewer.redact_output(value));
             result.evidence = redact(&result.evidence);
             result.log = redact(&result.log);
@@ -672,7 +675,9 @@ pub fn repair_group(
             isolation: run.config.isolation.clone(),
             worktree: path.clone(),
         };
-        let result = corrector.correct(&request)?;
+        let result = engine.with_agent_log(&run.id, Some(&group.id), "repair", || {
+            corrector.correct(&request)
+        })?;
         if result.outcome != "completed" {
             bail!("CI repair agent did not complete: {}", result.outcome);
         }

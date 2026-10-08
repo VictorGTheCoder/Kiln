@@ -1,3 +1,4 @@
+pub mod activity;
 mod config;
 pub mod control;
 pub mod defaults;
