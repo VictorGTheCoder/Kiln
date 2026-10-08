@@ -11,7 +11,7 @@ mod state;
 pub mod status;
 pub mod web;
 pub use config::ProjectConfig;
-pub use engine::Engine;
+pub use engine::{Engine, RunActiveElsewhere};
 pub use state::{BacklogRun, FrozenSpec, Run, SpecRevision};
 
 pub mod import;

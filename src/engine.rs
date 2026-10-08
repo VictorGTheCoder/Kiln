@@ -152,20 +152,39 @@ impl Engine {
     }
     /// Exclusive scheduling ownership of a run. The operating system releases it
     /// when the owning process ends, so a held lock means a live scheduler.
+    ///
+    /// A liveness probe ([`Engine::is_owned_elsewhere`]) holds the lock for a
+    /// moment only, so a busy lock is retried briefly before it counts as owned.
     pub fn own_run(&self, id: &str) -> Result<RunLock> {
+        let file = self.owner_lock_file(id)?;
+        use std::os::fd::AsRawFd;
+        for attempt in 0..OWNER_LOCK_ATTEMPTS {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(RunLock(file));
+            }
+            if attempt + 1 < OWNER_LOCK_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        Err(RunActiveElsewhere { id: id.to_owned() }.into())
+    }
+    /// True while another process (or another open handle) owns the run. The
+    /// probe takes a shared lock without waiting, so probes never exclude each
+    /// other and [`Engine::own_run`] outlasts them.
+    pub fn is_owned_elsewhere(&self, id: &str) -> Result<bool> {
+        let file = self.owner_lock_file(id)?;
+        use std::os::fd::AsRawFd;
+        Ok(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0)
+    }
+    fn owner_lock_file(&self, id: &str) -> Result<fs::File> {
         validate_id(id)?;
         fs::create_dir_all(self.runs_dir())?;
-        let file = fs::OpenOptions::new()
+        Ok(fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.runs_dir().join(format!("{id}.owner.lock")))?;
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            bail!("run '{id}' is active in another process; resume only an interrupted run");
-        }
-        Ok(RunLock(file))
+            .open(self.runs_dir().join(format!("{id}.owner.lock")))?)
     }
     /// Process-held lock shared by every integration. The marker file is persistent:
     /// flock on its open file description provides liveness, while the contents are
@@ -451,6 +470,25 @@ fn validate_id(id: &str) -> Result<()> {
 }
 
 pub struct RunLock(fs::File);
+
+/// How often [`Engine::own_run`] tries a busy ownership lock (1 ms apart).
+const OWNER_LOCK_ATTEMPTS: u32 = 20;
+
+/// [`Engine::own_run`] failed because a live scheduler already owns the run.
+#[derive(Debug)]
+pub struct RunActiveElsewhere {
+    pub id: String,
+}
+impl std::fmt::Display for RunActiveElsewhere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "run '{}' is active in another process; resume only an interrupted run",
+            self.id
+        )
+    }
+}
+impl std::error::Error for RunActiveElsewhere {}
 impl Drop for RunLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;

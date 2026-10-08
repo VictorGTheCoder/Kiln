@@ -26,13 +26,8 @@ impl Engine {
         if run.status != "running" {
             bail!("run '{id}' is not active (status: {})", run.status);
         }
-        match self.own_run(id) {
-            Ok(owner) => {
-                drop(owner);
-                bail!("run '{id}' has no active scheduler process");
-            }
-            Err(error) if error.to_string().contains("active in another process") => {}
-            Err(error) => return Err(error),
+        if !self.is_owned_elsewhere(id)? {
+            bail!("run '{id}' has no active scheduler process");
         }
         let target = path(self, id);
         let mut staging =
@@ -46,15 +41,6 @@ impl Engine {
             bail!("run '{id}' finished before the control request was applied");
         }
         Ok(())
-    }
-
-    /// True while another process owns the run's scheduler (or publication).
-    pub fn is_owned_elsewhere(&self, id: &str) -> Result<bool> {
-        match self.own_run(id) {
-            Ok(_owner) => Ok(false),
-            Err(error) if error.to_string().contains("active in another process") => Ok(true),
-            Err(error) => Err(error),
-        }
     }
 
     /// The most recently created run matching `keep`.
