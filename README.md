@@ -105,6 +105,16 @@ The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus 
 
 Deliver the backlog with `kiln start`, which takes the same inputs and overrides. It plans the open issue graph, runs the tickets, opens the delivery pull requests and waits for CI, then prints a readable outcome (`--json` prints the recorded run). When the latest backlog run was planned by `kiln plan` and not started, and the open issues have not changed since, `kiln start` delivers that plan instead of planning again; `kiln start --fresh` always plans anew. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
 
+Check on the latest run at any time:
+
+```sh
+kiln status            # latest run of this repository
+kiln status RUN_ID     # a specific run
+kiln status --json     # machine-readable summary (null when there is no run)
+```
+
+The summary shows the run status, how many tickets are in each stage (planned, waiting, implementing, integrating, integrated, delivering, delivered, blocked, stopped), the active ticket, and each pull request with its CI status.
+
 Prepare a run from one or more approved Markdown specs:
 
 ```sh

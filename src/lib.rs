@@ -4,6 +4,7 @@ pub mod defaults;
 mod engine;
 pub mod journal;
 mod state;
+pub mod status;
 pub mod web;
 pub use config::ProjectConfig;
 pub use engine::Engine;
