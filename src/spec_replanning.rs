@@ -289,14 +289,16 @@ impl Engine {
             invalidated_validation_reports: Vec::new(),
             revalidations: Vec::new(),
         };
-        let revised = agent.revise(&SpecReplanRequest {
-            context_id: context_id.clone(),
-            instructions: SPEC_REPLANNING_INSTRUCTIONS.into(),
-            specs: specs.clone(),
-            changed_requirements: changed,
-            removed_requirements: removed,
-            affected_tickets: covering.clone(),
-            tickets: current.tickets.clone(),
+        let revised = self.with_agent_log(id, None, "spec-replan", || {
+            agent.revise(&SpecReplanRequest {
+                context_id: context_id.clone(),
+                instructions: SPEC_REPLANNING_INSTRUCTIONS.into(),
+                specs: specs.clone(),
+                changed_requirements: changed,
+                removed_requirements: removed,
+                affected_tickets: covering.clone(),
+                tickets: current.tickets.clone(),
+            })
         });
         let mut adopted = None;
         match revised {
