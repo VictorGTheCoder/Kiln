@@ -5,6 +5,10 @@ use crate::Engine;
 use anyhow::{bail, Context, Result};
 use std::{fs, io::Write, path::PathBuf};
 
+/// Error of `kiln resume` (and the dashboard Resume) when nothing can continue.
+pub const NOTHING_TO_RESUME: &str =
+    "no paused or interrupted run to resume; start one with `kiln start`";
+
 fn path(engine: &Engine, id: &str) -> PathBuf {
     engine
         .repository

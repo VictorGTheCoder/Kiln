@@ -52,6 +52,7 @@ pub enum Home {
 pub struct WebServer {
     server: Server,
     address: SocketAddr,
+    actions: Option<crate::actions::Fixtures>,
 }
 impl WebServer {
     /// Bind exactly `bind`, which must be a loopback address.
@@ -72,7 +73,11 @@ impl WebServer {
             match Server::http(address) {
                 Ok(server) => {
                     let address = server.server_addr().to_ip().unwrap_or(address);
-                    return Ok(Self { server, address });
+                    return Ok(Self {
+                        server,
+                        address,
+                        actions: None,
+                    });
                 }
                 Err(error) => {
                     tried += 1;
@@ -93,6 +98,11 @@ impl WebServer {
     pub fn url(&self) -> String {
         format!("http://{}", self.address)
     }
+    /// Enable the dashboard action buttons; launched commands get `fixtures`.
+    pub fn with_actions(mut self, fixtures: crate::actions::Fixtures) -> Self {
+        self.actions = Some(fixtures);
+        self
+    }
     /// Handle requests until `stop` is set (checked at least every 200 ms).
     pub fn serve(
         self,
@@ -102,6 +112,9 @@ impl WebServer {
         stop: &AtomicBool,
     ) -> Result<()> {
         let site = Site {
+            actions: self
+                .actions
+                .map(|fixtures| crate::actions::Actions::new(engine.clone(), fixtures)),
             engine,
             backlog,
             home,
@@ -138,6 +151,8 @@ struct Site {
     backlog: Option<BacklogLaunch>,
     home: Home,
     port: u16,
+    /// Dashboard action buttons, when enabled.
+    actions: Option<crate::actions::Actions>,
 }
 impl Site {
     /// Answer one request. Requests are answered one at a time on the server
@@ -251,6 +266,8 @@ impl Site {
                     "text/plain; charset=utf-8",
                     "Invalid request body".to_owned(),
                 )
+            } else if let Some((status, body)) = self.act(request.url()) {
+                (status, "application/json", body.to_string())
             } else {
                 match mutate(engine, backlog, request.url().split('?').next().unwrap_or("/")) {
                     Ok(body) => (200, "text/html; charset=utf-8", body),
@@ -265,7 +282,16 @@ impl Site {
             )
         } else {
             let path = request.url().split('?').next().unwrap_or("/");
-            let rendered = match dashboard_route(engine, self.home, path) {
+            let offered = (path == "/api/dashboard/actions").then(|| match &self.actions {
+                Some(actions) => actions
+                    .offered()
+                    .map(|offered| ("application/json", offered.to_string())),
+                None => Ok((
+                    "application/json",
+                    serde_json::json!({"available": [], "runs": {}, "last": null}).to_string(),
+                )),
+            });
+            let rendered = match offered.or_else(|| dashboard_route(engine, self.home, path)) {
                 Some(result) => result,
                 None => render(engine, path, backlog),
             };
@@ -274,6 +300,25 @@ impl Site {
                 Err(error) => (404, "text/plain; charset=utf-8", format!("Kiln: {error:#}")),
             }
         }
+    }
+    /// A dashboard action POST, answered with JSON; `None` for other paths.
+    fn act(&self, url: &str) -> Option<(u16, serde_json::Value)> {
+        let path = url.split('?').next().unwrap_or("/");
+        if !path.starts_with("/api/dashboard/") {
+            return None;
+        }
+        Some(match &self.actions {
+            Some(actions) => actions.perform(path).unwrap_or_else(|| {
+                (
+                    404,
+                    serde_json::json!({"error": "unknown dashboard action"}),
+                )
+            }),
+            None => (
+                409,
+                serde_json::json!({"error": "dashboard actions are not enabled on this server; run `kiln dashboard`"}),
+            ),
+        })
     }
 }
 
@@ -397,6 +442,10 @@ fn should_refresh(run: &Run) -> bool {
 fn web_worker_active(engine: &Engine) -> bool {
     let dir = engine.repository.join(".kiln");
     dir.join("web-backlog-start.lock").exists() || dir.join("web-backlog-resume.lock").exists()
+}
+
+pub(crate) fn validate_run_id(id: &str) -> Result<()> {
+    validate_id(id)
 }
 
 fn validate_id(id: &str) -> Result<()> {
@@ -565,6 +614,11 @@ const STYLE: &str = "body{font:15px/1.45 system-ui,sans-serif;max-width:1100px;m
 
 /// Whether a scheduler process currently holds the run's ownership lock (the
 /// same lock `kiln resume` checks). `None` when the system does not report it.
+/// Whether a scheduler process is known to own the run right now.
+pub(crate) fn is_live(engine: &Engine, id: &str) -> bool {
+    liveness(engine, id) == Some(true)
+}
+
 fn liveness(engine: &Engine, id: &str) -> Option<bool> {
     use std::os::unix::fs::MetadataExt;
     let lock = engine
