@@ -18,6 +18,7 @@ impl ProjectConfig {
     pub fn load(path: &Path, repository: &Path) -> Result<Self> {
         let config: Self = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("read project configuration {}", path.display()))?)
             .context("configuration must be JSON with build, test, startup argv arrays and acceptance_criteria")?;
+        crate::defaults::configured_agent(&serde_json::to_value(&config.extensions)?)?;
         for name in ["correction_cycles", "implementation_concurrency"] {
             if let Some(limit) = config.extensions.get(name) {
                 if limit.as_u64().is_none_or(|n| n == 0) {

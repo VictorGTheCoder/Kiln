@@ -50,10 +50,13 @@ Kiln currently builds from source.
 
 You need Rust and Git. On Linux, workflow execution also uses `bubblewrap` (`bwrap`) for process isolation.
 
+Install the `kiln` command from a checkout, so it is available from any directory:
+
 ```sh
-cargo build
-cargo test
+cargo install --path .
 ```
+
+For development, `cargo build` and `cargo test` build and test it in place.
 
 A target repository defines its build, test, startup, acceptance, and isolation policy in `kiln.json`.
 
@@ -79,6 +82,26 @@ For example:
   }
 }
 ```
+
+### Plan the backlog with no flags
+
+From inside the target repository, plan its open GitHub issues:
+
+```sh
+cd /path/to/project
+kiln plan
+```
+
+`kiln plan` freezes the open issue graph, plans and independently verifies it, prints a readable summary, then stops before delivery. `kiln plan --json` prints the recorded run as JSON instead. Kiln infers every input, and each has an override flag:
+
+| Input | Inferred from | Override |
+|-------|---------------|----------|
+| Repository | the current directory | `--repo PATH` |
+| Project configuration | `kiln.json` in the repository | `--config PATH` |
+| GitHub repository | the `origin` remote (`https://github.com/OWNER/REPO.git` or `git@github.com:OWNER/REPO.git`) | `--github-repo OWNER/REPO` |
+| Provider | the optional `"agent": "codex"` or `"claude"` field of `kiln.json`, found on `PATH`; without it, `codex` then `claude` on `PATH` | `--codex PATH` or `--claude PATH` |
+
+The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus `timeout_seconds`) is still required; its `installation` may be omitted when the executable is on `PATH`. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
 
 Prepare a run from one or more approved Markdown specs:
 
