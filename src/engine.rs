@@ -400,6 +400,44 @@ impl Engine {
         }
         Ok(reusable)
     }
+
+    /// The latest whole-graph backlog run of `github_repository` when it was
+    /// planned but never started and froze exactly this open-issue snapshot
+    /// (any order; compared sorted by issue number).
+    pub fn planned_backlog_run_for_snapshot(
+        &self,
+        github_repository: &str,
+        snapshot: &[crate::import::ImportedIssue],
+    ) -> Result<Option<Run>> {
+        let mut sorted = snapshot.to_vec();
+        sorted.sort_by_key(|issue| issue.number);
+        let expected = serde_json::to_value(&sorted)?;
+        let mut latest: Option<Run> = None;
+        for id in self.list()? {
+            let run = self.inspect(&id)?;
+            let same_graph = run.backlog.as_ref().is_some_and(|backlog| {
+                backlog.mode == "issue-graph" && backlog.github_repository == github_repository
+            });
+            if same_graph
+                && latest
+                    .as_ref()
+                    .is_none_or(|old| old.created_unix_ms < run.created_unix_ms)
+            {
+                latest = Some(run);
+            }
+        }
+        let Some(run) = latest else {
+            return Ok(None);
+        };
+        let unchanged = match &run.backlog {
+            Some(backlog) => serde_json::to_value(&backlog.issue_snapshot)? == expected,
+            None => false,
+        };
+        let planned = run.status == "planned"
+            && run.scheduler.is_none()
+            && run.plan.as_ref().is_some_and(|plan| plan.executable);
+        Ok((planned && unchanged).then_some(run))
+    }
 }
 fn validate_id(id: &str) -> Result<()> {
     if id.is_empty()

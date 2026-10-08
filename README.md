@@ -101,7 +101,9 @@ kiln plan
 | GitHub repository | the `origin` remote (`https://github.com/OWNER/REPO.git` or `git@github.com:OWNER/REPO.git`) | `--github-repo OWNER/REPO` |
 | Provider | the optional `"agent": "codex"` or `"claude"` field of `kiln.json`, found on `PATH`; without it, `codex` then `claude` on `PATH` | `--codex PATH` or `--claude PATH` |
 
-The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus `timeout_seconds`) is still required; its `installation` may be omitted when the executable is on `PATH`. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
+The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus `timeout_seconds`) is still required; its `installation` may be omitted when the executable is on `PATH`.
+
+Deliver the backlog with `kiln start`, which takes the same inputs and overrides. It plans the open issue graph, runs the tickets, opens the delivery pull requests and waits for CI, then prints a readable outcome (`--json` prints the recorded run). When the latest backlog run was planned by `kiln plan` and not started, and the open issues have not changed since, `kiln start` delivers that plan instead of planning again; `kiln start --fresh` always plans anew. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
 
 Prepare a run from one or more approved Markdown specs:
 

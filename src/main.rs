@@ -125,6 +125,39 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Plan the open issue graph (or reuse an unchanged plan), deliver it and wait for CI.
+    Start {
+        /// Project configuration [default: kiln.json in the repository].
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// GitHub repository OWNER/REPO [default: parsed from the `origin` remote].
+        #[arg(long)]
+        github_repo: Option<String>,
+        /// Codex executable [default: the config `agent`, else codex then claude on PATH].
+        #[arg(long)]
+        codex: Option<PathBuf>,
+        /// Claude Code executable; mutually exclusive with --codex.
+        #[arg(long, conflicts_with = "codex")]
+        claude: Option<PathBuf>,
+        /// Plan anew even when the latest plan matches the open issues.
+        #[arg(long)]
+        fresh: bool,
+        /// Print the recorded run as JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+        #[arg(long, hide = true)]
+        issue_fixture: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
+        planning_fixture: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
+        run_fixture: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with = "gh")]
+        publication_fixture: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        gh: Option<PathBuf>,
+        #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
+        repair_fixture: Option<PathBuf>,
+    },
     /// Execute one eligible ticket in an isolated worktree.
     #[command(hide = true)]
     Implement {
@@ -373,12 +406,15 @@ enum Report {
     Json,
     /// Readable summary of a planned backlog run.
     Plan { provider: Option<&'static str> },
+    /// Readable summary of a delivered (or stopped) backlog run.
+    Start { provider: Option<&'static str> },
 }
 impl Report {
     fn emit(&self, run: &kiln::Run) -> Result<()> {
         match self {
             Self::Json => println!("{}", serde_json::to_string_pretty(run)?),
             Self::Plan { provider } => print!("{}", plan_summary(run, *provider)),
+            Self::Start { provider } => print!("{}", start_summary(run, *provider)),
         }
         Ok(())
     }
@@ -446,6 +482,62 @@ fn plan_summary(run: &kiln::Run, provider: Option<&str>) -> String {
     }
     out
 }
+/// Human-readable outcome of a backlog delivery run.
+fn start_summary(run: &kiln::Run, provider: Option<&str>) -> String {
+    use std::fmt::Write;
+    let Some(scheduler) = &run.scheduler else {
+        // Nothing was delivered: no actionable issues, or a rejected plan.
+        return plan_summary(run, provider).replace(
+            "Delivery was not started. Run `kiln start` to deliver this plan.\n",
+            "",
+        );
+    };
+    let mut out = String::new();
+    let repository = run
+        .backlog
+        .as_ref()
+        .map_or("the repository", |b| b.github_repository.as_str());
+    let by = provider.map(|p| format!(" with {p}")).unwrap_or_default();
+    let _ = writeln!(out, "Run {} for {repository}{by}: {}", run.id, run.status);
+    let titles: std::collections::BTreeMap<_, _> = run
+        .plan
+        .iter()
+        .flat_map(|plan| &plan.tickets)
+        .map(|ticket| (ticket.id.as_str(), ticket.title.as_str()))
+        .collect();
+    let _ = writeln!(out, "Tickets:");
+    for ticket in &scheduler.tickets {
+        let title = titles.get(ticket.id.as_str()).copied().unwrap_or_default();
+        let blocker = ticket
+            .blocker
+            .as_ref()
+            .map(|b| format!(" ({b})"))
+            .unwrap_or_default();
+        let _ = writeln!(out, "  {}  {title}: {}{blocker}", ticket.id, ticket.state);
+    }
+    if !run.delivery_groups.is_empty() {
+        let _ = writeln!(out, "Delivery:");
+        for group in &run.delivery_groups {
+            let pull_request = group
+                .pull_request
+                .as_ref()
+                .map(|pr| format!("  {}", pr.url))
+                .unwrap_or_default();
+            let reason = group
+                .reason
+                .as_ref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "  {}: {}{reason}{pull_request}",
+                group.tickets.join(", "),
+                group.status
+            );
+        }
+    }
+    out
+}
 /// Inputs of a whole-graph backlog run (`start-backlog`, `plan`, `start`).
 struct BacklogArgs {
     config: PathBuf,
@@ -459,6 +551,26 @@ struct BacklogArgs {
     gh: Option<PathBuf>,
     repair_fixture: Option<PathBuf>,
     plan_only: bool,
+    /// Deliver the latest planned-but-not-started run when the open issues are unchanged.
+    reuse_plan: bool,
+}
+/// Issue source that serves one snapshot taken up front, so the reuse check
+/// and planning see the same open issues.
+struct FrozenIssues(
+    Vec<kiln::import::ImportedIssue>,
+    Box<dyn kiln::import::IssueSource>,
+);
+impl kiln::import::IssueSource for FrozenIssues {
+    fn selected(
+        &self,
+        repository: &str,
+        numbers: &[u64],
+    ) -> Result<Vec<kiln::import::ImportedIssue>> {
+        self.1.selected(repository, numbers)
+    }
+    fn snapshot_open(&self, _repository: &str) -> Result<Vec<kiln::import::ImportedIssue>> {
+        Ok(self.0.clone())
+    }
 }
 /// Freeze and plan the open issue graph, schedule it, then deliver verified groups
 /// and wait for CI (or stop after planning when `plan_only`).
@@ -475,6 +587,7 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
         gh,
         repair_fixture,
         plan_only,
+        reuse_plan,
     } = args;
     let completed_issues = engine.completed_backlog_issues(&github_repo)?;
     let source: Box<dyn kiln::import::IssueSource> = match issue_fixture {
@@ -483,85 +596,107 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
         )?),
         None => Box::new(kiln::import::GitHubIssues),
     };
-    let mut run = if let Some(path) = &planning_fixture {
-        let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
-        engine.prepare_backlog_graph(
-            &config,
-            &github_repo,
-            source.as_ref(),
-            &agent,
-            &completed_issues,
-        )?
+    let source: Box<dyn kiln::import::IssueSource> = if reuse_plan {
+        let snapshot = source.snapshot_open(&github_repo)?;
+        Box::new(FrozenIssues(snapshot, source))
     } else {
-        let project_config =
-            kiln::ProjectConfig::load(&engine.repository.join(&config), &engine.repository)?;
-        with_planner!(
-            Provider::select(codex.clone(), claude.clone()),
-            engine,
-            project_config,
-            |agent| {
-                engine.prepare_backlog_graph(
-                    &config,
-                    &github_repo,
-                    source.as_ref(),
-                    &agent,
-                    &completed_issues,
-                )?
-            }
-        )
+        source
     };
-    if run.plan.is_some()
-        && run
-            .backlog
-            .as_ref()
-            .is_some_and(|backlog| backlog.mode == "issue-graph")
-    {
-        report.emit(&run)?;
-        return Ok(());
-    }
-    if run.backlog.as_ref().is_some_and(|backlog| {
-        backlog.mode == "issue-graph"
-            && backlog.dispositions.iter().any(|d| d.status == "completed")
-            && backlog
-                .dispositions
-                .iter()
-                .all(|d| matches!(d.status.as_str(), "completed" | "skipped"))
-    }) {
-        if let Some(backlog) = &mut run.backlog {
-            backlog.outcome = "completed".into();
-            backlog.decisions.push("No new actionable open issues were present; planning, execution, and delivery were skipped.".into());
+    let reused = if reuse_plan {
+        let snapshot = source.snapshot_open(&github_repo)?;
+        engine.planned_backlog_run_for_snapshot(&github_repo, &snapshot)?
+    } else {
+        None
+    };
+    let run = if let Some(run) = reused {
+        eprintln!(
+            "Open issues are unchanged since run {} was planned; delivering that plan (pass --fresh to plan again).",
+            run.id
+        );
+        run
+    } else {
+        let mut run = if let Some(path) = &planning_fixture {
+            let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+            engine.prepare_backlog_graph(
+                &config,
+                &github_repo,
+                source.as_ref(),
+                &agent,
+                &completed_issues,
+            )?
+        } else {
+            let project_config =
+                kiln::ProjectConfig::load(&engine.repository.join(&config), &engine.repository)?;
+            with_planner!(
+                Provider::select(codex.clone(), claude.clone()),
+                engine,
+                project_config,
+                |agent| {
+                    engine.prepare_backlog_graph(
+                        &config,
+                        &github_repo,
+                        source.as_ref(),
+                        &agent,
+                        &completed_issues,
+                    )?
+                }
+            )
+        };
+        if run.plan.is_some()
+            && run
+                .backlog
+                .as_ref()
+                .is_some_and(|backlog| backlog.mode == "issue-graph")
+        {
+            report.emit(&run)?;
+            return Ok(());
         }
-        run.status = "completed".into();
-        engine.save(&run)?;
-        report.emit(&run)?;
-        return Ok(());
-    }
-    let id = run.id.clone();
-    run = if let Some(path) = &planning_fixture {
-        let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
-        let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
-        engine.plan(&id, &agent)?
-    } else {
-        let config = engine.inspect(&id)?.config;
-        with_planner!(
-            Provider::select(codex.clone(), claude.clone()),
-            engine,
-            config,
-            |agent| {
-                let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
-                engine.plan(&id, &agent)?
+        if run.backlog.as_ref().is_some_and(|backlog| {
+            backlog.mode == "issue-graph"
+                && backlog.dispositions.iter().any(|d| d.status == "completed")
+                && backlog
+                    .dispositions
+                    .iter()
+                    .all(|d| matches!(d.status.as_str(), "completed" | "skipped"))
+        }) {
+            if let Some(backlog) = &mut run.backlog {
+                backlog.outcome = "completed".into();
+                backlog.decisions.push("No new actionable open issues were present; planning, execution, and delivery were skipped.".into());
             }
-        )
+            run.status = "completed".into();
+            engine.save(&run)?;
+            report.emit(&run)?;
+            return Ok(());
+        }
+        let id = run.id.clone();
+        run = if let Some(path) = &planning_fixture {
+            let agent = kiln::planning::FixtureAgent::load(&engine.repository.join(path))?;
+            let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+            engine.plan(&id, &agent)?
+        } else {
+            let config = engine.inspect(&id)?.config;
+            with_planner!(
+                Provider::select(codex.clone(), claude.clone()),
+                engine,
+                config,
+                |agent| {
+                    let agent = kiln::backlog::BacklogPlanningAgent { inner: &agent };
+                    engine.plan(&id, &agent)?
+                }
+            )
+        };
+        engine.record_backlog_plan(&id, &mut run)?;
+        if !run.plan.as_ref().is_some_and(|plan| plan.executable) {
+            report.emit(&run)?;
+            anyhow::bail!("backlog graph plan rejected; inspect durable per-issue findings");
+        }
+        if plan_only {
+            report.emit(&run)?;
+            return Ok(());
+        }
+        run
     };
-    engine.record_backlog_plan(&id, &mut run)?;
-    if !run.plan.as_ref().is_some_and(|plan| plan.executable) {
-        report.emit(&run)?;
-        anyhow::bail!("backlog graph plan rejected; inspect durable per-issue findings");
-    }
-    if plan_only {
-        report.emit(&run)?;
-        return Ok(());
-    }
+    let id = run.id.clone();
     let providers: Box<dyn kiln::scheduler::TicketProviders> = match run_fixture {
         Some(path) => Box::new(kiln::scheduler::FixtureScenario::load(
             &engine.repository.join(path),
@@ -822,6 +957,7 @@ fn run() -> Result<()> {
                     gh,
                     repair_fixture,
                     plan_only,
+                    reuse_plan: false,
                 },
                 &Report::Json,
             );
@@ -915,6 +1051,66 @@ fn run() -> Result<()> {
                     gh: None,
                     repair_fixture: None,
                     plan_only: true,
+                    reuse_plan: false,
+                },
+                &report,
+            );
+        }
+        Commands::Start {
+            config,
+            github_repo,
+            codex,
+            claude,
+            fresh,
+            json,
+            issue_fixture,
+            planning_fixture,
+            run_fixture,
+            publication_fixture,
+            gh,
+            repair_fixture,
+        } => {
+            let defaults = kiln::defaults::Defaults::infer(
+                &engine.repository,
+                kiln::defaults::Overrides {
+                    config,
+                    github_repo,
+                    codex,
+                    claude,
+                },
+            )?;
+            // Fixtures stand in for every agent call, so no provider is needed.
+            let (provider, codex, claude) = if planning_fixture.is_some()
+                && run_fixture.is_some()
+                && repair_fixture.is_some()
+            {
+                (None, None, None)
+            } else {
+                let choice = defaults.provider()?;
+                let name = choice.agent.name();
+                let (codex, claude) = choice.into_flags();
+                (Some(name), codex, claude)
+            };
+            let report = if json {
+                Report::Json
+            } else {
+                Report::Start { provider }
+            };
+            return start_backlog(
+                &engine,
+                BacklogArgs {
+                    config: defaults.config,
+                    github_repo: defaults.github_repo,
+                    issue_fixture,
+                    planning_fixture,
+                    codex,
+                    claude,
+                    run_fixture,
+                    publication_fixture,
+                    gh,
+                    repair_fixture,
+                    plan_only: false,
+                    reuse_plan: !fresh,
                 },
                 &report,
             );
