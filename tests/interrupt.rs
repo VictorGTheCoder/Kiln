@@ -386,6 +386,47 @@ fn repeated_ctrl_c_while_awaiting_ci_pauses_once_and_resume_keeps_the_pull_reque
 }
 
 #[test]
+fn resume_shows_progress_and_its_dashboard_like_start() {
+    let target = Target::new();
+    let child = target.spawn_start();
+    let id = target.wait_until_implementing_first();
+    success(&target.kiln(&["pause"]));
+    target.release();
+    let (status, _, stderr) = finish(child);
+    assert!(status.success(), "{stderr}");
+    assert_eq!(target.run(&id)["status"], "paused");
+
+    let resumed = target.kiln(&[&["resume"], RESUME_FIXTURES].concat());
+
+    let stdout = success(&resumed);
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("Kiln web view: http://127.0.0.1:")),
+        "resume announces its dashboard:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{SECOND}  implementation")),
+        "resume echoes journal events as they happen:\n{stdout}"
+    );
+    assert!(
+        !target.repo.join(".kiln/dashboard.json").exists(),
+        "the dashboard record is removed when resume ends"
+    );
+    assert_eq!(target.run(&id)["status"], "completed");
+
+    // The observation flags of `kiln start` are accepted too.
+    let nothing =
+        target.kiln(&[&["resume", "--verbose", "--no-dashboard"], RESUME_FIXTURES].concat());
+    assert!(!nothing.status.success());
+    assert!(
+        String::from_utf8_lossy(&nothing.stderr).contains("no paused or interrupted run"),
+        "{}",
+        String::from_utf8_lossy(&nothing.stderr)
+    );
+}
+
+#[test]
 fn ctrl_c_requests_the_pause_once_instead_of_rewriting_it() {
     use std::os::unix::fs::MetadataExt;
     let target = Target::new();

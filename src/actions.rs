@@ -211,7 +211,8 @@ impl Actions {
             )?;
             inferred.provider()?;
         }
-        let mut args: Vec<OsString> = vec!["resume".into()];
+        // This server already shows the run; the command must not start another.
+        let mut args: Vec<OsString> = vec!["resume".into(), "--no-dashboard".into()];
         push(&mut args, "--fixture", &f.run_fixture);
         push(&mut args, "--publication-fixture", &f.publication_fixture);
         push(&mut args, "--gh", &f.gh);

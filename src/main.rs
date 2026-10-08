@@ -294,6 +294,14 @@ enum Commands {
         /// Print the recorded run as JSON instead of a readable summary.
         #[arg(long, conflicts_with = "id")]
         json: bool,
+        /// Also print a readable summary of provider activity (commands run,
+        /// files edited, messages). Full provider output is always written to
+        /// .kiln/runs/<id>/agents/<ticket>-<stage>.log.
+        #[arg(short, long, conflicts_with = "id")]
+        verbose: bool,
+        /// Do not serve the dashboard (a dashboard action already shows the run).
+        #[arg(long, hide = true)]
+        no_dashboard: bool,
     },
     /// Pause the latest active run once its active ticket work settles.
     Pause {
@@ -1308,13 +1316,13 @@ fn run() -> Result<()> {
             } else {
                 Report::Start { provider }
             };
-            let _dashboard = if no_dashboard {
-                None
-            } else {
-                embedded_dashboard(
-                    &engine,
+            let _dashboard = observe(
+                &engine,
+                Observation {
                     json,
-                    kiln::actions::Fixtures {
+                    verbose,
+                    dashboard: !no_dashboard,
+                    fixtures: kiln::actions::Fixtures {
                         issue_fixture: issue_fixture.clone(),
                         planning_fixture: planning_fixture.clone(),
                         run_fixture: run_fixture.clone(),
@@ -1322,26 +1330,8 @@ fn run() -> Result<()> {
                         gh: gh.clone(),
                         repair_fixture: repair_fixture.clone(),
                     },
-                )
-            };
-            // One readable line per journal event as it happens; stdout stays
-            // pure JSON under --json.
-            kiln::journal::echo(move |event| {
-                if json {
-                    eprintln!("{}", event.line());
-                } else {
-                    println!("{}", event.line());
-                }
-            });
-            if verbose {
-                kiln::activity::echo(move |activity| {
-                    if json {
-                        eprintln!("{}", activity.line());
-                    } else {
-                        println!("{}", activity.line());
-                    }
-                });
-            }
+                },
+            );
             return start_backlog(
                 &engine,
                 BacklogArgs {
@@ -1552,6 +1542,8 @@ fn run() -> Result<()> {
             gh,
             repair_fixture,
             json,
+            verbose,
+            no_dashboard,
         } => {
             let run = engine
                 .latest_resumable_run()?
@@ -1581,6 +1573,22 @@ fn run() -> Result<()> {
             };
             eprintln!("Resuming run {} (status: {}).", run.id, run.status);
             interrupt::install(&engine)?;
+            let _dashboard = observe(
+                &engine,
+                Observation {
+                    json,
+                    verbose,
+                    dashboard: !no_dashboard,
+                    fixtures: kiln::actions::Fixtures {
+                        issue_fixture: None,
+                        planning_fixture: None,
+                        run_fixture: fixture.clone(),
+                        publication_fixture: publication_fixture.clone(),
+                        gh: gh.clone(),
+                        repair_fixture: repair_fixture.clone(),
+                    },
+                },
+            );
             return deliver(
                 &engine,
                 &run.id,
@@ -1997,6 +2005,52 @@ fn dashboard(
 /// Serve the dashboard in the background for the life of `kiln start`. Its URL
 /// goes to stdout, or to stderr when stdout carries JSON. A dashboard that
 /// cannot start is reported and does not stop the run.
+/// How a foreground delivery (`kiln start`, `kiln resume`) shows its progress.
+struct Observation {
+    /// stdout carries only the final JSON; progress goes to stderr.
+    json: bool,
+    /// Also print a readable summary of provider activity.
+    verbose: bool,
+    /// Serve the embedded dashboard (not when a dashboard action launched us).
+    dashboard: bool,
+    /// Stand-ins handed to the dashboard's launched actions.
+    fixtures: kiln::actions::Fixtures,
+}
+/// Echo journal events (and, with `verbose`, provider activity) as they
+/// happen and serve the embedded dashboard; the returned record of the
+/// dashboard is removed when dropped.
+fn observe(engine: &Engine, observation: Observation) -> Option<kiln::dashboard::Announcement> {
+    let Observation {
+        json,
+        verbose,
+        dashboard,
+        fixtures,
+    } = observation;
+    let announcement = if dashboard {
+        embedded_dashboard(engine, json, fixtures)
+    } else {
+        None
+    };
+    // One readable line per journal event as it happens; stdout stays pure
+    // JSON under --json.
+    kiln::journal::echo(move |event| {
+        if json {
+            eprintln!("{}", event.line());
+        } else {
+            println!("{}", event.line());
+        }
+    });
+    if verbose {
+        kiln::activity::echo(move |activity| {
+            if json {
+                eprintln!("{}", activity.line());
+            } else {
+                println!("{}", activity.line());
+            }
+        });
+    }
+    announcement
+}
 fn embedded_dashboard(
     engine: &Engine,
     json: bool,
