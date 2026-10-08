@@ -103,7 +103,9 @@ kiln plan
 
 The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus `timeout_seconds`) is still required; its `installation` may be omitted when the executable is on `PATH`.
 
-Deliver the backlog with `kiln start`, which takes the same inputs and overrides. It plans the open issue graph, runs the tickets, opens the delivery pull requests and waits for CI, then prints a readable outcome (`--json` prints the recorded run). When the latest backlog run was planned by `kiln plan` and not started, and the open issues have not changed since, `kiln start` delivers that plan instead of planning again; `kiln start --fresh` always plans anew. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
+Deliver the backlog with `kiln start`, which takes the same inputs and overrides. It plans the open issue graph, runs the tickets, opens the delivery pull requests and waits for CI, then prints a readable outcome (`--json` prints the recorded run). When the latest backlog run was planned by `kiln plan` and not started, and the open issues have not changed since, `kiln start` delivers that plan instead of planning again; `kiln start --fresh` always plans anew.
+
+Press Ctrl-C during `kiln start` to pause: Kiln lets active ticket work reach a safe point, records the run as paused and exits; pressing Ctrl-C again does not stop it sooner. `kiln resume` continues the latest paused or interrupted run with the same inferred inputs, without repeating completed commits, pull requests or comments. From another terminal, `kiln pause` and `kiln cancel` act on the latest active run. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
 
 Prepare a run from one or more approved Markdown specs:
 
