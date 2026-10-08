@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod activity;
 mod config;
 pub mod control;
 pub mod dashboard;

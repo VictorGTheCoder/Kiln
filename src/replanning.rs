@@ -113,17 +113,19 @@ impl Engine {
             outcome: "failed".into(),
             result: None,
         };
-        let revised = agent.replan(&ReplanRequest {
-            context_id: context_id.clone(),
-            instructions: REPLANNING_INSTRUCTIONS.into(),
-            ticket: previous,
-            failures,
-            specs: specs.clone(),
-            tickets: run
-                .plan
-                .as_ref()
-                .map(|p| p.tickets.clone())
-                .unwrap_or_default(),
+        let revised = self.with_agent_log(id, Some(ticket), "replan", || {
+            agent.replan(&ReplanRequest {
+                context_id: context_id.clone(),
+                instructions: REPLANNING_INSTRUCTIONS.into(),
+                ticket: previous,
+                failures,
+                specs: specs.clone(),
+                tickets: run
+                    .plan
+                    .as_ref()
+                    .map(|p| p.tickets.clone())
+                    .unwrap_or_default(),
+            })
         });
         let mut adopted = None;
         let mut provider_limit = None;
