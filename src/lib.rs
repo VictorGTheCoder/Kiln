@@ -1,5 +1,6 @@
 mod config;
 pub mod control;
+pub mod dashboard;
 pub mod defaults;
 mod engine;
 mod state;

@@ -35,7 +35,7 @@ pub struct RunSummary {
     /// Tickets currently holding an implementation slot.
     pub active: Vec<TicketSummary>,
     pub pull_requests: Vec<PullRequestSummary>,
-    /// Local dashboard of a running server. Kiln does not record one yet.
+    /// Local dashboard of a running `kiln dashboard` or `kiln start` server.
     pub dashboard_url: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]

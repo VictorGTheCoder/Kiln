@@ -331,6 +331,12 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the dashboard of this repository's runs on a loopback address, without starting a run.
+    Dashboard {
+        /// Address to serve on; the next free port is used when it is taken.
+        #[arg(long, default_value = DASHBOARD_BIND)]
+        bind: std::net::SocketAddr,
+    },
     /// Read a recorded run, or list all run identities.
     #[command(hide = true)]
     Inspect { id: Option<String> },
@@ -1104,6 +1110,7 @@ fn run() -> Result<()> {
             } else {
                 Report::Start { provider }
             };
+            let _dashboard = embedded_dashboard(&engine, json);
             return start_backlog(
                 &engine,
                 BacklogArgs {
@@ -1585,6 +1592,7 @@ fn run() -> Result<()> {
             }
             value
         }
+        Commands::Dashboard { bind } => return dashboard(engine, bind),
         Commands::Inspect { id: None } => serde_json::to_value(engine.list()?)?,
         Commands::Serve {
             bind,
@@ -1635,19 +1643,78 @@ fn status(engine: &Engine, id: Option<&str>, json: bool) -> Result<()> {
         Some(id) => Some(engine.inspect(id)?),
         None => kiln::status::latest(engine)?,
     };
+    let summary = run.as_ref().map(|run| kiln::status::RunSummary {
+        dashboard_url: kiln::dashboard::running_url(&engine.repository),
+        ..kiln::status::RunSummary::of(run)
+    });
     if json {
-        let summary = run.as_ref().map(kiln::status::RunSummary::of);
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
-    match run {
+    match summary {
         None => println!(
             "No Kiln runs in {} yet. Run `kiln plan` or `kiln start` to begin.",
             engine.repository.display()
         ),
-        Some(run) => print!("{}", kiln::status::RunSummary::of(&run).render()),
+        Some(summary) => print!("{}", summary.render()),
     }
     Ok(())
+}
+/// Default dashboard address of `kiln dashboard` and `kiln start`.
+const DASHBOARD_BIND: &str = "127.0.0.1:3000";
+
+/// Serve the dashboard until SIGINT or SIGTERM, recording its URL meanwhile.
+fn dashboard(engine: Engine, bind: std::net::SocketAddr) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    extern "C" fn stop(_: libc::c_int) {
+        STOP.store(true, Ordering::Relaxed);
+    }
+    let server = kiln::web::WebServer::bind_next_free(bind)?;
+    let url = server.url();
+    let _announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, stop as *const () as libc::sighandler_t);
+    }
+    println!("Kiln web view: {url}");
+    use std::io::Write as _;
+    std::io::stdout().flush()?;
+    server.serve(engine, None, kiln::web::Home::Dashboard, &STOP)
+}
+
+/// Serve the dashboard in the background for the life of `kiln start`. Its URL
+/// goes to stdout, or to stderr when stdout carries JSON. A dashboard that
+/// cannot start is reported and does not stop the run.
+fn embedded_dashboard(engine: &Engine, json: bool) -> Option<kiln::dashboard::Announcement> {
+    let bind = DASHBOARD_BIND
+        .parse()
+        .expect("valid default dashboard address");
+    let started = kiln::web::WebServer::bind_next_free(bind).and_then(|server| {
+        let url = server.url();
+        let announcement = kiln::dashboard::Announcement::new(&engine.repository, &url)?;
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let _ = server.serve(engine, None, kiln::web::Home::Dashboard, &NEVER);
+        });
+        Ok((url, announcement))
+    });
+    match started {
+        Ok((url, announcement)) => {
+            if json {
+                eprintln!("Kiln web view: {url}");
+            } else {
+                println!("Kiln web view: {url}");
+            }
+            Some(announcement)
+        }
+        Err(error) => {
+            eprintln!("Kiln: dashboard unavailable: {error:#}");
+            None
+        }
+    }
 }
 fn main() {
     if let Err(error) = run() {

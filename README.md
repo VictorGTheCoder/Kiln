@@ -115,6 +115,8 @@ kiln status --json     # machine-readable summary (null when there is no run)
 
 The summary shows the run status, how many tickets are in each stage (planned, waiting, implementing, integrating, integrated, delivering, delivered, blocked, stopped), the active ticket, and each pull request with its CI status.
 
+Watch runs in the browser with `kiln dashboard`, which serves a dashboard of the repository's runs without starting one. `kiln start` serves the same dashboard for as long as it runs. Both print the URL (`Kiln web view: http://127.0.0.1:3000`, or the next free port when 3000 is taken; `kiln dashboard --bind ADDR` picks another loopback address). The page lists the runs with their status and shows the selected run's tickets on a kanban by stage (planned, implementing, review, integrating, PR, CI), built from the recorded run state, so earlier runs appear too. Its data comes from `/api/dashboard/runs` and `/api/dashboard/runs/RUN_ID`. The server binds to loopback only and rejects foreign `Host` headers. While it runs, `kiln status` shows its URL.
+
 Prepare a run from one or more approved Markdown specs:
 
 ```sh
