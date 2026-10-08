@@ -44,6 +44,61 @@ impl Engine {
         Ok(())
     }
 
+    /// True while another process owns the run's scheduler (or publication).
+    pub fn is_owned_elsewhere(&self, id: &str) -> Result<bool> {
+        match self.own_run(id) {
+            Ok(_owner) => Ok(false),
+            Err(error) if error.to_string().contains("active in another process") => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The most recently created run matching `keep`.
+    fn latest_run_where(
+        &self,
+        keep: impl Fn(&crate::Run) -> Result<bool>,
+    ) -> Result<Option<crate::Run>> {
+        let mut latest: Option<crate::Run> = None;
+        for id in self.list()? {
+            let run = self.inspect(&id)?;
+            if latest
+                .as_ref()
+                .is_none_or(|old| old.created_unix_ms < run.created_unix_ms)
+                && keep(&run)?
+            {
+                latest = Some(run);
+            }
+        }
+        Ok(latest)
+    }
+
+    /// Id of the latest run whose scheduler is live in another process: the
+    /// target of `kiln pause` and `kiln cancel` without an id.
+    pub fn latest_active_run(&self) -> Result<Option<String>> {
+        Ok(self
+            .latest_run_where(|run| {
+                Ok(run.status == "running" && self.is_owned_elsewhere(&run.id)?)
+            })?
+            .map(|run| run.id))
+    }
+
+    /// The latest backlog run that can continue: paused, stopped by a limit, or
+    /// left `running` by a process that is gone. The target of `kiln resume`.
+    pub fn latest_resumable_run(&self) -> Result<Option<crate::Run>> {
+        self.latest_run_where(|run| {
+            let backlog = run
+                .backlog
+                .as_ref()
+                .is_some_and(|backlog| backlog.mode == "issue-graph");
+            Ok(backlog
+                && match run.status.as_str() {
+                    "paused" | "limit_exhausted" => true,
+                    "running" => !self.is_owned_elsewhere(&run.id)?,
+                    _ => false,
+                })
+        })
+    }
+
     pub(crate) fn requested_control(&self, id: &str) -> Result<Option<String>> {
         let target = path(self, id);
         match fs::read_to_string(target) {
