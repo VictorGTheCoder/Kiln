@@ -1290,7 +1290,7 @@ fn run() -> Result<()> {
                     claude,
                 },
             )?;
-            interrupt::install(&engine);
+            interrupt::install(&engine)?;
             // Fixtures stand in for every agent call, so no provider is needed.
             let (provider, codex, claude) = if planning_fixture.is_some()
                 && run_fixture.is_some()
@@ -1580,7 +1580,7 @@ fn run() -> Result<()> {
                 Report::Start { provider }
             };
             eprintln!("Resuming run {} (status: {}).", run.id, run.status);
-            interrupt::install(&engine);
+            interrupt::install(&engine)?;
             return deliver(
                 &engine,
                 &run.id,

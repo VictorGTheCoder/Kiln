@@ -7,6 +7,7 @@
 //! run stops at its next safe point. Between those phases the main thread checks
 //! [`requested`] itself and records the pause. Further Ctrl-C presses are only
 //! acknowledged: the handler stays installed, so they never cut a write short.
+use anyhow::{Context, Result};
 use kiln::Engine;
 use std::{
     sync::{
@@ -24,16 +25,21 @@ extern "C" fn on_sigint(_: libc::c_int) {
 }
 
 /// Turn SIGINT into pause requests for the rest of the process.
-pub fn install(engine: &Engine) {
-    unsafe {
+pub fn install(engine: &Engine) -> Result<()> {
+    let installed = unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
         action.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut action.sa_mask);
-        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut())
+    };
+    if installed != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("cannot install the Ctrl-C handler that pauses the run");
     }
     let engine = engine.clone();
     std::thread::spawn(move || watch_loop(&engine));
+    Ok(())
 }
 
 /// Record the run that Ctrl-C should pause.
@@ -48,6 +54,8 @@ pub fn requested() -> bool {
 
 fn watch_loop(engine: &Engine) {
     let mut seen = 0;
+    // The run whose pause request was accepted; it is never written again.
+    let mut requested: Option<String> = None;
     loop {
         let count = INTERRUPTS.load(Ordering::SeqCst);
         let run = RUN.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -68,11 +76,14 @@ fn watch_loop(engine: &Engine) {
             seen = count;
         }
         if count > 0 {
-            if let Some(id) = &run {
-                // Only an owned, running run takes a control request; retry so a
-                // scheduler-to-publication handover cannot drop the pause.
-                if engine.inspect(id).is_ok_and(|run| run.status == "running") {
-                    let _ = engine.request_control(id, "pause");
+            if let Some(id) = run.filter(|id| requested.as_ref() != Some(id)) {
+                // Only an owned, running run takes a control request; retry until
+                // one is accepted so a scheduler-to-publication handover cannot
+                // drop the pause, then leave the request alone.
+                if engine.inspect(&id).is_ok_and(|run| run.status == "running")
+                    && engine.request_control(&id, "pause").is_ok()
+                {
+                    requested = Some(id);
                 }
             }
         }

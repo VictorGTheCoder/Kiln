@@ -384,3 +384,32 @@ fn repeated_ctrl_c_while_awaiting_ci_pauses_once_and_resume_keeps_the_pull_reque
     assert_eq!(target.sessions_for(&id, FIRST), 1);
     assert_eq!(target.sessions_for(&id, SECOND), 1);
 }
+
+#[test]
+fn ctrl_c_requests_the_pause_once_instead_of_rewriting_it() {
+    use std::os::unix::fs::MetadataExt;
+    let target = Target::new();
+    let child = target.spawn_start();
+    let id = target.wait_until_implementing_first();
+    let control = target.repo.join(".kiln/runs").join(format!("{id}.control"));
+
+    sigint(&child);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !control.exists() {
+        assert!(Instant::now() < deadline, "Ctrl-C never requested a pause");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let stamp = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.ino(), metadata.mtime(), metadata.mtime_nsec())
+    };
+    let first = stamp(&control);
+    thread::sleep(Duration::from_millis(400));
+    let later = stamp(&control);
+    target.release();
+    let (status, _stdout, stderr) = finish(child);
+
+    assert_eq!(first, later, "the pause request was written again");
+    assert!(status.success(), "clean exit after Ctrl-C: {stderr}");
+    assert_eq!(target.run(&id)["status"], "paused");
+}
