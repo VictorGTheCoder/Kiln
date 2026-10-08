@@ -85,22 +85,14 @@ impl Actions {
             .filter_map(|id| self.engine.inspect(id).ok())
             .collect();
         for run in &recorded {
-            let live = run.status == "running" && crate::web::is_live(&self.engine, &run.id);
+            let live = run.status == "running" && self.engine.is_owned_elsewhere(&run.id)?;
             any_live |= live;
             let mut offered: Vec<&str> = Vec::new();
             if live {
                 offered.extend(["pause", "cancel"]);
             }
             // The same candidates as `kiln resume`; the latest one is offered.
-            let candidate = run
-                .backlog
-                .as_ref()
-                .is_some_and(|b| b.mode == "issue-graph")
-                && match run.status.as_str() {
-                    "paused" | "limit_exhausted" => true,
-                    "running" => !live,
-                    _ => false,
-                };
+            let candidate = self.engine.is_resumable(run)?;
             if candidate && resumable.is_none_or(|old| old.created_unix_ms < run.created_unix_ms) {
                 resumable = Some(run);
             }

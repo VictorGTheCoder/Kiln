@@ -75,18 +75,22 @@ impl Engine {
     /// The latest backlog run that can continue: paused, stopped by a limit, or
     /// left `running` by a process that is gone. The target of `kiln resume`.
     pub fn latest_resumable_run(&self) -> Result<Option<crate::Run>> {
-        self.latest_run_where(|run| {
-            let backlog = run
-                .backlog
-                .as_ref()
-                .is_some_and(|backlog| backlog.mode == "issue-graph");
-            Ok(backlog
-                && match run.status.as_str() {
-                    "paused" | "limit_exhausted" => true,
-                    "running" => !self.is_owned_elsewhere(&run.id)?,
-                    _ => false,
-                })
-        })
+        self.latest_run_where(|run| self.is_resumable(run))
+    }
+
+    /// Whether `kiln resume` may continue `run`: a backlog run that is paused,
+    /// stopped by a limit, or recorded `running` with no live scheduler.
+    pub fn is_resumable(&self, run: &crate::Run) -> Result<bool> {
+        let backlog = run
+            .backlog
+            .as_ref()
+            .is_some_and(|backlog| backlog.mode == "issue-graph");
+        Ok(backlog
+            && match run.status.as_str() {
+                "paused" | "limit_exhausted" => true,
+                "running" => !self.is_owned_elsewhere(&run.id)?,
+                _ => false,
+            })
     }
 
     pub(crate) fn requested_control(&self, id: &str) -> Result<Option<String>> {
