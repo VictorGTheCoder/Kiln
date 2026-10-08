@@ -9,9 +9,11 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     thread,
+    time::Duration,
 };
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 
 /// Seconds between automatic reloads of a run that is still recorded as running.
 const REFRESH_SECONDS: u32 = 3;
@@ -32,6 +34,88 @@ pub struct BacklogLaunch {
     pub repair_fixture: Option<PathBuf>,
 }
 
+/// Number of successive ports tried after a taken one.
+const PORT_ATTEMPTS: u16 = 100;
+const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+/// What a web server shows at `/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Home {
+    /// The server-rendered runs list (`kiln serve`).
+    Runs,
+    /// The dashboard page (`kiln dashboard`, `kiln start`); the runs list
+    /// stays at `/runs`.
+    Dashboard,
+}
+
+/// A bound loopback web server, not yet serving requests.
+pub struct WebServer {
+    server: Server,
+    address: SocketAddr,
+}
+impl WebServer {
+    /// Bind exactly `bind`, which must be a loopback address.
+    pub fn bind(bind: SocketAddr) -> Result<Self> {
+        Self::bind_with(bind, 1)
+    }
+    /// Bind `bind`, or the next free port after it when it is taken.
+    pub fn bind_next_free(bind: SocketAddr) -> Result<Self> {
+        Self::bind_with(bind, PORT_ATTEMPTS)
+    }
+    fn bind_with(bind: SocketAddr, attempts: u16) -> Result<Self> {
+        if !bind.ip().is_loopback() {
+            bail!("the local web view must bind to a loopback address");
+        }
+        let mut address = bind;
+        let mut tried = 0;
+        loop {
+            match Server::http(address) {
+                Ok(server) => {
+                    let address = server.server_addr().to_ip().unwrap_or(address);
+                    return Ok(Self { server, address });
+                }
+                Err(error) => {
+                    tried += 1;
+                    let in_use = error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse);
+                    if !in_use || tried >= attempts || address.port() == 0 {
+                        bail!("cannot start local web view: {error}");
+                    }
+                    let Some(next) = address.port().checked_add(1) else {
+                        bail!("cannot start local web view: no free port after {bind}");
+                    };
+                    address.set_port(next);
+                }
+            }
+        }
+    }
+    pub fn url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+    /// Handle requests until `stop` is set (checked at least every 200 ms).
+    pub fn serve(
+        self,
+        engine: Engine,
+        backlog: Option<BacklogLaunch>,
+        home: Home,
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        let site = Site {
+            engine,
+            backlog,
+            home,
+            port: self.address.port(),
+        };
+        while !stop.load(Ordering::Relaxed) {
+            if let Some(request) = self.server.recv_timeout(Duration::from_millis(200))? {
+                site.handle(request);
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn serve(engine: Engine, bind: SocketAddr) -> Result<()> {
     serve_with_backlog(engine, bind, None)
 }
@@ -41,19 +125,43 @@ pub fn serve_with_backlog(
     bind: SocketAddr,
     backlog: Option<BacklogLaunch>,
 ) -> Result<()> {
-    if !bind.ip().is_loopback() {
-        bail!("the local web view must bind to a loopback address");
-    }
-    let server =
-        Server::http(bind).map_err(|e| anyhow::anyhow!("cannot start local web view: {e}"))?;
-    let bound = server.server_addr().to_ip().unwrap_or(bind);
-    println!("Kiln web view: http://{}", server.server_addr());
+    let server = WebServer::bind(bind)?;
+    println!("Kiln web view: {}", server.url());
     std::io::stdout().flush()?;
-    for request in server.incoming_requests() {
+    let _announcement = crate::dashboard::Announcement::new(&engine.repository, &server.url())?;
+    server.serve(engine, backlog, Home::Runs, &AtomicBool::new(false))
+}
+
+/// Request routing shared by every request of one server.
+struct Site {
+    engine: Engine,
+    backlog: Option<BacklogLaunch>,
+    home: Home,
+    port: u16,
+}
+impl Site {
+    /// Answer one request. Requests are answered one at a time on the server
+    /// thread; a long-lived response (an event stream) must move its
+    /// `Request` into its own thread here instead of blocking the loop.
+    fn handle(&self, request: Request) {
+        let (status, content_type, body) = self.respond(&request);
+        let response = Response::from_string(body)
+            .with_status_code(status)
+            .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
+            .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+            .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap())
+            .with_header(
+                Header::from_bytes("Content-Security-Policy", CONTENT_SECURITY_POLICY).unwrap(),
+            );
+        let _ = request.respond(response);
+    }
+    fn respond(&self, request: &Request) -> (u16, &'static str, String) {
+        let engine = &self.engine;
+        let backlog = self.backlog.as_ref();
         let expected_hosts = [
-            format!("localhost:{}", bound.port()),
-            format!("127.0.0.1:{}", bound.port()),
-            format!("[::1]:{}", bound.port()),
+            format!("localhost:{}", self.port),
+            format!("127.0.0.1:{}", self.port),
+            format!("[::1]:{}", self.port),
         ];
         let valid_host = request.headers().iter().any(|header| {
             header.field.equiv("Host")
@@ -66,7 +174,7 @@ pub fn serve_with_backlog(
             .iter()
             .find(|header| header.field.equiv("Host"))
             .map(|h| h.value.as_str());
-        let (status, content_type, body) = if !valid_host {
+        if !valid_host {
             (
                 400,
                 "text/plain; charset=utf-8",
@@ -109,7 +217,7 @@ pub fn serve_with_backlog(
                     "Invalid request body".to_owned(),
                 )
             } else {
-                match mutate(&engine, backlog.as_ref(), request.url().split('?').next().unwrap_or("/")) {
+                match mutate(engine, backlog, request.url().split('?').next().unwrap_or("/")) {
                     Ok(body) => (200, "text/html; charset=utf-8", body),
                     Err(error) => (409, "text/html; charset=utf-8", format!("<!doctype html><title>Action unavailable</title><p>{}</p><p><a href=\"/\">Back to runs</a></p>", esc(&format!("{error:#}")))),
                 }
@@ -122,26 +230,44 @@ pub fn serve_with_backlog(
             )
         } else {
             let path = request.url().split('?').next().unwrap_or("/");
-            match render(&engine, path, backlog.as_ref()) {
+            let rendered = match dashboard_route(engine, self.home, path) {
+                Some(result) => result,
+                None => render(engine, path, backlog),
+            };
+            match rendered {
                 Ok((kind, body)) => (200, kind, body),
                 Err(error) => (404, "text/plain; charset=utf-8", format!("Kiln: {error:#}")),
             }
-        };
-        let response = Response::from_string(body)
-            .with_status_code(status)
-            .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
-            .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
-            .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap())
-            .with_header(
-                Header::from_bytes(
-                    "Content-Security-Policy",
-                    "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
-                )
-                .unwrap(),
-            );
-        let _ = request.respond(response);
+        }
     }
-    Ok(())
+}
+
+/// Dashboard page, script and JSON endpoints; `None` for other paths.
+fn dashboard_route(
+    engine: &Engine,
+    home: Home,
+    path: &str,
+) -> Option<Result<(&'static str, String)>> {
+    use crate::dashboard;
+    let page = || Ok(("text/html; charset=utf-8", dashboard::PAGE.to_owned()));
+    Some(match path {
+        "/dashboard" => page(),
+        "/" if home == Home::Dashboard => page(),
+        "/dashboard.js" => Ok((
+            "text/javascript; charset=utf-8",
+            dashboard::SCRIPT.to_owned(),
+        )),
+        "/api/dashboard/runs" => dashboard::runs(engine)
+            .and_then(|runs| Ok(("application/json", serde_json::to_string(&runs)?))),
+        _ => {
+            let id = path.strip_prefix("/api/dashboard/runs/")?;
+            validate_id(id).and_then(|()| {
+                let run = engine.inspect(id)?;
+                let body = serde_json::to_string(&dashboard::Board::of(&run))?;
+                Ok(("application/json", redact_for_web(&run, &body)))
+            })
+        }
+    })
 }
 fn render(
     engine: &Engine,
@@ -164,7 +290,7 @@ fn render(
         }
         return Ok(("application/json", format!("[{}]", values.join(","))));
     }
-    let (title, refresh, content) = if path == "/" {
+    let (title, refresh, content) = if path == "/" || path == "/runs" {
         let mut content = "<h1>Kiln workflow runs</h1><ul>".to_owned();
         if backlog.is_some() {
             content = "<h1>Kiln workflow runs</h1><form method=\"post\" action=\"/actions/start\"><button type=\"submit\">Start backlog run</button><p class=\"muted\">Plans and runs all open issues using the configured local workflow.</p></form><ul>".to_owned();

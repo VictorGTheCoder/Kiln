@@ -284,11 +284,40 @@ fn start_json_prints_the_recorded_run() {
 }
 
 #[test]
+fn start_prints_the_url_of_its_embedded_dashboard() {
+    let target = Target::new();
+
+    let output = target.start(&[]);
+
+    let stdout = success(&output);
+    let url = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("Kiln web view: http://"))
+        .unwrap_or_else(|| panic!("start announces its dashboard:\n{stdout}"));
+    let port: u16 = url.strip_prefix("127.0.0.1:").unwrap().parse().unwrap();
+    assert!((3000..3100).contains(&port), "{url}");
+    assert!(
+        !target.repo.join(".kiln/dashboard.json").exists(),
+        "the dashboard record is removed when start ends"
+    );
+
+    // With --json the URL goes to stderr so stdout stays one JSON document.
+    let output = target.start(&["--fresh", "--json"]);
+    json_of(&output);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Kiln web view: http://127.0.0.1:"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn start_is_listed_in_help() {
     let target = Target::new();
     let help = success(&target.kiln(&["--help"]));
     assert!(
-        help.lines().any(|line| line.trim_start().starts_with("start ")),
+        help.lines()
+            .any(|line| line.trim_start().starts_with("start ")),
         "{help}"
     );
 }
