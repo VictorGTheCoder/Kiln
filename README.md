@@ -107,6 +107,16 @@ Deliver the backlog with `kiln start`, which takes the same inputs and overrides
 
 Press Ctrl-C during `kiln start` to pause: Kiln lets active ticket work reach a safe point, records the run as paused and exits; pressing Ctrl-C again does not stop it sooner. `kiln resume` continues the latest paused or interrupted run with the same inferred inputs, without repeating completed commits, pull requests or comments. From another terminal, `kiln pause` and `kiln cancel` act on the latest active run. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
 
+Check on the latest run at any time:
+
+```sh
+kiln status            # latest run of this repository
+kiln status RUN_ID     # a specific run
+kiln status --json     # machine-readable summary (null when there is no run)
+```
+
+The summary shows the run status, how many tickets are in each stage (planned, waiting, implementing, integrating, integrated, delivering, delivered, blocked, stopped), the active ticket, and each pull request with its CI status.
+
 Prepare a run from one or more approved Markdown specs:
 
 ```sh

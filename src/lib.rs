@@ -3,6 +3,7 @@ pub mod control;
 pub mod defaults;
 mod engine;
 mod state;
+pub mod status;
 pub mod web;
 pub use config::ProjectConfig;
 pub use engine::Engine;
