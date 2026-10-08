@@ -101,6 +101,16 @@ kiln plan
 | GitHub repository | the `origin` remote (`https://github.com/OWNER/REPO.git` or `git@github.com:OWNER/REPO.git`) | `--github-repo OWNER/REPO` |
 | Provider | the optional `"agent": "codex"` or `"claude"` field of `kiln.json`, found on `PATH`; without it, `codex` then `claude` on `PATH` | `--codex PATH` or `--claude PATH` |
 
+Check on the latest run at any time:
+
+```sh
+kiln status            # latest run of this repository
+kiln status RUN_ID     # a specific run
+kiln status --json     # machine-readable summary (null when there is no run)
+```
+
+The summary shows the run status, how many tickets are in each stage (planned, waiting, implementing, integrating, integrated, delivering, delivered, blocked, stopped), the active ticket, and each pull request with its CI status.
+
 The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus `timeout_seconds`) is still required; its `installation` may be omitted when the executable is on `PATH`. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
 
 Prepare a run from one or more approved Markdown specs:
