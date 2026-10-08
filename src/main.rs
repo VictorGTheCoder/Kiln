@@ -792,28 +792,14 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
     report.emit(&run)?;
     Ok(())
 }
-/// Id of the most recently created run, if any.
-fn latest_run(engine: &Engine) -> Result<Option<String>> {
-    let mut latest: Option<(u128, String)> = None;
-    for id in engine.list()? {
-        let created = engine.inspect(&id)?.created_unix_ms;
-        if latest
-            .as_ref()
-            .is_none_or(|old| *old < (created, id.clone()))
-        {
-            latest = Some((created, id));
-        }
-    }
-    Ok(latest.map(|(_, id)| id))
-}
 /// `kiln logs [id] [-f]`: print a run's journal, optionally following it
 /// until no process appends to it any more.
 fn logs(engine: &Engine, id: Option<String>, follow: bool) -> Result<()> {
     use std::io::Write;
     let id = match id {
         Some(id) => id,
-        None => match latest_run(engine)? {
-            Some(id) => id,
+        None => match kiln::status::latest(engine)? {
+            Some(run) => run.id,
             None => {
                 println!("No runs yet in this repository; `kiln start` begins one.");
                 return Ok(());
