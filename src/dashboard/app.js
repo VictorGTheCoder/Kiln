@@ -138,6 +138,7 @@ function renderBoard(board) {
     renderAttention(attention),
     columns,
   );
+  setActiveTickets(board.active || []);
 }
 
 async function refreshBoard() {
@@ -173,22 +174,38 @@ function setLive(text) {
 // Provider activity: every provider event of the run arrives as a `provider`
 // frame with its raw (already redacted) line and a readable summary, if any.
 // Each event is kept in both forms; the Raw events toggle picks which shows.
+// Lines of the tickets the run works on now (`board.active`: implementing, in
+// review or in correction) show by default; All tickets shows every line.
+// With no active ticket (planning, publication) every line shows.
 const MAX_PROVIDER = 500;
-const provider = { lines: 0, summaries: 0 };
+let activeTickets = [];
 function resetProvider() {
-  provider.lines = 0;
-  provider.summaries = 0;
   document.getElementById("provider-lines").replaceChildren();
-  document.getElementById("provider-active").textContent = "";
+  updateProviderEmpty();
+}
+function markOther(line) {
+  line.classList.toggle("other", activeTickets.length > 0 && !activeTickets.includes(line.dataset.ticket));
+}
+function setActiveTickets(active) {
+  activeTickets = active;
+  document.getElementById("provider-active").textContent = active.length ? "· " + active.join(", ") : "";
+  for (const line of document.getElementById("provider-lines").children) markOther(line);
   updateProviderEmpty();
 }
 function updateProviderEmpty() {
   const raw = document.getElementById("provider-raw").checked;
+  const all = document.getElementById("provider-all").checked;
+  const shown = [...document.getElementById("provider-lines").children]
+    .filter((line) => all || !line.classList.contains("other"));
+  const lines = shown.filter((line) => line.classList.contains("raw")).length;
+  const summaries = shown.filter((line) => line.classList.contains("summary")).length;
   const empty = document.getElementById("provider-empty");
-  if (provider.lines === 0) {
-    empty.textContent = "No provider activity for this run.";
+  if (lines === 0) {
+    empty.textContent = document.getElementById("provider-lines").children.length
+      ? "No provider activity for the active ticket yet; show all tickets for earlier activity."
+      : "No provider activity for this run.";
     empty.hidden = false;
-  } else if (!raw && provider.summaries === 0) {
+  } else if (!raw && summaries === 0) {
     empty.textContent = "No readable provider activity yet; show the raw events for details.";
     empty.hidden = false;
   } else {
@@ -198,20 +215,25 @@ function updateProviderEmpty() {
 function addProvider(event) {
   const list = document.getElementById("provider-lines");
   const who = el("span", { class: "who" }, event.ticket + " · " + event.stage + "  ");
+  const added = [];
   if (event.summary) {
-    list.append(el("li", { class: "summary" }, who.cloneNode(true), event.summary));
-    provider.summaries += 1;
+    added.push(el("li", { class: "summary", "data-ticket": event.ticket }, who.cloneNode(true), event.summary));
   }
-  list.append(el("li", { class: "raw" }, who, event.line));
-  provider.lines += 1;
+  added.push(el("li", { class: "raw", "data-ticket": event.ticket }, who, event.line));
+  for (const line of added) {
+    markOther(line);
+    list.append(line);
+  }
   while (list.children.length > MAX_PROVIDER) list.firstChild.remove();
-  // The newest session is the active ticket's.
-  document.getElementById("provider-active").textContent = "· " + event.ticket + " · " + event.stage;
   if (list.scrollHeight - list.scrollTop - list.clientHeight < 80) list.scrollTop = list.scrollHeight;
   updateProviderEmpty();
 }
 document.getElementById("provider-raw").addEventListener("change", (change) => {
   document.getElementById("provider").classList.toggle("raw", change.target.checked);
+  updateProviderEmpty();
+});
+document.getElementById("provider-all").addEventListener("change", (change) => {
+  document.getElementById("provider").classList.toggle("all", change.target.checked);
   updateProviderEmpty();
 });
 

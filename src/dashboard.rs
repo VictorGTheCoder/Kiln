@@ -46,6 +46,9 @@ pub struct Board {
     pub stages: Vec<Column>,
     /// What the operator should notice, in recorded order.
     pub attention: Vec<Attention>,
+    /// Tickets the run is working on now (implementation, review or
+    /// correction): whose provider activity the dashboard shows by default.
+    pub active: Vec<String>,
 }
 /// Something that needs the operator's attention.
 #[derive(Debug, Clone, Serialize)]
@@ -267,8 +270,28 @@ impl Board {
             github_repository: run.backlog.as_ref().map(|b| b.github_repository.clone()),
             stages,
             attention: attention(run),
+            active: active_tickets(run),
         }
     }
+}
+
+/// Tickets holding an implementation slot (implementing, in review or in
+/// correction) while the run is recorded as running.
+fn active_tickets(run: &Run) -> Vec<String> {
+    let Some(scheduler) = run.scheduler.as_ref().filter(|_| run.status == "running") else {
+        return Vec::new();
+    };
+    scheduler
+        .active
+        .iter()
+        .filter(|id| {
+            scheduler
+                .tickets
+                .iter()
+                .any(|t| &t.id == *id && t.state == "implementing")
+        })
+        .cloned()
+        .collect()
 }
 
 /// An implementing ticket is in review once its latest implementation finished.

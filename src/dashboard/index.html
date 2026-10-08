@@ -75,6 +75,8 @@ a{color:var(--accent)}
 #provider.raw #provider-lines li.raw{display:list-item}
 #provider.raw #provider-lines li.summary{display:none}
 #provider-empty{margin:0;padding:8px;border:1px dashed var(--line);border-radius:6px}
+#provider .toggle+.toggle{margin-left:12px}
+#provider:not(.all) #provider-lines li.other{display:none}
 </style>
 </head>
 <body>
@@ -94,6 +96,7 @@ a{color:var(--accent)}
 <section id="board" aria-live="polite"><p class="empty" id="placeholder">Select a run to see its tickets.</p></section>
 <section id="events" aria-label="Run events"><h2>Run events <span class="muted" id="live"></span></h2><ol id="activity"></ol></section>
 <section id="provider" aria-label="Provider activity"><h2>Provider activity <span class="muted" id="provider-active"></span>
+<label class="toggle"><input type="checkbox" id="provider-all"> All tickets</label>
 <label class="toggle"><input type="checkbox" id="provider-raw"> Raw events</label></h2>
 <ol id="provider-lines" aria-live="polite"></ol><p class="empty" id="provider-empty">No provider activity for this run.</p></section>
 </div>

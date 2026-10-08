@@ -651,6 +651,48 @@ fn dashboard_has_a_provider_activity_panel_with_a_raw_toggle_and_an_empty_state(
 }
 
 #[test]
+fn provider_panel_follows_the_tickets_the_run_is_working_on_with_a_way_to_see_all() {
+    let repo = Repo::new();
+    let id = repo.planned();
+    let approved = json!({"outcome":"approved","evidence":"Reviewed"});
+    repo.write(
+        "scenario.json",
+        json!({"tickets":{
+            "a":{"implementation":{"files":{"a.txt":"a\n"},"outcome":"completed"},"review":{"standards":approved,"spec":approved},"await_file":".kiln/release"},
+            "b":{"implementation":{"files":{"b.txt":"b\n"},"outcome":"completed"},"review":{"standards":approved,"spec":approved}}
+        }}),
+    );
+    let mut run = repo
+        .command(&["run", &id, "--fixture", "scenario.json"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_journal(&repo, &id, "\"implementation\"");
+    let server = repo.dashboard(&["--bind", "127.0.0.1:0"]);
+
+    // The board names the tickets in implementation, review or correction.
+    let board = server.get(&format!("/api/dashboard/runs/{id}")).json();
+    assert_eq!(board["active"], json!(["a"]), "{board:#}");
+
+    fs::write(repo.path.join(".kiln/release"), "").unwrap();
+    assert!(run.wait().unwrap().success());
+    let board = server.get(&format!("/api/dashboard/runs/{id}")).json();
+    assert_eq!(board["active"], json!([]), "{board:#}");
+
+    // The panel shows the active tickets' lines by default; a toggle shows all.
+    let page = server.get("/").body;
+    assert!(
+        page.contains("type=\"checkbox\" id=\"provider-all\""),
+        "all-tickets toggle: {page}"
+    );
+    assert!(page.contains("id=\"provider-raw\""), "{page}");
+    let script = server.get("/dashboard.js").body;
+    assert!(script.contains("board.active"), "{script}");
+    assert!(script.contains("provider-all"), "{script}");
+}
+
+#[test]
 fn board_lists_failures_divergences_and_autonomous_decisions_as_attention_items() {
     let repo = Repo::new();
     let planned = repo.planned();
