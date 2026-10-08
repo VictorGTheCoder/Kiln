@@ -136,6 +136,10 @@ pub trait TicketProviders: Sync {
     }
     /// Cancel every in-flight provider session (the `stop` limit policy).
     fn stop_active(&self) {}
+    /// Provider name reported in the run journal.
+    fn provider(&self) -> &str {
+        "provider"
+    }
 }
 
 pub fn implementation_concurrency(run: &Run) -> usize {
@@ -229,6 +233,17 @@ impl Engine {
             run.scheduler = Some(state.clone());
             Ok(state)
         })?;
+        self.journal(
+            id,
+            None,
+            "run",
+            "running",
+            format!(
+                "{} {} ticket(s)",
+                if resume { "resuming" } else { "scheduling" },
+                state.tickets.len()
+            ),
+        );
         let gate = Gate {
             limits: state.limits.as_ref().expect("limits").configured.clone(),
             started: Instant::now(),
@@ -426,7 +441,7 @@ impl Engine {
             "blocked"
         }
         .into();
-        self.transact(id, |run| {
+        let run = self.transact(id, |run| {
             if let Some(limits) = &mut state.limits {
                 limits.exhausted = exhausted;
                 limits.observe(run);
@@ -435,7 +450,23 @@ impl Engine {
             run.scheduler = Some(state.clone());
             self.clear_control(id)?;
             Ok(run.clone())
-        })
+        })?;
+        let integrated = state
+            .tickets
+            .iter()
+            .filter(|t| t.state == "integrated")
+            .count();
+        self.journal(
+            id,
+            None,
+            "run",
+            &state.status,
+            format!(
+                "{integrated} of {} ticket(s) integrated",
+                state.tickets.len()
+            ),
+        );
+        Ok(run)
     }
 
     fn record_schedule(&self, id: &str, state: &mut SchedulerState, gate: &Gate) -> Result<()> {
@@ -547,16 +578,44 @@ impl Engine {
                 Ok(s) if matches!(s.status.as_str(), "implemented" | "failed") => current,
                 _ => {
                     let implementer = providers.implementer(ticket)?;
+                    self.journal(
+                        id,
+                        Some(ticket),
+                        "implementation",
+                        "started",
+                        format!("with {}", providers.provider()),
+                    );
                     self.implement_ticket(id, ticket, implementer.as_ref())?
                 }
             };
             self.checkpoint(id, gate)?;
             let mut session = latest_session(&run, ticket)?;
+            if session.status == "failed" {
+                self.journal(
+                    id,
+                    Some(ticket),
+                    "implementation",
+                    "failed",
+                    session.failure.clone().unwrap_or_default(),
+                );
+            }
             if session.status == "implemented" && !crate::review::reviewed(&run, &session.id) {
                 self.checkpoint(id, gate)?;
                 let reviewer = providers.reviewer(ticket)?;
                 run = self.review_ticket(id, ticket, reviewer.as_ref())?;
                 session = latest_session(&run, ticket)?;
+                let passed = session.status == "implemented" && self.review_gate(&run, &session)?;
+                self.journal(
+                    id,
+                    Some(ticket),
+                    "review",
+                    if passed { "passed" } else { "failed" },
+                    if passed {
+                        String::new()
+                    } else {
+                        session.failure.clone().unwrap_or_default()
+                    },
+                );
             }
             let corrector = providers.corrector(ticket)?;
             if session.status != "implemented" || !self.review_gate(&run, &session)? {
@@ -627,6 +686,13 @@ impl Engine {
             .rev()
             .find(|i| i.ticket_id == ticket)
             .context("missing integration attempt")?;
+        self.journal(
+            id,
+            Some(ticket),
+            "integration",
+            &attempt.status,
+            attempt.failure.clone().unwrap_or_default(),
+        );
         if attempt.status != "integrated" {
             if let Some(e) = gate.exhausted() {
                 return Err(Halt::Limit(e.reason).into());
@@ -959,6 +1025,9 @@ impl TicketProviders for FixtureScenario {
         self.stopped.store(true, Ordering::SeqCst);
         self.signal.notify_all();
     }
+    fn provider(&self) -> &str {
+        "fixture"
+    }
 }
 
 /// Real providers: a fresh adapter (and therefore context and stop handle)
@@ -1019,6 +1088,9 @@ impl<P: crate::agent::Provider> TicketProviders for AgentProviders<P> {
                 isolation: isolation.clone(),
             }) as Box<dyn Replanner>
         }))
+    }
+    fn provider(&self) -> &str {
+        P::NAME
     }
     fn stop_active(&self) {
         if let Ok(stops) = self.stops.lock() {

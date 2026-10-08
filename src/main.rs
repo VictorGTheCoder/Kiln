@@ -158,6 +158,14 @@ enum Commands {
         #[arg(long, hide = true, conflicts_with_all = ["codex", "claude"])]
         repair_fixture: Option<PathBuf>,
     },
+    /// Print the event journal of the latest run (or of a given run).
+    Logs {
+        /// Run id [default: the latest run].
+        id: Option<String>,
+        /// Keep printing new events until the run finishes.
+        #[arg(short, long)]
+        follow: bool,
+    },
     /// Execute one eligible ticket in an isolated worktree.
     #[command(hide = true)]
     Implement {
@@ -665,6 +673,13 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
             }
             run.status = "completed".into();
             engine.save(&run)?;
+            engine.journal(
+                &run.id,
+                None,
+                "run",
+                "completed",
+                "no new actionable open issues",
+            );
             report.emit(&run)?;
             return Ok(());
         }
@@ -768,6 +783,57 @@ fn start_backlog(engine: &Engine, args: BacklogArgs, report: &Report) -> Result<
     }
     report.emit(&run)?;
     Ok(())
+}
+/// Id of the most recently created run, if any.
+fn latest_run(engine: &Engine) -> Result<Option<String>> {
+    let mut latest: Option<(u128, String)> = None;
+    for id in engine.list()? {
+        let created = engine.inspect(&id)?.created_unix_ms;
+        if latest
+            .as_ref()
+            .is_none_or(|old| *old < (created, id.clone()))
+        {
+            latest = Some((created, id));
+        }
+    }
+    Ok(latest.map(|(_, id)| id))
+}
+/// `kiln logs [id] [-f]`: print a run's journal, optionally following it
+/// until no process appends to it any more.
+fn logs(engine: &Engine, id: Option<String>, follow: bool) -> Result<()> {
+    use std::io::Write;
+    let id = match id {
+        Some(id) => id,
+        None => match latest_run(engine)? {
+            Some(id) => id,
+            None => {
+                println!("No runs yet in this repository; `kiln start` begins one.");
+                return Ok(());
+            }
+        },
+    };
+    engine.inspect(&id)?;
+    let journal = kiln::journal::Journal::of(engine, &id);
+    if !journal.exists() {
+        println!("Run {id} has no journal: no events were recorded for it.");
+        return Ok(());
+    }
+    let mut offset = 0;
+    let mut stdout = std::io::stdout();
+    loop {
+        // Check liveness before draining so the last events are never missed.
+        let live = follow && journal.has_writer();
+        let (events, next) = journal.read_from(offset)?;
+        offset = next;
+        for event in events {
+            writeln!(stdout, "{}", event.line())?;
+        }
+        stdout.flush()?;
+        if !live {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -1096,6 +1162,15 @@ fn run() -> Result<()> {
             } else {
                 Report::Start { provider }
             };
+            // One readable line per journal event as it happens; stdout stays
+            // pure JSON under --json.
+            kiln::journal::echo(move |event| {
+                if json {
+                    eprintln!("{}", event.line());
+                } else {
+                    println!("{}", event.line());
+                }
+            });
             return start_backlog(
                 &engine,
                 BacklogArgs {
@@ -1115,6 +1190,7 @@ fn run() -> Result<()> {
                 &report,
             );
         }
+        Commands::Logs { id, follow } => return logs(&engine, id, follow),
         Commands::Plan {
             id: Some(id),
             fixture,

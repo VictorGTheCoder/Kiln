@@ -414,6 +414,16 @@ impl Engine {
             plan: None, imported_issues: snapshot, integration_branch: None, sessions: Vec::new(), corrections: Vec::new(), reviews: Vec::new(), integrations: Vec::new(), validation_reports: Vec::new(), publication: None, decisions: Vec::new(), spec_revisions: Vec::new(), replans: Vec::new(), spec_replans: Vec::new(), recoveries: Vec::new(), synchronization: None,
         };
         self.save(&run)?;
+        self.journal(
+            &run.id,
+            None,
+            "run",
+            "prepared",
+            format!(
+                "froze {} open issue(s) of {github_repository}",
+                run.imported_issues.len()
+            ),
+        );
         Ok(run)
     }
 
@@ -650,7 +660,31 @@ impl Engine {
             }
         }
         self.save(run)
-            .with_context(|| format!("persist backlog state for {id}"))
+            .with_context(|| format!("persist backlog state for {id}"))?;
+        if run
+            .backlog
+            .as_ref()
+            .is_some_and(|backlog| backlog.mode == "issue-graph")
+        {
+            match &run.plan {
+                Some(plan) if plan.executable && run.status == "planned" => {
+                    for ticket in &plan.tickets {
+                        self.journal(id, Some(&ticket.id), "plan", "planned", &ticket.title);
+                    }
+                }
+                Some(plan) => {
+                    let findings = plan
+                        .findings
+                        .iter()
+                        .map(|f| format!("{}: {}", f.code, f.message))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    self.journal(id, None, "plan", "rejected", findings);
+                }
+                None => self.journal(id, None, "plan", "rejected", "plan is missing"),
+            }
+        }
+        Ok(())
     }
 
     /// Translate durable scheduler outcomes into explicit issue-level results.
