@@ -146,10 +146,14 @@ async function refreshBoard() {
     document.getElementById("updated").textContent = "Cannot reach Kiln: " + error.message;
   }
 }
-// Coalesce bursts of events into one board request.
+// Coalesce bursts of events into one board request. Run transitions also
+// change which actions apply, so the action buttons follow the stream too.
 function scheduleBoard() {
   clearTimeout(boardTimer);
-  boardTimer = setTimeout(refreshBoard, 150);
+  boardTimer = setTimeout(() => {
+    refreshBoard();
+    refreshActions();
+  }, 150);
 }
 
 function addActivity(event) {
