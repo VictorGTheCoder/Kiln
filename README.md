@@ -2,7 +2,7 @@
 
 Kiln runs coding agents as a recoverable, verifiable workflow—from open GitHub issues or approved specs to validated pull requests.
 
-Kiln owns the run. Agents handle individual jobs; Kiln keeps the plan, coordinates isolated work, records evidence, and decides what can proceed.
+Kiln owns the run. Agents handle individual jobs. Kiln keeps the plan, coordinates isolated work, records evidence, and decides what can proceed.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 
