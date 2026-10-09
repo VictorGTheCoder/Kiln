@@ -1,259 +1,117 @@
 # Kiln
 
-Kiln is a Rust orchestrator for spec-driven software development. Give it approved Markdown specs and it coordinates coding agents through planning, implementation, review, correction, integration, and validation, with a GitHub pull request as the final deliverable.
+Kiln runs coding agents as a recoverable, verifiable workflow—from open GitHub issues or approved specs to validated pull requests.
 
-The coding agent does not own the run. Kiln does.
+Kiln owns the run. Agents handle individual jobs; Kiln keeps the plan, coordinates isolated work, records evidence, and decides what can proceed.
 
-Agent sessions stay focused on individual jobs. Kiln keeps the dependency graph, decides what can run in parallel, records what happened, checks the result, and preserves enough state to recover when a longer run is interrupted.
+[![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
 
-Kiln currently supports Codex and Claude Code as coding agents. The provider boundary stays separate from the orchestration engine so additional agents can be added without changing the workflow.
+## Why Kiln
 
-## How it works
+- Independent tickets can run in parallel in separate Git worktrees.
+- A separate agent context reviews each implementation against the actual commit.
+- Failed reviews can trigger bounded correction cycles.
+- Integration and validation check the combined result before publication.
+- Runs persist across interruption and reconcile recorded progress with Git state.
+- Agents and project commands run under explicit isolation and allow-list policies.
+- Missing evidence is not success; opening a pull request does not authorize merging or deployment.
 
-```text
-approved specs
-    ↓
-verified tickets
-    ↓
-parallel implementation
-    ↓
-independent review
-    ↓
-corrections when needed
-    ↓
-integration
-    ↓
-global validation
-    ↓
-pull request
-```
+## Install
 
-Kiln treats autonomous coding as a workflow rather than one long agent conversation.
-
-It can:
-
-- turn approved specs into a dependency-aware implementation plan
-- verify requirement coverage and ticket dependencies before execution
-- run independent tickets concurrently in isolated Git worktrees
-- review implementations in contexts separate from the coding session
-- start correction cycles when required findings remain
-- integrate reviewed changes and validate the combined result
-- preserve frozen specs, evidence, decisions, limits, and recovery state
-- import and synchronize GitHub issues
-- publish a verified integration commit as a pull request
-
-A successful agent response is not enough for Kiln to consider a run complete. The resulting code still has to pass the configured review, integration, and validation steps.
-
-## Quick start
-
-Kiln currently builds from source.
-
-You need Rust and Git. On Linux, workflow execution also uses `bubblewrap` (`bwrap`) for process isolation.
-
-Install the `kiln` command from a checkout, so it is available from any directory:
+You need Rust and Git. Linux workflow execution also requires `bubblewrap` (`bwrap`).
 
 ```sh
+git clone https://github.com/VictorGTheCoder/Kiln.git
+cd Kiln
 cargo install --path .
 ```
 
-For development, `cargo build` and `cargo test` build and test it in place.
+Kiln installs from source. For development, use `cargo build` and `cargo test`.
 
-A target repository defines its build, test, startup, acceptance, and isolation policy in `kiln.json`.
+## Run Kiln on a repository
 
-For example:
+Add a `kiln.json` to the target repository to define project checks and isolation:
 
 ```json
 {
   "build": ["cargo", "build"],
   "test": ["cargo", "test"],
   "startup": ["cargo", "run"],
-  "acceptance_criteria": [
-    "The combined application fulfills the approved specs"
-  ],
+  "acceptance_criteria": ["The combined application fulfills the approved specs"],
   "isolation": {
     "network": "none",
     "runtime": "system",
-    "commands": [
-      ["cargo", "build"],
-      ["cargo", "test"],
-      ["cargo", "run"]
-    ],
+    "commands": [["cargo", "build"], ["cargo", "test"], ["cargo", "run"]],
     "secrets": {}
   }
 }
 ```
 
-### Plan the backlog with no flags
-
-From inside the target repository, plan its open GitHub issues:
+From that repository, plan its open GitHub issue graph, then start the run:
 
 ```sh
-cd /path/to/project
 kiln plan
+kiln start
 ```
 
-`kiln plan` freezes the open issue graph, plans and independently verifies it, prints a readable summary, then stops before delivery. `kiln plan --json` prints the recorded run as JSON instead. Kiln infers every input, and each has an override flag:
+Kiln infers the repository, `kiln.json`, GitHub repository from `origin`, and available coding agent. Use `--repo`, `--config`, `--github-repo`, `--codex`, or `--claude` to override inputs. `kiln plan --json` and `kiln start --json` print machine-readable run state; `kiln start --fresh` plans again instead of reusing an unchanged plan.
 
-| Input | Inferred from | Override |
-|-------|---------------|----------|
-| Repository | the current directory | `--repo PATH` |
-| Project configuration | `kiln.json` in the repository | `--config PATH` |
-| GitHub repository | the `origin` remote (`https://github.com/OWNER/REPO.git` or `git@github.com:OWNER/REPO.git`) | `--github-repo OWNER/REPO` |
-| Provider | the optional `"agent": "codex"` or `"claude"` field of `kiln.json`, found on `PATH`; without it, `codex` then `claude` on `PATH` | `--codex PATH` or `--claude PATH` |
+`kiln start` plans and verifies the issue graph, runs eligible tickets, delivers validated groups as pull requests, and waits for CI. You can also prepare a run from approved Markdown specs; see [configuration and CLI usage](docs/configuration.md).
 
-The provider section of `kiln.json` (`codex.auth` or `claude.credentials`, plus `timeout_seconds`) is still required; its `installation` may be omitted when the executable is on `PATH`.
+## Monitor and control a run
 
-Deliver the backlog with `kiln start`, which takes the same inputs and overrides. It plans the open issue graph, runs the tickets, opens the delivery pull requests and waits for CI, then prints a readable outcome (`--json` prints the recorded run). When the latest backlog run was planned by `kiln plan` and not started, and the open issues have not changed since, `kiln start` delivers that plan instead of planning again; `kiln start --fresh` always plans anew.
-
-Press Ctrl-C during `kiln start` to pause: Kiln lets active ticket work reach a safe point, records the run as paused and exits; pressing Ctrl-C again does not stop it sooner. `kiln resume` continues the latest paused or interrupted run with the same inferred inputs, without repeating completed commits, pull requests or comments. From another terminal, `kiln pause` and `kiln cancel` act on the latest active run. `kiln --help` lists the user-facing commands; the internal pipeline commands below remain callable.
-
-Check on the latest run at any time:
+`kiln start` serves a local dashboard while it runs. Use `kiln dashboard` to open the dashboard without starting a run. It shows runs, ticket stages, active work, pull requests, and CI status.
 
 ```sh
-kiln status            # latest run of this repository
-kiln status RUN_ID     # a specific run
-kiln status --json     # machine-readable summary (null when there is no run)
+kiln status
+kiln logs --follow
+kiln pause
+kiln resume
+kiln cancel
 ```
 
-The summary shows the run status, how many tickets are in each stage (planned, waiting, implementing, integrating, integrated, delivering, delivered, blocked, stopped), the active ticket, and each pull request with its CI status.
+`kiln status` summarizes the latest run. `kiln logs` reads its event journal. Pause lets active ticket work settle; resume reconciles state and continues. Cancel safely stops active work and is terminal.
 
-Watch runs in the browser with `kiln dashboard`, which serves a dashboard of the repository's runs without starting one. `kiln start` serves the same dashboard for as long as it runs. Both print the URL (`Kiln web view: http://127.0.0.1:3000`, or the next free port when 3000 is taken; `kiln dashboard --bind ADDR` picks another loopback address). The page lists the runs with their status and shows the selected run's tickets on a kanban by stage (planned, implementing, review, integrating, PR, CI), built from the recorded run state, so earlier runs appear too. Its data comes from `/api/dashboard/runs` and `/api/dashboard/runs/RUN_ID`. The server binds to loopback only and rejects foreign `Host` headers. While it runs, `kiln status` shows its URL.
+## How it works
 
-Prepare a run from one or more approved Markdown specs:
-
-```sh
-kiln --repo /path/to/project prepare \
-  --config kiln.json \
-  --spec docs/first.md \
-  --spec docs/second.md
+```mermaid
+flowchart LR
+    I[GitHub issues or approved specs] --> P[Plan and verify]
+    P --> W[Parallel work in isolated worktrees]
+    W --> R[Independent review]
+    R --> C[Correction when needed]
+    C --> G[Integration]
+    G --> V[Global validation]
+    V --> PR[Pull request]
 ```
 
-Preparation validates the inputs and records an immutable snapshot of the specs. It does not start coding agents yet.
+Planning freezes requirements and verifies ticket coverage and dependencies. Independent tickets run concurrently; blocked tickets wait for prerequisites. Review checks the implementation commit against project standards and requirements. Required findings can start a bounded correction cycle. Kiln validates the combined integration commit before publishing it. See [implementation tickets](docs/implementation-tickets.md), [integration](docs/integration.md), [validation](docs/validation.md), and [publication](docs/publication.md) for details.
 
-Inspect recorded runs from the CLI:
+## Safety and recovery
 
-```sh
-kiln --repo /path/to/project inspect
-```
+On Linux, `bubblewrap` isolates agent and project processes. `kiln.json` declares permitted commands, network policy, runtime mounts, and scoped secrets. Isolation failures do not silently fall back to unrestricted execution. The [configuration guide](docs/configuration.md) describes the security model and its limits.
 
-Or open the local read-only monitoring interface:
-
-```sh
-kiln --repo /path/to/project serve --bind 127.0.0.1:3000
-```
-
-See [configuration and CLI usage](docs/configuration.md) for the complete workflow.
-
-## One-command issue run
-
-For one clear, independent GitHub issue, `start-issue` snapshots the repository's open issues, derives run-scoped requirements from the selected issue and repository, then runs planning, implementation, independent review, configured validation, and draft pull request publication:
-
-```sh
-kiln --repo /path/to/project start-issue \
-  --config kiln.json \
-  --github-repo owner/name \
-  --issue 123 \
-  --codex /path/to/codex
-```
-
-The issue snapshot and generated requirements are recorded with the run. Issue bodies, labels, assignees, comments, and state are read-only. Issues with dependencies or a rejected/unverifiable plan stop before implementation; successful output remains a draft pull request. See [one-issue backlog runs](docs/backlog.md) for deterministic adapter options and the recorded skill version.
-
-## Planning from specs
-
-In the approved-spec workflow, version-controlled Markdown files remain the source of truth for a run. The `start-issue` workflow is an explicit exception: it derives run-scoped requirements from one read-only issue and repository context without requiring an approved spec.
-
-Each approved spec contains explicit acceptance criteria. Kiln freezes the supplied files, derives requirement identities from those criteria, and gives the planning agent that fixed input.
-
-A separate verification context reviews the generated tickets. Kiln also performs structural checks itself, including requirement coverage, unknown dependencies, dependency cycles, duplicate ticket identities, and missing acceptance criteria.
-
-An agent saying a plan looks good is not enough to make it executable.
-
-## Parallel implementation
-
-Once a plan has been verified, tickets whose prerequisites are satisfied can run independently.
-
-Kiln creates an integration branch for the run and a separate branch and worktree for each implementation session. Dirty files in the developer checkout are not copied into those sessions.
-
-Dependent work waits until its prerequisites have actually been integrated. A blocked ticket does not stop unrelated parts of the plan.
-
-Concurrency and correction cycles can be limited so a run does not expand indefinitely.
-
-## Review and correction
-
-Implementation and review use separate agent contexts.
-
-Kiln currently checks two review axes:
-
-- **Standards** checks the repository's own engineering rules and conventions.
-- **Spec** checks the implementation against the approved requirements and acceptance criteria.
-
-Reviews use the actual implementation commit and diff. Build and test commands are run independently as part of the evidence.
-
-If required findings remain, Kiln can start a correction session and send the new commit through review again.
-
-## Integration and validation
-
-Reviewed tickets can be integrated onto the run's integration branch.
-
-Kiln checks the combined state after integration because failures can appear only when independently developed changes meet. Global validation then evaluates the application against the configured acceptance criteria.
-
-Only the exact commit covered by the latest successful validation report can be published.
-
-Kiln distinguishes between `verified`, `failed`, and `unable-to-verify`. Missing evidence is not treated as success.
-
-## Recovery and replanning
-
-Kiln stores run state under `.kiln/` in the target repository.
-
-That state includes frozen inputs, tickets, sessions, reviews, corrections, integrations, validation reports, decisions, and publication progress.
-
-After an interruption, Kiln reconciles recorded state with observable Git and process state instead of blindly repeating completed work.
-
-Specs remain frozen during a run. If an approved spec changes, replanning is explicit and Kiln records which existing work and validation evidence are affected.
-
-## Isolation
-
-Coding agents and project commands do not run directly against the developer's normal checkout.
-
-On Linux, Kiln uses `bubblewrap` to isolate processes and filesystems. Each project explicitly configures which commands may run, whether network access is available, and which secrets may be exposed to a given role.
-
-The execution environment does not silently fall back to unrestricted host execution when isolation is unavailable.
-
-See [configuration and CLI usage](docs/configuration.md) for the full security model and its limitations.
+Run state, reviews, corrections, and validation evidence are stored under `.kiln/` in the target repository. After interruption, Kiln reconciles that record with Git and process state before continuing. Deterministic fixtures support testing without a provider account; they do not measure model quality.
 
 ## Coding agents
 
-Kiln currently supports Codex and Claude Code as real coding-agent providers.
-
-Planning, implementation, and review use fresh agent contexts rather than carrying a single conversation through the whole run. Kiln remains responsible for Git operations, state transitions, validation, and deciding what happens next.
-
-The provider interface keeps agent-specific integration separate from orchestration, so additional coding agents can be added without handing control of the workflow to the provider.
-
-## GitHub integration
-
-The approved-spec import workflow can use GitHub issues as implementation tickets while keeping repository specs authoritative. The `start-issue` workflow instead derives a run-scoped spec from one issue and repository context.
-
-It can synchronize progress back to those issues without rewriting their titles or descriptions.
-
-Once a run has a verified integration commit, `kiln publish` can push the integration branch and open a pull request containing delivered behavior, spec references, validation evidence, and known limitations.
-
-Merging and deployment are separate project policies. Opening a pull request does not implicitly authorize either one.
+Kiln supports Codex and Claude Code. Planning, implementation, and review use separate agent contexts. Kiln retains control of Git operations, run state, validation, and delivery.
 
 ## Documentation
 
 - [Configuration and CLI usage](docs/configuration.md)
 - [Product specification](docs/spec.md)
+- [Backlog runs](docs/backlog.md)
 - [Implementation tickets](docs/implementation-tickets.md)
 - [Integration](docs/integration.md)
 - [Validation](docs/validation.md)
 - [Publication](docs/publication.md)
+- [Pilot readiness](docs/pilot-readiness.md)
+- [Pilot import](docs/pilot-import.md)
 - [Codex smoke testing](docs/codex-smoke.md)
 - [Claude Code smoke testing](docs/claude-smoke.md)
+- [Demo fixtures](demo/README.md)
 
 ## Project status
 
-Kiln is under active development.
-
-The Rust engine currently covers the core workflow from frozen specs through planning, isolated implementation, independent review, corrections, dependency-aware integration, validation, recovery, and GitHub publication.
-
-Deterministic adapters are used to test the workflow without depending on a live provider account. Real Codex and Claude Code integrations are supported separately so deterministic engine tests are not presented as evidence of model quality.
+Kiln is under active development. The project is evolving its CLI and dashboard while measuring the workflow in a competitive pilot: [CLI simplification](https://github.com/VictorGTheCoder/Kiln/issues/50), [CLI and web convergence](https://github.com/VictorGTheCoder/Kiln/issues/74), and [competitive pilot](https://github.com/VictorGTheCoder/Kiln/issues/35).
